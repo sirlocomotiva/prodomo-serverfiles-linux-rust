@@ -530,6 +530,18 @@ impl GameState {
     /// wars (`SetSiegeWarEvent`, `SetKingdomWarEvent`, `:1531-1680`); every
     /// other arm waits for its system.
     pub(super) fn start_game_event(&mut self, index: i32, value0: i32, value1: i32) {
+        self.start_game_event_timed(index, value0, value1, 7 * 24 * 60 * 60);
+    }
+
+    /// Same as [`Self::start_game_event`], with the row's `end - start` duration in seconds for
+    /// `SetExperienceEvent` and `SetItemDropEvent` (`G/event_manager.cpp:940-983`).
+    pub(super) fn start_game_event_timed(
+        &mut self,
+        index: i32,
+        value0: i32,
+        value1: i32,
+        duration_secs: i32,
+    ) {
         let _ = value1;
         let Some(flag) = event_flag_name(index) else {
             return;
@@ -582,12 +594,15 @@ impl GameState {
             self.fire_event_edge(true);
             return;
         }
+        if (index == 1 || index == 2) && (value0 == 0 || duration_secs <= 0) {
+            return;
+        }
         self.set_event_flag(flag, 1);
         if index == 1 {
-            self.grant_event_priv(4, value0);
+            self.grant_event_priv(4, value0, duration_secs);
             self.broadcast_notice_text(b"Experience Boost Event has started. Enjoy the leveling.");
         } else if index == 2 {
-            self.grant_event_priv(1, value0);
+            self.grant_event_priv(1, value0, duration_secs);
             self.broadcast_notice_text(b"Item-Drop Boost Event has started. Enjoy the grinding.");
         } else if index == 7 {
             self.broadcast_notice_text(
@@ -691,11 +706,12 @@ impl GameState {
     /// (`G/priv_manager.cpp:47-66`): the event's empire priv, clamped to 0-200, for
     /// the call's seven-day maximum. A zero value grants nothing after the flag, as
     /// `SetExperienceEvent` refuses it.
-    fn grant_event_priv(&mut self, priv_type: u8, value: i32) {
-        if value == 0 {
+    fn grant_event_priv(&mut self, priv_type: u8, value: i32, duration_secs: i32) {
+        if value == 0 || duration_secs <= 0 {
             return;
         }
-        let pulses = 7 * 24 * 60 * 60 * u64::from(super::PASSES_PER_SEC);
+        let secs = u64::try_from(duration_secs.min(7 * 24 * 60 * 60)).unwrap_or(0);
+        let pulses = secs.saturating_mul(u64::from(super::PASSES_PER_SEC));
         self.give_empire_priv(
             0,
             priv_type,

@@ -347,6 +347,19 @@ impl GameState {
             }
             return false;
         }
+        // Cooked fish (`G/char_item.cpp:3551-3564`, vnums 27863..=27883): refused on every
+        // arena map unconditionally (even when `arena_potion_limit == 0`), and in a gated
+        // consent duel when not on `IsAllowedPotionOnPVP`.
+        if (27_863..=27_883).contains(&vnum)
+            && (arena_map
+                || (self.potions_barred_in_duel(vid)
+                    && !super::auto_potion::PVP_ALLOWED.contains(&vnum)))
+        {
+            if let Some(mover) = self.own_mover(vid) {
+                self.tell(vid, mover, CHAT_TYPE_INFO, b"[LS;1205]", &[]);
+            }
+            return false;
+        }
         if item_type == ITEM_USE
             && matches!(
                 sub_type,
@@ -2527,5 +2540,17 @@ mod tests {
             panic!("by-product 30270 created: {:?}", missed.changes);
         };
         assert_eq!(row.vnum, 30_270);
+    }
+
+    /// Cooked fish (`27863..=27883`, `G/char_item.cpp:3551-3564`) is refused with `[LS;1205]`
+    /// on an arena map even when `arena_potion_limit` is 0.
+    #[test]
+    fn a_cooked_fish_refuses_on_an_arena_map_with_no_potion_limit() {
+        let mut world = arena_item_world(27_863, ITEM_USE, gamedata::item_kind::USE_POTION, [0; 6]);
+        let vid = Vid::new(1);
+        let cell = ItemPos::new(EWindows::Inventory as u8, 0);
+        assert!(world.arena_item_use_allowed(vid, cell));
+        mark_arena(&mut world);
+        assert!(!world.arena_item_use_allowed(vid, cell));
     }
 }

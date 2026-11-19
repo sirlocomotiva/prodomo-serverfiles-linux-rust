@@ -1365,8 +1365,10 @@ impl GameState {
         };
         let killer_level = points.level();
         let mut hits: Vec<Item> = Vec::new();
-        // The drop-event helpers (`:1393-1431`, `:1542-1559`): both `alive` flags are false
-        // (set only by the unported `dropevent` GM command), so both return with no draw.
+        // `__DropEvent_CharStone_DropItem` (`G/item_manager.cpp:1393-1431`) and
+        // `__DropEvent_RefineBox_DropItem` (`:1542-1559`).
+        hits.extend(self.roll_char_stone_drop(i32::from(mob_level), i32::from(killer_level)));
+        hits.extend(self.roll_refine_box_drop(rank, i32::from(killer_level)));
         // `xmas_sock`, `moon_drop`, `hexegonal_drop`: flag first, draw inside. The rank
         // table has no BOSS/KING row: both divisors are 0 and the arms are dead there.
         for (flag, vnum) in [
@@ -1453,6 +1455,61 @@ impl GameState {
         }
         hits.extend(self.create_quest_drop_tail(rank, mob_level, killer_level, delta, range));
         hits
+    }
+
+    /// `__DropEvent_CharStone_DropItem` (`G/item_manager.cpp:1376-1431`): rolls out of 10,000
+    /// against the killer-level band, enforces `|victim - killer| < level_range`, and draws from
+    /// the 16 spirit stones (fixing legacy's OOB `number(0, _countof(Stones))` to `0..15`,
+    /// ADR-0008).
+    fn roll_char_stone_drop(&mut self, mob_level: i32, killer_level: i32) -> Option<Item> {
+        const STONES: [u32; 16] = [
+            30_210, 30_211, 30_212, 30_213, 30_214, 30_215, 30_216, 30_217, 30_218, 30_219, 30_258,
+            30_259, 30_260, 30_261, 30_262, 30_263,
+        ];
+        let cfg = self.drop_events.char_stone;
+        if !cfg.alive {
+            return None;
+        }
+        let pct = match (killer_level - 1) / 10 {
+            0 => cfg.percent_lv01_10,
+            1 | 2 => cfg.percent_lv11_30,
+            _ => cfg.percent_lv31_mx,
+        };
+        if number(&mut self.dice, 1, 10_000) > pct {
+            return None;
+        }
+        let diff = mob_level - killer_level;
+        if diff >= cfg.level_range || diff <= -cfg.level_range {
+            return None;
+        }
+        let idx = usize::try_from(number(&mut self.dice, 0, 15)).unwrap_or(0);
+        self.make_drop_hit(STONES[idx], 1, -1)
+    }
+
+    /// `__DropEvent_RefineBox_DropItem` (`G/item_manager.cpp:1495-1559`): monsters of rank
+    /// `MOB_RANK_KNIGHT` (2) and above roll `1-in-percent` for the killer-level box tier.
+    fn roll_refine_box_drop(&mut self, rank: u8, killer_level: i32) -> Option<Item> {
+        const LOWER: [u32; 3] = [50_197, 50_198, 50_199];
+        const MIDDER: [u32; 4] = [50_203, 50_204, 50_205, 50_206];
+        const HIGHER: [u32; 5] = [50_207, 50_208, 50_209, 50_210, 50_211];
+        const MOB_RANK_KNIGHT: u8 = 2;
+        let cfg = self.drop_events.refine_box;
+        if !cfg.alive || rank < MOB_RANK_KNIGHT {
+            return None;
+        }
+        let (pct, pool): (i32, &[u32]) = if killer_level <= cfg.low {
+            (cfg.percent_low, &LOWER)
+        } else if killer_level <= cfg.mid {
+            (cfg.percent_mid, &MIDDER)
+        } else {
+            (cfg.percent_high, &HIGHER)
+        };
+        if number(&mut self.dice, 1, pct.max(1)) != 1 {
+            return None;
+        }
+        let last = i32::try_from(pool.len()).unwrap_or(1) - 1;
+        let idx = usize::try_from(number(&mut self.dice, 0, last)).unwrap_or(0);
+        self.make_drop_hit(pool[idx], 1, -1)
     }
 
     /// `CreateQuestDropItem`'s tail (`G/item_manager.cpp:1833-1910`): `kids_day_drop`,

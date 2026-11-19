@@ -91,6 +91,21 @@ pub async fn load_all(store: &Store) -> Result<Vec<StoredEvent>, AccountError> {
     Ok(events)
 }
 
+/// Mark the scheduled event row `id` completed (`UPDATE event SET completed = TRUE WHERE id = $1`,
+/// matching `CClientManager::UpdateEventStatus`, `D/ClientManager.cpp:5514-5527`).
+///
+/// # Errors
+///
+/// [`AccountError::Database`] when the store cannot answer.
+pub async fn mark_completed(store: &Store, id: u32) -> Result<(), AccountError> {
+    let id = i32::try_from(id).map_err(|_| AccountError::Corrupt(format!("event id {id}")))?;
+    sqlx::query("UPDATE event SET completed = TRUE WHERE id = $1")
+        .bind(id)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::event_type;

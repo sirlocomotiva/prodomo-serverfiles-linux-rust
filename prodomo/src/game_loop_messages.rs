@@ -246,6 +246,8 @@ pub enum GameCommand {
     InstallEvents {
         /// Every stored event row, in id order.
         events: Vec<db::events::StoredEvent>,
+        /// Channel where completed event IDs are reported for DB persistence.
+        completed_tx: Option<tokio::sync::mpsc::UnboundedSender<u32>>,
         /// Where the game thread reports whether it installed.
         reply: oneshot::Sender<bool>,
     },
@@ -3893,11 +3895,16 @@ impl GameLoopController {
     pub async fn install_events(
         &self,
         events: Vec<db::events::StoredEvent>,
+        completed_tx: Option<tokio::sync::mpsc::UnboundedSender<u32>>,
     ) -> Result<Result<(), InstallError>, InstallError> {
         let (reply, answer) = oneshot::channel();
-        self.send_command(GameCommand::InstallEvents { events, reply })
-            .await
-            .map_err(|_| InstallError::NotSent)?;
+        self.send_command(GameCommand::InstallEvents {
+            events,
+            completed_tx,
+            reply,
+        })
+        .await
+        .map_err(|_| InstallError::NotSent)?;
         if answer.await.map_err(|_| InstallError::NoAnswer)? {
             Ok(Ok(()))
         } else {

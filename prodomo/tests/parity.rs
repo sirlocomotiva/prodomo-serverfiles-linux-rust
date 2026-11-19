@@ -41800,10 +41800,10 @@ fn the_event_board_lists_its_month_and_the_earlier_open_ones() {
     sql(
         &database,
         "INSERT INTO event (id, type, start_at, end_at, value0, value1, completed) VALUES \
-         (1, 'EVENT_TYPE_OX', to_timestamp(1772323200), to_timestamp(1775001600), 5, 6, false), \
-         (2, 'EVENT_TYPE_EXPERIENCE', to_timestamp(1769904000), to_timestamp(1772323199), 100, \
+         (1, 'EVENT_TYPE_OX', to_timestamp(2056320000), to_timestamp(2058998400), 5, 6, false), \
+         (2, 'EVENT_TYPE_EXPERIENCE', to_timestamp(2053900800), to_timestamp(2056319999), 100, \
          0, true), \
-         (3, 'EVENT_TYPE_FISHING', to_timestamp(1769904000), to_timestamp(1772323199), 0, 0, \
+         (3, 'EVENT_TYPE_FISHING', to_timestamp(2053900800), to_timestamp(2056319999), 0, 0, \
          false)",
     );
     drop(server);
@@ -41819,8 +41819,8 @@ fn the_event_board_lists_its_month_and_the_earlier_open_ones() {
         protocol::gc_event::EventData {
             id: 1,
             event_type: 11,
-            start: 1_772_323_200,
-            end: 1_775_001_600,
+            start: 2_056_320_000,
+            end: 2_058_998_400,
             value0: 5,
             value1: 6,
             completed: false,
@@ -41828,8 +41828,8 @@ fn the_event_board_lists_its_month_and_the_earlier_open_ones() {
         protocol::gc_event::EventData {
             id: 3,
             event_type: 9,
-            start: 1_769_904_000,
-            end: 1_772_323_199,
+            start: 2_053_900_800,
+            end: 2_056_319_999,
             value0: 0,
             value1: 0,
             completed: false,
@@ -41843,8 +41843,8 @@ fn the_event_board_lists_its_month_and_the_earlier_open_ones() {
         protocol::gc_event::EventData {
             id: 2,
             event_type: 1,
-            start: 1_769_904_000,
-            end: 1_772_323_199,
+            start: 2_053_900_800,
+            end: 2_056_319_999,
             value0: 100,
             value1: 0,
             completed: true,
@@ -41852,8 +41852,8 @@ fn the_event_board_lists_its_month_and_the_earlier_open_ones() {
         protocol::gc_event::EventData {
             id: 3,
             event_type: 9,
-            start: 1_769_904_000,
-            end: 1_772_323_199,
+            start: 2_053_900_800,
+            end: 2_056_319_999,
             value0: 0,
             value1: 0,
             completed: false,
@@ -53376,12 +53376,13 @@ fn a_gm_lists_starts_and_ends_an_arena_duel() {
     check_arena_return(&database);
 }
 
-/// The potions of [`the_arena_refuses_each_potion_by_its_list_and_the_flags`] at cells 1 to 13:
+/// The potions of [`the_arena_refuses_each_potion_by_its_list_and_the_flags`] at cells 1 to 14:
 /// the six listed `USE_POTION`, an unlisted one, the four listed `USE_POTION_NODELAY`, an
-/// unlisted one, and a 508xx one.
-const ARENA_POTIONS: [u32; 13] = [
-    27_001, 27_002, 27_003, 27_004, 27_005, 27_006, 27_051, 70_020, 71_018, 71_019, 71_020, 27_875,
-    50_804,
+/// unlisted one (`70_056`), a cooked fish (`27_875`, refused before the potion switch with
+/// `[LS;1205]`, `G/char_item.cpp:3551-3557`), and a 508xx one.
+const ARENA_POTIONS: [u32; 14] = [
+    27_001, 27_002, 27_003, 27_004, 27_005, 27_006, 27_051, 70_020, 71_018, 71_019, 71_020, 70_056,
+    27_875, 50_804,
 ];
 
 /// Two same-empire GMs, Alpha holding [`ARENA_POTIONS`], and the arena map 112 on the Shared
@@ -53479,10 +53480,12 @@ fn the_arena_refuses_each_potion_by_its_list_and_the_flags() {
     ] {
         hears(&mut alice, &mut yankee, vnum, b"[LS;122]");
     }
-    for vnum in [27_051, 27_875] {
+    for vnum in [27_051, 70_056] {
         hears(&mut alice, &mut yankee, vnum, b"[LS;403]");
     }
-    hears(&mut alice, &mut yankee, 50_804, b"[LS;1205]");
+    for vnum in [27_875, 50_804] {
+        hears(&mut alice, &mut yankee, vnum, b"[LS;1205]");
+    }
     // When: `arena_potion_limit` is set, the listed ones are refused before their list.
     alice.send_record(&client_chat(
         CHAT_TALKING,
@@ -53515,7 +53518,7 @@ fn the_arena_refuses_each_potion_by_its_list_and_the_flags() {
     // Then: every potion is still there.
     check(
         &database,
-        "(SELECT count(*) = 13 AND bool_and(count = 1) FROM item WHERE id BETWEEN 40 AND 52)",
+        "(SELECT count(*) = 14 AND bool_and(count = 1) FROM item WHERE id BETWEEN 40 AND 53)",
     );
     end_named_arena_pair(&server, &mut alice, alpha.id, &mut yankee, yankee_listed.id);
     close_arena_pair(&mut server, alice, yankee);
@@ -70104,6 +70107,189 @@ fn a_full_dragon_soul_deck_scales_stone_bonuses_by_grade_and_clears_on_pull_out(
         Some(0),
         "deactivating deck returns POINT_ATTBONUS_HUMAN (43) to 0: {off_pts:?}"
     );
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}
+
+/// `sys.event.manager`: a scheduled row in `event` starts on the 1-second `CEventManager::Process`
+/// tick, broadcasts its start notice, ends on schedule with its end notice, and persists
+/// `completed = TRUE` in PostgreSQL.
+#[test]
+fn a_scheduled_calendar_event_starts_ends_and_marks_completed() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let boot = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&boot, "alice");
+    add_characters(&database);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_secs();
+    let start = now + 7;
+    let end = now + 9;
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO event (id, type, start_at, end_at, value0, value1, completed) \
+             VALUES (77, 'EVENT_TYPE_MOONLIGHT', to_timestamp({start}), to_timestamp({end}), 0, 0, false)"
+        ),
+    );
+    drop(boot);
+
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(16);
+    let mut saw_start = false;
+    let mut saw_end = false;
+    while !(saw_start && saw_end) {
+        let Some(rec) = alpha.read_game_until(deadline) else {
+            break;
+        };
+        if rec.first() == Some(&GC_CHAT) {
+            if rec
+                .windows(29)
+                .any(|w| w == b"Moonlight Chest Event has sta")
+            {
+                saw_start = true;
+            }
+            if rec
+                .windows(29)
+                .any(|w| w == b"Moonlight Chest Event has end")
+            {
+                saw_end = true;
+            }
+        }
+    }
+    assert!(
+        saw_end,
+        "scheduled event ended on wire (saw_start={saw_start})"
+    );
+    // Wait up to 5 s for the background mark_completed write to commit.
+    let db_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut done = false;
+    while std::time::Instant::now() < db_deadline {
+        let rows = rows_of(
+            &database,
+            "SELECT id, completed::int FROM event WHERE id = 77",
+        );
+        if rows == vec![(77, 1)] {
+            done = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(done, "event row 77 marked completed = true in PostgreSQL");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}
+
+/// `sys.event.xmas` & `sys.event.arena`: with `test_server = false`, `/geteventflag` appends
+/// `prob 800`/`500`/`1000` to `valentine_drop`, `newyear_wonso` and `newyear_fire`; setting
+/// `drop_char_stone` / `refine_box_drop` lands cleanly; and cooked fish `27863` refuses with
+/// `[LS;1205]` on arena map 112 even when `arena_potion_limit` is 0.
+#[test]
+fn event_flags_show_prob_suffixes_and_cooked_fish_refuses_in_arena() {
+    const GRILLED_CARP: u32 = 27_863;
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut channels = default_channels();
+    channels
+        .iter_mut()
+        .find(|channel| channel.number == 99)
+        .unwrap()
+        .maps
+        .push(112);
+    let mut server =
+        Server::start_configured(binary(), database.url(), &channels, "test_server = false");
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) \
+         SELECT id, 'Alpha', 'IMPLEMENTOR' FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) \
+             SELECT 81, id, 1, 0, 1, {GRILLED_CARP} FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    // Place Alpha on arena map 112 (Shared Channel 99).
+    sql(
+        &database,
+        "UPDATE player SET x = 862200, y = 15500 WHERE name = 'Alpha'",
+    );
+    let (mut alice, _alpha, _qs, _items) =
+        load_with_quickslots_on(&server, 99, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut alice);
+    let drain = |client: &mut Keyed, ms: u64| {
+        let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+        let mut out = Vec::new();
+        while let Some(rec) = client.read_game_until(deadline) {
+            out.push(rec);
+        }
+        out
+    };
+    let _ = drain(&mut alice, 600);
+    std::thread::sleep(Duration::from_millis(1200));
+    for cmd in [
+        b"/eventflag valentine_drop 1".as_slice(),
+        b"/eventflag newyear_wonso 1",
+        b"/eventflag newyear_fire 1",
+        b"/eventflag drop_char_stone 1",
+        b"/eventflag refine_box_drop 1",
+    ] {
+        alice.send_record(&client_chat(CHAT_TALKING, cmd));
+        let _ = drain(&mut alice, 300);
+    }
+    alice.send_record(&client_chat(CHAT_TALKING, b"/geteventflag"));
+    let flags = drain(&mut alice, 600);
+    let has_text = |recs: &[Vec<u8>], needle: &[u8]| {
+        recs.iter()
+            .any(|r| r.first() == Some(&GC_CHAT) && r.windows(needle.len()).any(|w| w == needle))
+    };
+    assert!(
+        has_text(&flags, b"valentine_drop 1 prob 800"),
+        "valentine prob: {flags:?}"
+    );
+    assert!(
+        has_text(&flags, b"newyear_wonso 1 prob 500"),
+        "newyear_wonso prob: {flags:?}"
+    );
+    assert!(
+        has_text(&flags, b"newyear_fire 1 prob 1000"),
+        "newyear_fire prob: {flags:?}"
+    );
+    // Cooked fish 27863 refuses on arena map 112 with [LS;1205] (translated) and is not consumed.
+    alice.send_record(&client_item_use(0));
+    let fish_recs = drain(&mut alice, 600);
+    assert!(
+        fish_recs.iter().any(|r| r.first() == Some(&GC_CHAT)),
+        "cooked fish on arena map sends refusal chat: {fish_recs:?}"
+    );
+    let stored = rows_of(
+        &database,
+        "SELECT vnum, count FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha')",
+    );
+    assert_eq!(stored, vec![(i64::from(GRILLED_CARP), 1)]);
     drop(alice);
     server.wait_for("Character disconnected; wrote the row");
     drop(server);

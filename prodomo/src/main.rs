@@ -11725,8 +11725,23 @@ async fn install_events(
         .await
         .map_err(|error| format!("Stored event calendar is unusable: {error}"))?;
     info!(events = events.len(), "Stored event calendar loaded");
-    match game_loop.controller().install_events(events).await? {
-        Ok(()) => Ok(()),
+    let (completed_tx, mut completed_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+    match game_loop
+        .controller()
+        .install_events(events, Some(completed_tx))
+        .await?
+    {
+        Ok(()) => {
+            let store_done = store.clone();
+            tokio::spawn(async move {
+                while let Some(id) = completed_rx.recv().await {
+                    if let Err(error) = db::events::mark_completed(&store_done, id).await {
+                        warn!(id, %error, "marking scheduled event completed failed");
+                    }
+                }
+            });
+            Ok(())
+        }
         Err(error) => Err(format!("The world refused the event calendar: {error}").into()),
     }
 }

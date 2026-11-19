@@ -58125,3 +58125,51 @@ and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; 
 No test failed on the first run.
 Parity: 1,754 `ported`, 58 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 585
 scenarios. No ADR changed.
+
+## 731. Event systems closure: `CEventManager::Process`, `DropEvent` flags, and arena cooked-fish gate
+
+Closes all five remaining event rows in Package B6 (`sys.event.manager`, `sys.event.arena`,
+`sys.event.xmas`, `sys.event.castle_monarch`, `sys.event.threeway_war`), bringing open rows from
+58 to 53:
+
+- `sys.event.manager`: ported `CEventManager::Process` (`G/event_manager.cpp:342-456`) in
+  `prodomo/src/game_state/event_calendar.rs` (`EventSchedule` start/end queues stepped once per
+  second on the game thread): broadcasts `"%s will be starting in 1 hour."` (`:367-375`) at
+  `start - now == 3600`, starts events when `now >= start` (`SetEventState(true)` across all 14
+  `EEventTypes`, fixing EXP/drop rate handling in `quest_quiet.rs`), ends events when
+  `now >= end`, and marks `completed = TRUE` in PostgreSQL via `db::events::mark_completed`
+  (`db/src/events.rs`, matching `CClientManager::UpdateEventStatus`, `D/ClientManager.cpp:5514-5527`)
+  through an unbounded channel wired in `prodomo/src/main.rs`. Updated `the_event_board_lists_its_month_and_the_earlier_open_ones`
+  fixtures to 2035 timestamps so pre-dated open events do not auto-complete during boot. Verified by
+  unit test `the_schedule_announces_starts_ends_and_marks_completed` and scenario
+  `a_scheduled_calendar_event_starts_ends_and_marks_completed` (8× in parallel).
+- `sys.event.arena`: added the cooked-fish arena refusal (`27863..=27883` -> `[LS;1205]` on arena
+  maps before the potion switch, `G/char_item.cpp:3551-3557`) in
+  `prodomo/src/game_state/use_to_item.rs::arena_item_use_allowed`; verified by unit test
+  `a_cooked_fish_refuses_on_an_arena_map_with_no_potion_limit` and scenario
+  `event_flags_show_prob_suffixes_and_cooked_fish_refuses_in_arena` (8× in parallel). Updated
+  `the_arena_refuses_each_potion_by_its_list_and_the_flags` where `27_875` now hits `[LS;1205]`
+  before `USE_POTION_NODELAY`, adding unlisted `70_056` for `[LS;403]`.
+- `sys.event.xmas`: ported `SendEventFlagList`'s `prob` suffixes (`valentine_drop` 800,
+  `newyear_wonso` 500, `newyear_fire` 1000 when `!test_server && value == 1`,
+  `G/questmanager.cpp:1311-1324`) in `prodomo/src/game_state/event_flag.rs`, and the
+  `__DropEvent_CharStone` and `__DropEvent_RefineBox` flag receivers and kill-drop rolls
+  (`G/item_manager.cpp:1358-1595`) in `prodomo/src/game_state/reward.rs` (fixing legacy's OOB
+  `number(0, _countof(Stones))` to `0..15`, ADR-0008). Verified by unit test
+  `send_event_flag_list_appends_prob_suffixes_outside_test_server` and scenario
+  `event_flags_show_prob_suffixes_and_cooked_fish_refuses_in_arena`.
+- `sys.event.threeway_war` and `sys.event.castle_monarch`: closed as `ported` (`threeway_war` has
+  none of maps 181–183 in the 59-map index and its war monarch powers are only referenced by unused
+  quest arms; `castle_monarch` has all live monarch treasuries and commands ported and verified by
+  `a_monarchs_blessing_heals_her_empire_and_charges_the_treasury`).
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,738
+passed, 0 failed in 46 targets; with it 5,738 passed, 0 failed in 46 targets (479 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+First run failed `the_arena_refuses_each_potion_by_its_list_and_the_flags` (cooked fish `27_875`
+now hits `[LS;1205]` at `G/char_item.cpp:3551-3557` before `[LS;403]`); updated that scenario to
+assert `[LS;1205]` for `27_875` and `[LS;403]` for unlisted `70_056`; second full run passed with
+0 failures.
+Parity: 1,759 `ported`, 53 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 587
+scenarios. No ADR changed.

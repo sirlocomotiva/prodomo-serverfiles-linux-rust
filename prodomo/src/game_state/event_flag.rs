@@ -123,6 +123,100 @@ impl Default for MobRates {
     }
 }
 
+/// `gs_dropEvent_charStone` (`G/item_manager.cpp:1358-1374`): live drop-rate settings for
+/// the character-stone drop event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CharStoneDrop {
+    /// `alive`: whether the event drops stones.
+    pub(super) alive: bool,
+    /// `percent_lv01_10` (out of 10,000; default 100).
+    pub(super) percent_lv01_10: i32,
+    /// `percent_lv11_30` (out of 10,000; default 200).
+    pub(super) percent_lv11_30: i32,
+    /// `percent_lv31_MX` (out of 10,000; default 300).
+    pub(super) percent_lv31_mx: i32,
+    /// `level_range` (default 10; `|victim - killer| < level_range`).
+    pub(super) level_range: i32,
+}
+
+impl Default for CharStoneDrop {
+    fn default() -> Self {
+        Self {
+            alive: false,
+            percent_lv01_10: 100,
+            percent_lv11_30: 200,
+            percent_lv31_mx: 300,
+            level_range: 10,
+        }
+    }
+}
+
+/// `gs_dropEvent_refineBox` (`G/item_manager.cpp:1473-1493`): live drop-rate settings for
+/// the refine-box drop event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RefineBoxDrop {
+    /// `alive`: whether the event drops refine boxes.
+    pub(super) alive: bool,
+    /// `low` level cutoff (default 20).
+    pub(super) low: i32,
+    /// `mid` level cutoff (default 45).
+    pub(super) mid: i32,
+    /// `percent_low` (1-in-N draw; default 100, minimum 100).
+    pub(super) percent_low: i32,
+    /// `percent_mid` (1-in-N draw; default 100, minimum 100).
+    pub(super) percent_mid: i32,
+    /// `percent_high` (1-in-N draw; default 100, minimum 100).
+    pub(super) percent_high: i32,
+}
+
+impl Default for RefineBoxDrop {
+    fn default() -> Self {
+        Self {
+            alive: false,
+            low: 20,
+            mid: 45,
+            percent_low: 100,
+            percent_mid: 100,
+            percent_high: 100,
+        }
+    }
+}
+
+/// Both drop-event structs driven by `CQuestManager::SetEventFlag`
+/// (`G/questmanager.cpp:1590-1597`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct DropEventConfig {
+    /// `gs_dropEvent_charStone`.
+    pub(super) char_stone: CharStoneDrop,
+    /// `gs_dropEvent_refineBox`.
+    pub(super) refine_box: RefineBoxDrop,
+}
+
+impl DropEventConfig {
+    /// `DropEvent_CharStone_SetValue` (`G/item_manager.cpp:1433-1463`).
+    pub(super) fn set_char_stone(&mut self, name: &[u8], value: i32) {
+        match name {
+            b"drop_char_stone" => self.char_stone.alive = value != 0,
+            b"drop_char_stone.percent_lv01_10" => self.char_stone.percent_lv01_10 = value,
+            b"drop_char_stone.percent_lv11_30" => self.char_stone.percent_lv11_30 = value,
+            b"drop_char_stone.percent_lv31_MX" => self.char_stone.percent_lv31_mx = value,
+            b"drop_char_stone.level_range" => self.char_stone.level_range = value,
+            _ => {}
+        }
+    }
+
+    /// `DropEvent_RefineBox_SetValue` (`G/item_manager.cpp:1561-1591`).
+    pub(super) fn set_refine_box(&mut self, name: &[u8], value: i32) {
+        match name {
+            b"refine_box_drop" => self.refine_box.alive = value != 0,
+            b"refine_box_low" => self.refine_box.percent_low = value.max(100),
+            b"refine_box_mid" => self.refine_box.percent_mid = value.max(100),
+            b"refine_box_high" => self.refine_box.percent_high = value.max(100),
+            _ => {}
+        }
+    }
+}
+
 /// The `mob_*` names `do_event_flag` clamps to 0..1000 (`G/cmd_gm.cpp:2276-2288`).
 const CLAMPED_NAMES: [&[u8]; 9] = [
     b"mob_item",
@@ -263,6 +357,12 @@ impl GameState {
             // not change, as the DB peer forwards every set before the compare
             // (`D/ClientManagerEventFlag.cpp:31-63`).
             b"world_boss_event" => self.world_boss_enable(value != 0),
+            other if other.starts_with(b"drop_char_stone") => {
+                self.drop_events.set_char_stone(other, value);
+            }
+            other if other.starts_with(b"refine_box") => {
+                self.drop_events.set_refine_box(other, value);
+            }
             _ => {}
         }
     }
@@ -458,19 +558,29 @@ impl GameState {
         lines
     }
 
-    /// `ACMD(do_get_event_flag)`: one `name value` line per flag on the caller, in
-    /// name order. The `BTreeMap` walks sorted, as `std::map` does. The three `prob`
-    /// lines are dead here: they need the test server off, and it is on.
+    /// `ACMD(do_get_event_flag)` (`CQuestManager::SendEventFlagList`,
+    /// `G/questmanager.cpp:1308-1325`): one `name value` line per flag on the caller, in
+    /// name order, with the three `prob` suffixes when `!test_server` and `value == 1`.
     pub(super) fn run_get_event_flag(&self, vid: Vid, mover: Mover) {
         let Some(quests) = self.quests.as_ref() else {
             return;
         };
         for (name, value) in quests.manager().event_flags() {
+            let format: &[u8] = if !self.test_server && *value == 1 {
+                match name.as_slice() {
+                    b"valentine_drop" => b"%s %d prob 800",
+                    b"newyear_wonso" => b"%s %d prob 500",
+                    b"newyear_fire" => b"%s %d prob 1000",
+                    _ => b"%s %d",
+                }
+            } else {
+                b"%s %d"
+            };
             self.tell(
                 vid,
                 mover,
                 CHAT_TYPE_INFO,
-                b"%s %d",
+                format,
                 &[Arg::Text(name), Arg::Int(i64::from(*value))],
             );
         }
@@ -985,5 +1095,37 @@ mod tests {
             .expect("quests loaded")
             .manager()
             .event_flag(name)
+    }
+
+    /// `SendEventFlagList` (`G/questmanager.cpp:1308-1325`): when `!test_server` and `value == 1`,
+    /// the three drop flags carry their `prob` suffixes; when `test_server` is true, plain `%s %d`.
+    #[test]
+    fn get_event_flag_appends_prob_suffixes_when_not_test_server() {
+        let clock = TestClock::default();
+        let mut world = a_world(&clock);
+        let mut inbox = enter(&mut world, VID, (3200, 3200), 0);
+        world.quests = Some(quests());
+        let vid = Vid::new(VID);
+        world.set_event_flag(b"valentine_drop", 1);
+        world.set_event_flag(b"newyear_wonso", 1);
+        world.set_event_flag(b"newyear_fire", 1);
+        world.set_event_flag(b"drop_char_stone", 1);
+        world.set_event_flag(b"drop_char_stone.percent_lv01_10", 500);
+        world.set_event_flag(b"refine_box_drop", 1);
+        world.set_event_flag(b"refine_box_low", 50);
+        assert!(world.drop_events.char_stone.alive);
+        assert_eq!(world.drop_events.char_stone.percent_lv01_10, 500);
+        assert!(world.drop_events.refine_box.alive);
+        assert_eq!(world.drop_events.refine_box.percent_low, 100);
+        while inbox.try_recv().is_ok() {}
+        world.test_server = false;
+        world.run_get_event_flag(vid, mover());
+        let mut lines = Vec::new();
+        while let Ok(rec) = inbox.try_recv() {
+            lines.push(text_of(&rec));
+        }
+        assert!(lines.iter().any(|l| l == b"valentine_drop 1 prob 800"));
+        assert!(lines.iter().any(|l| l == b"newyear_wonso 1 prob 500"));
+        assert!(lines.iter().any(|l| l == b"newyear_fire 1 prob 1000"));
     }
 }

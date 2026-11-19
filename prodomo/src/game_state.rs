@@ -785,6 +785,10 @@ pub struct GameState {
     /// The event calendar (`CEventManager::m_mapEvent`) in id order, installed once the store
     /// is up; `None` until then.
     events: Option<Vec<db::events::StoredEvent>>,
+    /// Start/end schedule queues for `events` (`CEventManager::m_dequeEventStart`/`End`).
+    event_schedule: event_calendar::EventSchedule,
+    /// Live drop-event configuration (`gs_dropEvent_charStone`, `gs_dropEvent_refineBox`).
+    drop_events: event_flag::DropEventConfig,
     /// The skill clips, which stood-up NPCs copy their `SPECIALn` data from.
     mob_clips: Arc<gamedata::mob_skill_data::MobSkillClips>,
     /// The drop tables, which a monster's death will pay from.
@@ -2824,8 +2828,12 @@ impl GameState {
                 },
                 reply,
             ),
-            GameCommand::InstallEvents { events, reply } => {
-                self.answer_install_events(events, reply);
+            GameCommand::InstallEvents {
+                events,
+                completed_tx,
+                reply,
+            } => {
+                self.answer_install_events(events, completed_tx, reply);
             }
             GameCommand::InstallRank { boot, reply } => {
                 self.install_rank(boot);
@@ -6697,6 +6705,7 @@ impl PulseProcessor for GameState {
         self.run_rank_refresh(pulse);
         self.expire_empire_privs();
         self.run_premium_ticks(pulse);
+        self.run_event_calendar(pulse);
         self.run_minds(pulse);
         self.broadcast_targets();
     }
