@@ -58203,3 +58203,53 @@ and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; 
 No test failed on the first run.
 Parity: 1,760 `ported`, 52 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 588
 scenarios. No ADR changed.
+
+## 733. Package B1 (Items) closure: guild smiths, switchbot right-click, aura wear, unique groups, party/quest pickup
+
+Closes all ten remaining Package B1 rows in `docs/STATUS.md` (`cg.game.item_use`,
+`cg.game.item_use_to_item`, `cg.game.item_drop`, `cg.game.item_drop2`, `cg.game.item_pickup`,
+`sys.item.core`, `sys.item.refine`, `data.item.special_group`, `table.item_attr`, and
+`event.item.timer_based_on_wear_expire_event`), closing `timed-events.md` completely (`0 partial`).
+
+- **Guild smiths (`sys.item.refine`):** `prodomo/src/game_state/smith_refine.rs` tracks the opening
+  NPC's guild ownership (`refine_npc`), applying the +10% success bonus for guild smiths
+  (20044/20045/20046), the 10% member fee discount (`cost * 9 / 10`), the 300% foreign-empire
+  multiplier, and the 10% non-member cut deposited into the smith's guild bank (`db::guilds::set_gold`
+  through `GuildQuestStore::Gold`, `G/char.cpp:8168-8222`).
+- **Switchbot right-click (`cg.game.item_use`):** `prodomo/src/game_state/switchbot.rs::use_switchbot_item`
+  implements `G/char_item.cpp:7205-7222` — right-clicking an item in `SWITCHBOT` moves it back to
+  the base inventory when its slot is inactive and refuses silently while active.
+- **`COSTUME_AURA` wear & drain and `LIMIT_REAL_TIME` `ITEM_UNIQUE` + same-special-group refusal
+  (`cg.game.item_use`, `sys.item.core`, `data.item.special_group`):** `world/src/character/equipment.rs`
+  adds drained shield defense (`ComputeBattlePoints`, `G/char.cpp:2796-2819`) and scaled applies
+  (`ModifyPoints`, `G/item.cpp:983-1019`, skipping `APPLY_MOV_SPEED` and clamping non-zero scaled
+  values to 1); `world/src/character/equip.rs` removes `WornSystem::Aura` and allows
+  `LIMIT_REAL_TIME` `ITEM_UNIQUE` equip while enforcing `IsSameSpecialGroup` (`[LS;468]`,
+  `G/char_item.cpp:10149-10154`) against `SpecialItemGroups::unique`; `drop_item.rs` and `shop.rs`
+  no longer refuse `COSTUME_AURA` creation and stamp its base-level socket (`G/item_manager.cpp:449-454`).
+- **Party-member pickup, `ITEM_QUEST` pickup, and drop/pickup logs (`cg.game.item_pickup`,
+  `cg.game.item_drop`, `cg.game.item_drop2`):** `prodomo/src/game_state.rs::pickup_item` routes an
+  owned droppable ground item picked up by an online party mate into the owner's inventory (with
+  picker fallback when full, notifying both with `[LS;446]` / `[LS;449]` via `RelayScope::Player`,
+  `G/char_item.cpp:8089-8157`), refuses `ITEM_QUEST` pickup while a quest runs (`MoveRefused::PickedUpWhileQuesting`,
+  `G/char_item.cpp:7984-7993`), invokes `quest::Manager::pick` (`CQuestManager::PickupItem`,
+  `G/char_item.cpp:8082-8083`, `:8153-8154`), and emits `ItemLog` for `DROP`, `ITEM_SPLIT`, and `GET`.
+- **Verified B1 data/timer rows:** `data.item.special_group` (`a_moonlight_box_draws_its_group_and_tells_the_gift`,
+  `/reload`, and unique-group refusal), `table.item_attr` (`a_bonus_scroll_adds_and_a_costume_refuses`,
+  `a_fifth_bonus_scroll_and_a_rare_change_land_and_refuse_by_their_counts`,
+  `a_gm_adds_and_rerolls_the_weapons_rare_attributes`), and `event.item.timer_based_on_wear_expire_event`
+  (`an_active_stone_ticks_its_wear_timer_down_and_deactivates_at_zero`; all 100
+  `LIMIT_TIMER_BASED_ON_WEAR` items in owner `item_proto.txt` are dragon soul stones).
+- **Scenarios (all 8× parallel clean):** `switchbot_right_click_aura_equip_and_same_special_group_unique_refuse`,
+  `party_member_pickup_routes_to_owner_and_quest_pickup_blocks_while_questing`, and
+  `guild_smith_discounts_member_and_deposits_non_members_cut`.
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,745
+passed, 0 failed in 46 targets; with it 5,745 passed, 0 failed in 46 targets (480 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+First run failed `game_state::tests::a_character_whose_script_waits_uses_drops_and_picks_up_no_quest_item`
+(fixed `pickup_item` to return `Err(MoveItemRefused::Refused(MoveRefused::PickedUpWhileQuesting))`)
+and 4 Clippy lints in the new scenarios (extracted helpers); second full run passed 5,745/0.
+Parity: 1,770 `ported`, 42 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 591
+scenarios. No ADR changed.

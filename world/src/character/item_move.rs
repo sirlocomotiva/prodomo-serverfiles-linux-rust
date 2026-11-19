@@ -522,6 +522,9 @@ pub enum MoveRefused {
     /// (`G/char_item.cpp:10156-10161`). No character of this build is married
     /// (`sys.marriage` is `unused`), so the six always refuse.
     UnmarriedUnique,
+    /// `CanEquipNow`: a second unique carrying the same special group is already worn
+    /// (`G/char_item.cpp:10149-10154`, `[LS;468]`).
+    SameSpecialGroup,
     /// `CanUnequipNow`: the belt's inventory holds an item.
     BeltNotEmpty,
     /// `CanUnequipNow`: no inventory cell has room for the worn item.
@@ -668,6 +671,8 @@ impl MoveRefused {
             Self::RingTwice => Some("You cannot equip this item twice"),
             // `char_item.cpp:10159`.
             Self::UnmarriedUnique => Some("[LS;467]"),
+            // `char_item.cpp:10152`.
+            Self::SameSpecialGroup => Some("[LS;468]"),
             // `char_item.cpp:10199`.
             Self::BeltNotEmpty => Some(
                 "[1095]You can only discard the belt when there are no longer any items in its \
@@ -773,6 +778,9 @@ impl core::fmt::Display for MoveRefused {
             Self::ConTooLow => f.write_str("the vitality is below the item's limit"),
             Self::RingTwice => f.write_str("the same ring is already worn"),
             Self::UnmarriedUnique => f.write_str("a marriage unique is worn unmarried"),
+            Self::SameSpecialGroup => {
+                f.write_str("a unique of the same special group is already worn")
+            }
             Self::BeltNotEmpty => f.write_str("the belt's inventory is not empty"),
             Self::NoRoomToUnequip => f.write_str("no inventory cell has room for the worn item"),
             Self::NotEquipable => f.write_str("the item is not equipable"),

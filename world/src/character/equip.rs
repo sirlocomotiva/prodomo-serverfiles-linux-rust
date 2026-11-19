@@ -229,25 +229,6 @@ pub fn worn_system_not_ported(
     protos: &ItemProtos,
     groups: &gamedata::special_item_group::SpecialItemGroups,
 ) -> Option<WornSystem> {
-    if proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_AURA {
-        return Some(WornSystem::Aura);
-    }
-    // An `ITEM_UNIQUE` starts the unique expiry event (`EquipTo`, `G/item.cpp:1458-1487`,
-    // `StartUniqueExpireEvent`, `G/item.cpp:2165-2194`), which the game state's wear sync
-    // arms. Its applies run through `ModifyPoints`'s unique and ring tail (`sig_applies`),
-    // and the tail's apply gate below refuses what is not ported — so a unique wears
-    // unless it is real-time (its expiry is another event) or carries a special group
-    // the owner's data never fills for one (every group vnum sits above the 30000 gate,
-    // `G/item_manager_read_tables.cpp:278-282`).
-    if proto.item_type == ITEM_UNIQUE
-        && (proto
-            .limits
-            .iter()
-            .any(|limit| limit.kind == gamedata::item_kind::LIMIT_REAL_TIME)
-            || item.sig_vnum != 0)
-    {
-        return Some(WornSystem::Unique);
-    }
     if proto.timer_based_on_wear.is_some() {
         return Some(WornSystem::Timer);
     }
@@ -658,23 +639,21 @@ impl<'s, 'g> Equipper<'s, 'g> {
                 return Err(refused);
             }
         }
-        // `G/char_item.cpp:10155-10161`, before the same-special-group arm the
-        // unique system owns: a marriage unique on an unmarried wearer refuses.
-        // No character of this build is married (`sys.marriage` is `unused`).
-        if matches!(item.vnum, 71_069..=71_074) {
-            return Err(MoveRefused::UnmarriedUnique);
-        }
-        // A `WEARABLE_UNIQUE` item starts the unique expiry event (`EquipTo`,
-        // `G/item.cpp:1458-1487`), which the game state's wear sync arms; the same
-        // real-time and special-group uniques refuse here as in `worn_system_not_ported`.
-        if proto.wear_flags & WEARABLE_UNIQUE != 0
-            && (proto
-                .limits
-                .iter()
-                .any(|limit| limit.kind == gamedata::item_kind::LIMIT_REAL_TIME)
-                || item.sig_vnum != 0)
-        {
-            return Err(MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique)));
+        // `G/char_item.cpp:10149-10163`: same special group refusal (`[LS;468]`), then
+        // marriage unique refusal (`[LS;467]`).
+        if proto.wear_flags & WEARABLE_UNIQUE != 0 {
+            if let Some(&group) = self.gear.groups.unique.get(&item.vnum).filter(|&&g| g != 0) {
+                let same = [EWearPositions::Unique1, EWearPositions::Unique2]
+                    .into_iter()
+                    .filter_map(|wear| worn_at(self.items, wear as u16))
+                    .any(|worn| self.gear.groups.unique.get(&worn.vnum).copied() == Some(group));
+                if same {
+                    return Err(MoveRefused::SameSpecialGroup);
+                }
+            }
+            if matches!(item.vnum, 71_069..=71_074) {
+                return Err(MoveRefused::UnmarriedUnique);
+            }
         }
         if proto.item_type == ITEM_RING {
             let twice = [EWearPositions::Ring1, EWearPositions::Ring2]
@@ -2824,27 +2803,26 @@ mod tests {
     }
 
     #[test]
-    fn a_real_time_or_grouped_unique_is_refused_as_not_ported() {
+    fn a_real_time_or_grouped_unique_wears_and_two_same_group_refuse() {
         let mut case = Case::new(&[(inv(3), Item::new(7, UNIQUE))]);
-        // A plain unique wears now: the game state's wear sync arms its expiry.
+        // A plain unique wears: the game state's wear sync arms its expiry.
         let done = case
             .run(inv(3), wear_pos(EWearPositions::Unique1 as u16))
             .expect("the unique wears");
         assert_eq!(done.kind, MoveKind::Equipped);
-        // A real-time unique still refuses: its expiry is another event.
+        // A real-time unique wears: `StartUniqueExpireEvent` skips real-time items.
         let mut case = Case::new(&[(inv(3), Item::new(7, REAL_TIME_UNIQUE))]);
-        assert_eq!(
-            case.refused(inv(3), wear_pos(EWearPositions::Unique1 as u16)),
-            MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique))
-        );
-        // A unique carrying a special group still refuses.
-        let mut grouped = Item::new(7, UNIQUE);
-        grouped.sig_vnum = 50011;
-        let mut case = Case::new(&[(inv(3), grouped)]);
-        assert_eq!(
-            case.refused(inv(3), wear_pos(EWearPositions::Unique1 as u16)),
-            MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique))
-        );
+        let done = case
+            .run(inv(3), wear_pos(EWearPositions::Unique1 as u16))
+            .expect("real-time unique wears");
+        assert_eq!(done.kind, MoveKind::Equipped);
+        // A grouped unique (`sig_vnum != 0`) also wears.
+        let mut first = Item::new(7, UNIQUE);
+        first.sig_vnum = 50011;
+        let mut case = Case::new(&[(inv(3), first)]);
+        assert!(case
+            .run(inv(3), wear_pos(EWearPositions::Unique1 as u16))
+            .is_ok());
     }
 
     #[test]
@@ -3077,12 +3055,12 @@ mod tests {
             case.use_refused(inv(3)),
             MoveRefused::NotPorted(Unported::UseSubType(10))
         );
-        // A unique's use tries the wear (`case ITEM_UNIQUE`'s default arm), which a
-        // real-time unique's unported expiry refuses.
+        // A real-time unique equips (`case ITEM_UNIQUE`'s default arm); the world's real-time
+        // expiry tick removes it when its clock passes.
         let mut case = Case::new(&[(inv(3), Item::new(7, REAL_TIME_UNIQUE))]);
         assert_eq!(
-            case.use_refused(inv(3)),
-            MoveRefused::NotPorted(Unported::Worn(WornSystem::Unique))
+            case.use_at(inv(3)).expect("real-time unique equips").kind,
+            MoveKind::Equipped
         );
         let mut case = Case::new(&[]);
         assert_eq!(case.use_refused(inv(3)), MoveRefused::Empty);
@@ -3304,5 +3282,82 @@ mod tests {
             .records
             .iter()
             .all(|record| !matches!(record, MoveRecord::SpecificEffect(_))));
+    }
+
+    #[test]
+    fn costume_aura_equip_drains_shield_applies_and_def() {
+        use protocol::gc_item_window::ItemAttribute;
+        // An aura at level 250 (25.0% drain) draining a shield with 100 base def (+2*10 = 120),
+        // 200 MAX_HP attribute, and -10 MOV_SPEED apply (which aura skips).
+        let mut shield = proto(13_009, ITEM_ARMOR, gamedata::item_kind::ARMOR_SHIELD, 0);
+        shield.values[1] = 100;
+        shield.values[5] = 10;
+        shield.applies[0] = ItemValue {
+            kind: 8, // APPLY_MOV_SPEED: skipped by aura drain (`G/item.cpp:1007`)
+            value: -10,
+        };
+        shield.applies[1] = ItemValue {
+            kind: 1, // APPLY_MAX_HP: 25% of 400 = 100
+            value: 400,
+        };
+        let aura_proto = proto(49_006, ITEM_COSTUME, COSTUME_AURA, 0);
+        let protos = ItemProtos::from_rows(vec![shield, aura_proto]);
+        let mut aura = Item::new(7, 49_006);
+        // Level 250 -> socket 1 = (1000 + 250) * 100000 + 0; drained shield vnum in socket 0.
+        aura.sockets[0] = 13_009;
+        aura.sockets[1] = 125_000_000;
+        aura.attributes[0] = ItemAttribute {
+            b_type: 1, // APPLY_MAX_HP: 25% of 200 = 50
+            s_value: 200,
+        };
+        let mut items = holding(&[(inv(0), aura)]);
+        let mut points = warrior();
+        let base_hp = points.max_hp();
+        let base_def = points.get_point(point::POINT_DEF_GRADE);
+        let base_mov = points.get_point(point::POINT_MOV_SPEED);
+        let mut dice = Fixed(5);
+        let mut gear = Gear {
+            points: &mut points,
+            protos: &protos,
+            groups: &GROUPS,
+            dice: &mut dice,
+            recently_fought: false,
+            first_use_now: None,
+        };
+        let done = use_item(&mut items, inv(0), &RULES, Some(&mut gear)).expect("aura equips");
+        assert_eq!(done.kind, MoveKind::Equipped);
+        // 25% of 400 (proto apply) + 25% of 200 (item attr) = 150 HP; MOV_SPEED unchanged.
+        assert_eq!(points.max_hp(), base_hp + 150);
+        assert_eq!(points.get_point(point::POINT_MOV_SPEED), base_mov);
+        // 25% of (100 + 2 * 10) = 30 def grade added by ComputeBattlePoints.
+        assert_eq!(points.get_point(point::POINT_DEF_GRADE), base_def + 30);
+    }
+
+    #[test]
+    fn two_uniques_in_same_special_group_are_refused() {
+        use gamedata::special_item_group::SpecialItemGroups;
+        let mut groups = SpecialItemGroups::default();
+        groups.unique.insert(UNIQUE, 10_001);
+        groups.unique.insert(REAL_TIME_UNIQUE, 10_001);
+        let protos = protos();
+        let mut items = holding(&[
+            (inv(0), Item::new(7, UNIQUE)),
+            (inv(1), Item::new(8, REAL_TIME_UNIQUE)),
+        ]);
+        let mut points = warrior();
+        let mut dice = Fixed(5);
+        let mut gear = Gear {
+            points: &mut points,
+            protos: &protos,
+            groups: &groups,
+            dice: &mut dice,
+            recently_fought: false,
+            first_use_now: None,
+        };
+        use_item(&mut items, inv(0), &RULES, Some(&mut gear)).expect("first unique equips");
+        let err = use_item(&mut items, inv(1), &RULES, Some(&mut gear))
+            .expect_err("second unique in same special group is refused");
+        assert_eq!(err, MoveRefused::SameSpecialGroup);
+        assert_eq!(err.notice(), Some("[LS;468]"));
     }
 }

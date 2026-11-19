@@ -773,6 +773,8 @@ pub struct GameState {
     /// (`m_iRefineAdditionalCell`), which closing the window leaves. A character with no
     /// entry has none: a smith's window sets -1, and legacy never initialises the field.
     refine_scroll: HashMap<common::vid::Vid, u16>,
+    /// The smith NPC each character's last refine window opened against (`m_dwRefineNPCVID`).
+    refine_npc: HashMap<common::vid::Vid, common::vid::Vid>,
     /// The element window each character has open, keyed by its VID: the scroll cell,
     /// the weapon cell and the kind (`m_sRefineElementSrcCell`, `m_sRefineElementDstCell`,
     /// `m_cRefineElementType`, `G/char.h:2501-2503`). Absent when no window stands.
@@ -4095,9 +4097,7 @@ impl GameState {
             let _damage = self.no_damage.remove(&vid);
         }
         self.forget_portal_times(vid);
-        self.refining.remove(&vid);
-        self.refine_scroll.remove(&vid);
-        self.attr67_open.remove(&vid);
+        self.clear_refine_windows(vid);
         // A warp and a disconnect forget the sash window silently with the rest: no warp or
         // disconnect path calls `CloseSash` (the only calls are the death pair and the CG
         // close), and the client rebuilds its windows on the new view.
@@ -4651,6 +4651,9 @@ impl GameState {
     ) -> Result<MovedItems, MoveItemRefused> {
         if let Some(guarded) = self.use_item_guards(vid, at, actor) {
             return guarded;
+        }
+        if at.window_type == common::item_slots::EWindows::Switchbot as u8 {
+            return self.use_switchbot_item(vid, at, actor);
         }
         let potion = self.arena_potion_at(vid, at);
         if let Some((kind, special)) = self.auto_at(vid, at) {
@@ -5810,6 +5813,25 @@ impl GameState {
         })?;
         if let Some(ground) = dropped {
             let laid = ground.vid;
+            let split = count != 0
+                && moved
+                    .changes
+                    .iter()
+                    .any(|c| matches!(c, db::items::RowChange::Count { .. }));
+            let item_name = self
+                .protos
+                .get(ground.item.vnum)
+                .map_or(std::borrow::Cow::Borrowed(""), |p| {
+                    String::from_utf8_lossy(&p.name)
+                });
+            crate::gamelog::item_log(
+                owner_id,
+                (x, y),
+                (ground.item.id, ground.item.vnum),
+                if split { "ITEM_SPLIT" } else { "DROP" },
+                &item_name,
+                "",
+            );
             let (order, stored) = StoreOrder::laid();
             moved.store_order = order;
             self.ground.insert(
@@ -6152,7 +6174,14 @@ impl GameState {
             }
             answer @ (GiveAnswer::RefineNormal | GiveAnswer::RefineMoneyOnly) => {
                 let money_only = answer == GiveAnswer::RefineMoneyOnly;
-                let records = self.smith_gift(vid, at, money_only, proto.refine_set, actor);
+                let records = self.smith_gift(
+                    vid,
+                    common::vid::Vid::new(target),
+                    at,
+                    money_only,
+                    proto.refine_set,
+                    actor,
+                );
                 moved.records.extend(records);
                 moved
             }
@@ -6277,31 +6306,38 @@ impl GameState {
         let Some(mut lying) = self.ground.remove(&ground) else {
             return Err(MoveItemRefused::Refused(MoveRefused::NotOnGround));
         };
-        // `IsOwnership` (`G/item.cpp:1696-1702`), checked before the quest gate and the
-        // gold arm: another character's running event refuses the pick-up silently.
+        // `@fixme150` (`G/char_item.cpp:7984-7993`): an `ITEM_QUEST` item cannot be picked up
+        // while a quest is running.
+        let item_type = self
+            .protos
+            .get(lying.ground.item.vnum)
+            .map_or(-1, |proto| proto.item_type);
         let owner_id = character.player_id();
-        if lying
-            .owner
-            .as_ref()
-            .is_some_and(|owner| owner.pid != owner_id || owner_id == 0)
-        {
-            let pid = lying.owner.as_ref().map(|owner| owner.pid);
+        if item_type == gamedata::item_kind::ITEM_QUEST && questing {
             self.ground.insert(ground, lying);
-            tracing::debug!(ground, ?pid, "pick-up refused by ground ownership");
-            return Err(MoveItemRefused::Refused(MoveRefused::OwnedByOther));
+            return Err(MoveItemRefused::Refused(MoveRefused::PickedUpWhileQuesting));
         }
         // Its rows wait for the drop's, a remainder's pick-up's too.
         let order = StoreOrder::after(lying.stored.clone());
+        // `IsOwnership` (`G/item.cpp:1696-1702`), with the party-member fallback
+        // (`G/char_item.cpp:8089-8157`).
+        if let Some(other_pid) = lying
+            .owner
+            .as_ref()
+            .filter(|owner| owner.pid != owner_id || owner_id == 0)
+            .map(|owner| owner.pid)
+        {
+            return self.try_party_pickup((vid, ground, other_pid), place, actor, lying, order);
+        }
         // A gold pile pays the purse, never the storage (`G/char_item.cpp:7996-8004`).
         // At the cap it is consumed without paying, as `PointChange(POINT_GOLD)`
         // consumes it.
-        if self
-            .protos
-            .get(lying.ground.item.vnum)
-            .is_some_and(|proto| proto.item_type == gamedata::item_kind::ITEM_ELK)
-        {
+        if item_type == gamedata::item_kind::ITEM_ELK {
             return self.pickup_gold_pile(vid, ground, &lying, order, owner_id, actor);
         }
+        let picked_id = lying.ground.item.id;
+        let picked_vnum = lying.ground.item.vnum;
+        let picked_count = lying.ground.item.count;
         let rules = MoveRules {
             count_limit: self.item_count_limit,
             usable_cells: usable_inventory_cells(character.inven_point()),
@@ -6331,7 +6367,281 @@ impl GameState {
             MovedItems::new(owner_id, vid.raw(), done, actor, &self.protos, &self.locale);
         moved.place_ground(own);
         moved.store_order = order;
+        self.finish_pickup_side_effects(
+            vid,
+            place,
+            actor,
+            owner_id,
+            (picked_id, picked_vnum, picked_count, item_type),
+            &mut moved,
+        );
         Ok(moved)
+    }
+
+    fn finish_pickup_side_effects(
+        &mut self,
+        vid: common::vid::Vid,
+        place: GroundPlace,
+        actor: Mover,
+        owner_id: u32,
+        (picked_id, picked_vnum, picked_count, item_type): (u32, u32, u16, i32),
+        moved: &mut MovedItems,
+    ) {
+        let item_name = self
+            .protos
+            .get(picked_vnum)
+            .map_or(std::borrow::Cow::Borrowed(""), |p| {
+                String::from_utf8_lossy(&p.name)
+            });
+        let hint = format!("{item_name} {picked_count} {picked_vnum}");
+        crate::gamelog::item_log(
+            owner_id,
+            (place.x, place.y),
+            (picked_id, picked_vnum),
+            "GET",
+            &hint,
+            "",
+        );
+        if item_type == gamedata::item_kind::ITEM_QUEST {
+            self.run_pick_quest(vid, place, actor, owner_id, (picked_id, picked_vnum), moved);
+        }
+    }
+
+    fn clear_refine_windows(&mut self, vid: common::vid::Vid) {
+        self.refining.remove(&vid);
+        self.refine_scroll.remove(&vid);
+        self.refine_npc.remove(&vid);
+        self.attr67_open.remove(&vid);
+    }
+
+    fn try_party_pickup(
+        &mut self,
+        (vid, ground, other_pid): (common::vid::Vid, u32, u32),
+        place: GroundPlace,
+        actor: Mover,
+        mut lying: Lying,
+        order: StoreOrder,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let picker_pid = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?
+            .player_id();
+        let forbidden = lying.ground.item.anti_flags
+            & (world::item::ITEM_ANTIFLAG_GIVE | world::item::ITEM_ANTIFLAG_DROP)
+            != 0;
+        let owner_vid = if forbidden {
+            None
+        } else {
+            self.party_mate_vid(picker_pid, other_pid)
+        };
+        let Some(owner_vid) = owner_vid else {
+            self.ground.insert(ground, lying);
+            tracing::debug!(
+                ground,
+                pid = other_pid,
+                "pick-up refused by ground ownership"
+            );
+            return Err(MoveItemRefused::Refused(MoveRefused::OwnedByOther));
+        };
+        let picked_id = lying.ground.item.id;
+        let picked_vnum = lying.ground.item.vnum;
+        let picked_count = lying.ground.item.count;
+        let item_type = self
+            .protos
+            .get(picked_vnum)
+            .map_or(-1, |proto| proto.item_type);
+        let (winner, winner_pid, done) =
+            if let Some(done) = self.place_party_pickup(owner_vid, other_pid, &mut lying.ground) {
+                (owner_vid, other_pid, done)
+            } else if let Some(done) = self.place_party_pickup(vid, picker_pid, &mut lying.ground) {
+                (vid, picker_pid, done)
+            } else {
+                self.ground.insert(ground, lying);
+                return Err(MoveItemRefused::Refused(MoveRefused::NoRoomToPickUp));
+            };
+        let mut own = Vec::new();
+        let mut effects = Vec::new();
+        if let Some(index) = self.maps.get_mut(&(lying.channel, lying.map)) {
+            index.remove(view::EntityKey::Ground(ground), &mut effects);
+        }
+        self.deliver(&effects, Some((vid.raw(), &mut own)));
+        let item_name_bytes = self
+            .protos
+            .get(picked_vnum)
+            .map_or(&b""[..], |p| p.locale_name.as_slice())
+            .to_vec();
+        let hint = format!(
+            "{} {picked_count} {picked_vnum}",
+            String::from_utf8_lossy(&item_name_bytes)
+        );
+        crate::gamelog::item_log(
+            winner_pid,
+            (place.x, place.y),
+            (picked_id, picked_vnum),
+            "GET",
+            &hint,
+            "",
+        );
+        let mut moved = if winner == vid {
+            let mut m = MovedItems::new(
+                picker_pid,
+                vid.raw(),
+                done,
+                actor,
+                &self.protos,
+                &self.locale,
+            );
+            m.place_ground(own);
+            m
+        } else {
+            self.party_pickup_for_mate(
+                (vid, owner_vid, other_pid),
+                actor,
+                done,
+                own,
+                &item_name_bytes,
+            )
+        };
+        moved.store_order = order;
+        if item_type == gamedata::item_kind::ITEM_QUEST {
+            self.run_pick_quest(
+                winner,
+                place,
+                actor,
+                winner_pid,
+                (picked_id, picked_vnum),
+                &mut moved,
+            );
+        }
+        Ok(moved)
+    }
+
+    fn place_party_pickup(
+        &mut self,
+        receiver: common::vid::Vid,
+        owner_id: u32,
+        ground: &mut world::character::GroundItem,
+    ) -> Option<world::character::MoveDone> {
+        let ch = self.characters.find_by_vid_mut(receiver).ok()?;
+        let rules = MoveRules {
+            count_limit: self.item_count_limit,
+            usable_cells: usable_inventory_cells(ch.inven_point()),
+            belt_grade: belt_grade(ch.items(), &self.protos),
+            questing: false,
+            secured: false,
+        };
+        let mut picker = Picker {
+            owner_id,
+            rules: &rules,
+            protos: &self.protos,
+            dice: &mut self.dice,
+        };
+        pickup_item(ch.items_mut(), ground, &mut picker).ok()
+    }
+
+    fn party_pickup_for_mate(
+        &self,
+        (vid, owner_vid, other_pid): (common::vid::Vid, common::vid::Vid, u32),
+        actor: Mover,
+        done: world::character::MoveDone,
+        own: Vec<Vec<u8>>,
+        item_name: &[u8],
+    ) -> MovedItems {
+        let mate_mover = self.own_mover(owner_vid).unwrap_or(actor);
+        let picker_name = self
+            .characters
+            .find_by_vid(vid)
+            .map_or_default(|c| c.name().as_bytes().to_vec());
+        let owner_name = self
+            .characters
+            .find_by_vid(owner_vid)
+            .map_or_default(|c| c.name().as_bytes().to_vec());
+        let mate_items = MovedItems::new(
+            other_pid,
+            owner_vid.raw(),
+            done,
+            mate_mover,
+            &self.protos,
+            &self.locale,
+        );
+        let mut moved = MovedItems::new(
+            other_pid,
+            vid.raw(),
+            world::character::MoveDone {
+                kind: world::character::MoveKind::PickedUp,
+                records: Vec::new(),
+                changes: Vec::new(),
+            },
+            actor,
+            &self.protos,
+            &self.locale,
+        );
+        moved.changes = mate_items.changes;
+        moved.records.extend(own);
+        moved.records.push(crate::chat_line::chat_packet(
+            actor.recipient(&self.locale),
+            protocol::gc_chat::CHAT_TYPE_INFO,
+            b"[LS;449;%s;%s]",
+            &[
+                crate::chat_line::Arg::Text(&owner_name),
+                crate::chat_line::Arg::Text(item_name),
+            ],
+        ));
+        let chat_byte = protocol::gc_inventory::HEADER_GC_CHAT.value();
+        for rec in mate_items.records {
+            if rec.first() != Some(&chat_byte) {
+                moved.around.push((
+                    crate::game_loop_messages::RelayScope::Player(owner_vid),
+                    rec,
+                ));
+            }
+        }
+        moved.around.push((
+            crate::game_loop_messages::RelayScope::Player(owner_vid),
+            crate::chat_line::chat_packet(
+                mate_mover.recipient(&self.locale),
+                protocol::gc_chat::CHAT_TYPE_INFO,
+                b"[LS;446;%s;%s]",
+                &[
+                    crate::chat_line::Arg::Text(&picker_name),
+                    crate::chat_line::Arg::Text(item_name),
+                ],
+            ),
+        ));
+        moved
+    }
+
+    /// `quest::CQuestManager::PickupItem` (`G/char_item.cpp:8082-8083`, `:8153-8154`).
+    fn run_pick_quest(
+        &mut self,
+        vid: common::vid::Vid,
+        place: GroundPlace,
+        actor: Mover,
+        pid: u32,
+        (item_id, vnum): (u32, u32),
+        moved: &mut MovedItems,
+    ) {
+        let level = self
+            .characters
+            .find_by_vid(vid)
+            .map_or(1, |c| c.points().map_or(1, world::character::Points::level));
+        let landed = self.run_quests(
+            place,
+            actor,
+            level,
+            pid,
+            &crate::game_loop_messages::QuestAccount::default(),
+            |manager, game| {
+                manager.pick(pid, (item_id, vnum), game);
+            },
+        );
+        if let Some(((), (records, _, _, block_mode, _, _, _, _, _, _, _))) = landed {
+            if let Some(mode) = block_mode {
+                self.block_modes.insert(vid, mode);
+            }
+            moved.records.extend(records);
+        }
     }
 
     /// A gold pile's pick-up: the purse is paid, the index loses the pile, and the picker

@@ -137,6 +137,7 @@ impl GameState {
     pub(super) fn smith_gift(
         &mut self,
         vid: Vid,
+        npc_vid: Vid,
         at: ItemPos,
         money_only: bool,
         refine_set: u16,
@@ -153,7 +154,37 @@ impl GameState {
         } else {
             REFINE_TYPE_NORMAL
         };
+        // `SetRefineNPC(npc)` (`G/char_item.cpp:9472`).
+        self.refine_npc.insert(vid, npc_vid);
         self.refine_information(vid, at.cell, refine_type, None, actor)
+    }
+
+    /// `GetRefineGuild` + NPC empire (`G/char.cpp:8169-8198`): `(guild_id, npc_empire)` when
+    /// `m_dwRefineNPCVID` points at a building NPC owned by a guild.
+    pub(super) fn refine_guild(&self, vid: Vid) -> Option<(u32, u8)> {
+        let npc_vid = self.refine_npc.get(&vid)?;
+        let (channel, map, slot) = self.npc_of.get(&npc_vid.raw()).copied()?;
+        let npc = self.npcs.get(&(channel, map))?.npcs.get(slot)?;
+        let guild_id = npc.npc_guild?;
+        Some((guild_id, npc.empire))
+    }
+
+    /// `CHARACTER::ComputeRefineFee` (`G/char.cpp:8181-8198`): 10% discount for own guild,
+    /// 3× surcharge for a foreign empire on a guild smith, plain `cost` otherwise.
+    pub(super) fn compute_refine_fee(&self, vid: Vid, pid: u32, cost: i32, multiply: i32) -> i32 {
+        let Some((smith_guild, smith_empire)) = self.refine_guild(vid) else {
+            return cost;
+        };
+        let scaled = cost.saturating_mul(multiply);
+        if self.guild_id_of_pid(pid) == Some(smith_guild) {
+            return scaled.saturating_mul(9) / 10;
+        }
+        let player_empire = self.bodies.get(&vid).map_or(0, |body| body.card.empire);
+        if smith_empire != 0 && smith_empire != player_empire {
+            scaled.saturating_mul(3)
+        } else {
+            scaled
+        }
     }
 
     /// `CHARACTER::RefineInformation(cell, type, additional)` for the character under `vid`:
@@ -218,13 +249,16 @@ impl GameState {
             tracing::warn!("RefineInformation NOT GET REFINE SET {}", proto.refine_set);
             return vec![self.refine_line(actor, CHAT_TYPE_INFO, NOT_REFINABLE_NOTICE)];
         };
+        if additional.is_some() {
+            self.refine_npc.remove(&vid);
+        }
         let cost = if self.refine_flag(pid, REFINE_CHANCE_FLAG) > 0 {
             if !usable_at_level(proto, REFINE_CHANCE_LEVEL) || proto.item_type != ITEM_WEAPON {
                 return vec![self.refine_line(actor, CHAT_TYPE_INFO, REFINE_CHANCE_NOTICE)];
             }
             0
         } else {
-            recipe.cost
+            self.compute_refine_fee(vid, pid, recipe.cost, 1)
         };
         let mut window = GcRefineInformation {
             refine_type,
@@ -292,6 +326,7 @@ impl GameState {
                 .records
                 .push(self.refine_line(actor, CHAT_TYPE_INFO, REFINE_BUSY_NOTICE));
             self.refining.remove(&vid);
+            self.refine_npc.remove(&vid);
             return Ok(moved);
         }
         let at = ItemPos::new(EWindows::Inventory as u8, u16::from(pos));
@@ -302,6 +337,7 @@ impl GameState {
             || character.items().item_at(at).is_none()
         {
             self.refining.remove(&vid);
+            self.refine_npc.remove(&vid);
             return Ok(moved);
         }
         self.set_refine_time(vid);
@@ -333,6 +369,7 @@ impl GameState {
             _ => {}
         }
         self.refining.remove(&vid);
+        self.refine_npc.remove(&vid);
         Ok(moved)
     }
 
@@ -383,7 +420,8 @@ impl GameState {
             .refine_recipes
             .get(u32::from(proto.refine_set))
             .ok_or(None)?;
-        let mut cost = recipe.cost;
+        let guild_smith = self.refine_guild(vid).map(|(guild_id, _)| guild_id);
+        let mut cost = self.compute_refine_fee(vid, pid, recipe.cost, 1);
         let chance = self.refine_flag(pid, REFINE_CHANCE_FLAG);
         if chance > 0 {
             if !usable_at_level(&proto, REFINE_CHANCE_LEVEL) || proto.item_type != ITEM_WEAPON {
@@ -441,6 +479,7 @@ impl GameState {
             gold,
             materials,
             money_only,
+            guild_smith,
             fail: FailOutcome::Destroy,
             scroll: None,
         })
@@ -496,7 +535,7 @@ impl GameState {
     ) {
         let pid = moved.owner_id;
         let mut draw = world::character::number(&mut self.dice, 1, 100);
-        if plan.money_only {
+        if plan.money_only || plan.guild_smith.is_some() {
             draw -= 10;
         }
         let success = i64::from(draw) <= i64::from(plan.prob);
@@ -594,14 +633,43 @@ impl GameState {
         moved.gold = Some(gold_delta(plan.gold, left));
         moved.points = points;
         moved.quickslots = Some(quickslots);
-        self.log_refine_outcome(vid, pid, plan, success);
+        self.finish_refine_outcome(vid, pid, plan, success, moved);
     }
 
-    fn log_refine_outcome(&self, vid: Vid, pid: u32, plan: &RefinePlan, success: bool) {
+    /// `PayRefineFee` (`G/char.cpp:8200-8222`): a non-member's 10% cut goes to the smith's guild.
+    fn pay_guild_refine_cut(&mut self, pid: u32, plan: &RefinePlan, moved: &mut MovedItems) {
+        let Some(smith_guild) = plan.guild_smith else {
+            return;
+        };
+        if self.guild_id_of_pid(pid) == Some(smith_guild) {
+            return;
+        }
+        let cut = u32::try_from(plan.fee / 10).unwrap_or(0);
+        if cut > 0 {
+            if let Some(store) = self.deposit_guild_gold(smith_guild, cut) {
+                moved.quest.1.push(store);
+            }
+        }
+    }
+
+    fn finish_refine_outcome(
+        &mut self,
+        vid: Vid,
+        pid: u32,
+        plan: &RefinePlan,
+        success: bool,
+        moved: &mut MovedItems,
+    ) {
+        self.pay_guild_refine_cut(pid, plan, moved);
         let item_name = String::from_utf8_lossy(&plan.proto.name);
         let step = super::use_to_item::refine_level(&plan.proto);
         let pos = self.spot_of(vid.raw()).map_or((0, 0), |s| (s.x, s.y));
-        crate::gamelog::refine_log(pid, &item_name, plan.old.id, step, success, "POWER");
+        let hint = if plan.guild_smith.is_some() {
+            "GUILD"
+        } else {
+            "POWER"
+        };
+        crate::gamelog::refine_log(pid, &item_name, plan.old.id, step, success, hint);
         crate::gamelog::item_log(
             pid,
             pos,
@@ -637,6 +705,8 @@ pub(super) struct RefinePlan {
     pub(super) materials: Vec<(u32, i32)>,
     /// A devil-tower refine, whose draw is 10 lower.
     pub(super) money_only: bool,
+    /// Guild owning the smith NPC (`GetRefineGuild`), if refining through a guild smith.
+    pub(super) guild_smith: Option<u32>,
     /// What a failed draw does to the item.
     pub(super) fail: FailOutcome,
     /// The scroll a scroll refine spends one of, with its proto.

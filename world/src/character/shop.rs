@@ -220,7 +220,6 @@ pub fn unported_creation(vnum: u32, proto: &ItemProto) -> Option<UnportedCreatio
         ITEM_UNIQUE => UnportedCreation::Unique,
         ITEM_DS => UnportedCreation::DragonSoul,
         ITEM_BLEND => UnportedCreation::Blend,
-        ITEM_COSTUME if proto.sub_type == COSTUME_AURA => UnportedCreation::Aura,
         _ if timed => UnportedCreation::Timed,
         _ if addon_low != 0 || addon_high != 0 => UnportedCreation::Addon,
         _ if magic_pct == 100 => UnportedCreation::Magic,
@@ -310,7 +309,10 @@ pub fn buy_item(
     {
         *socket = 1;
     }
-    // A renewal buy stamps the row's sockets and attributes on the made item
+    if proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_AURA {
+        let base_level = super::equipment::aura_base_level(item.vnum);
+        item.sockets[1] = (1000 + i32::from(base_level)) * 100_000;
+    }
     // (`G/shopEx.cpp:258-269`): the sockets after the gain roll, which overwrite it, and the
     // attributes whole. A base slot holds zeros, which stamp nothing.
     for (attr, value) in item.attributes.iter_mut().zip(offer.attrs) {
@@ -762,10 +764,7 @@ mod tests {
         assert_eq!(with(ITEM_UNIQUE, 0, none), Some(UnportedCreation::Unique));
         assert_eq!(with(ITEM_DS, 0, none), Some(UnportedCreation::DragonSoul));
         assert_eq!(with(ITEM_BLEND, 0, none), Some(UnportedCreation::Blend));
-        assert_eq!(
-            with(ITEM_COSTUME, COSTUME_AURA, none),
-            Some(UnportedCreation::Aura)
-        );
+        assert_eq!(with(ITEM_COSTUME, COSTUME_AURA, none), None);
         assert_eq!(
             with(ITEM_COSTUME, 1, none),
             None,

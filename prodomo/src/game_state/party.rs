@@ -262,6 +262,17 @@ impl GameState {
     pub(super) fn party_leader_of(&self, pid: CharacterId) -> Option<CharacterId> {
         self.parties.of.get(&pid).copied()
     }
+    /// The VID of `other_pid` when both `picker_pid` and `other_pid` belong to the same
+    /// party and `other_pid` is online.
+    pub(super) fn party_mate_vid(
+        &self,
+        picker_pid: CharacterId,
+        other_pid: CharacterId,
+    ) -> Option<Vid> {
+        let leader = self.party_leader_of(picker_pid)?;
+        let party = self.parties.by_leader.get(&leader)?;
+        party.members.get(&other_pid).and_then(|member| member.vid)
+    }
     /// `CParty::P2PSetMemberLevel` (`G/party.cpp:609-620`): the member row of `pid`
     /// carries `level`. The DB packet is the retired peer's, and no client record
     /// follows on the leveler's own process. Quiet with no party or no such

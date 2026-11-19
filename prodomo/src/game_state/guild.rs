@@ -843,6 +843,13 @@ pub enum GuildQuestStore {
         /// The judged ladder.
         ladder: i32,
     },
+    /// A guild bank gold update (`RequestDepositMoney`, `G/guild.cpp:1910-1913`).
+    Gold {
+        /// The guild id.
+        guild_id: u32,
+        /// The guild's judged gold total.
+        gold: u32,
+    },
     /// A skill set: `SetSkillLevel`'s and `SetSkillPoint`'s `SendDBSkillUpdate` whole-row
     /// write (`G/guild.cpp:1262,2304`).
     Skills {
@@ -7118,6 +7125,26 @@ impl GameState {
     fn guild_gold(&self, own: Option<u32>) -> u32 {
         own.and_then(|id| self.guilds.by_id.get(&id))
             .map_or(0, |guild| guild.gold)
+    }
+
+    /// The guild ID of `pid`, if any.
+    pub(super) fn guild_id_of_pid(&self, pid: u32) -> Option<u32> {
+        self.guilds.of.get(&pid).copied()
+    }
+
+    /// Deposit `amount` into `guild_id`'s bank (`RequestDepositMoney`, `G/guild.cpp:1910`),
+    /// returning the store write for the descriptor.
+    pub(super) fn deposit_guild_gold(
+        &mut self,
+        guild_id: u32,
+        amount: u32,
+    ) -> Option<GuildQuestStore> {
+        let guild = self.guilds.by_id.get_mut(&guild_id)?;
+        guild.gold = guild.gold.saturating_add(amount);
+        Some(GuildQuestStore::Gold {
+            guild_id,
+            gold: guild.gold,
+        })
     }
 
     /// The max members of the caller's guild, 0 when it holds none.

@@ -634,6 +634,23 @@ pub async fn set_master(
     Ok(done.rows_affected() > 0)
 }
 
+/// Set a guild's bank gold (`HEADER_GD_GUILD_DEPOSIT_MONEY`, `G/guild.cpp:1910-1913`).
+/// Answers whether a row was there.
+///
+/// # Errors
+///
+/// Returns [`AccountError::NoSuchPlayer`] for an id above `i32::MAX`, and
+/// [`AccountError::Database`] otherwise.
+pub async fn set_gold(store: &Store, guild_id: u32, gold: i32) -> Result<bool, AccountError> {
+    let id = i32::try_from(guild_id).map_err(|_| AccountError::NoSuchPlayer(guild_id))?;
+    let done = sqlx::query("UPDATE guild SET gold = $1 WHERE id = $2")
+        .bind(gold)
+        .bind(id)
+        .execute(store.pool())
+        .await?;
+    Ok(done.rows_affected() > 0)
+}
+
 /// Set a guild's ladder point: `ChangeLadderPoint`'s persisted delta
 /// (`G/guild_war.cpp:753-758`). Answers whether a row was there.
 ///

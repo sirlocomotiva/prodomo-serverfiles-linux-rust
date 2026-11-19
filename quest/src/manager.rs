@@ -1473,6 +1473,16 @@ impl Manager {
         })
     }
 
+    /// `CQuestManager::PickupItem` (`G/questmanager.cpp:2024-2046`): character `pid` picked up
+    /// an `ITEM_QUEST` item `(item, vnum)`, so scripts with `when <vnum>.pick` run.
+    pub fn pick(&mut self, pid: u32, (item, vnum): (u32, u32), game: &mut dyn Game) -> bool {
+        self.pcs.entry(pid).or_default().item = item;
+        self.operate(pid, game, |run, pc, npcs| match npcs.get(&vnum) {
+            Some(npc) => run.handle_event(pc, npc, "pick"),
+            None => false,
+        })
+    }
+
     /// `CQuestManager::LevelUp`: character `pid` leveled up, so the no-target quests' `levelup`
     /// scripts run (`questmanager.cpp:667-681`) the way `NPC::OnLevelUp` runs them
     /// (`HandleReceiveAllEvent`, `G/questnpc.cpp:348-351`). Every owner script with a `levelup`

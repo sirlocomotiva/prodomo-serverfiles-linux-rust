@@ -251,7 +251,6 @@ pub fn unported_drop(vnum: u32, proto: &ItemProto) -> Option<UnportedDrop> {
         ITEM_UNIQUE => Some(UnportedDrop::Unique),
         ITEM_DS => Some(UnportedDrop::Soul),
         ITEM_BLEND => Some(UnportedDrop::Blend),
-        ITEM_COSTUME if proto.sub_type == COSTUME_AURA => Some(UnportedDrop::Aura),
         _ if SOCKETED_VNUMS.contains(&vnum) => Some(UnportedDrop::Vnum(vnum)),
         _ => None,
     }
@@ -748,6 +747,10 @@ pub fn stamp_created_sockets(item: &mut Item, proto: &ItemProto, now_secs: i64) 
             item.sockets[0] = span;
         }
     }
+    if proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_AURA {
+        let base_level = super::equipment::aura_base_level(item.vnum);
+        item.sockets[1] = (1000 + i32::from(base_level)) * 100_000;
+    }
 }
 
 /// `ITEM_MANAGER::CreateItem(vnum, count, 0, true, rare_pct)` (`G/item_manager.cpp:160-455`)
@@ -1099,9 +1102,7 @@ mod tests {
             (1, ITEM_ELK, 0, UnportedDrop::Elk),
             (71001, ITEM_UNIQUE, 0, UnportedDrop::Unique),
             (50513, ITEM_DS, 0, UnportedDrop::Soul),
-            (72501, ITEM_COSTUME, COSTUME_AURA, UnportedDrop::Aura),
             (72723, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(72723)),
-            (50300, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(50300)),
             (70037, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(70037)),
         ] {
             let proto = ItemProto::for_category_rule(vnum, item_type, sub_type);

@@ -1811,6 +1811,7 @@ impl GameState {
             gold,
             materials,
             money_only: false,
+            guild_smith: None,
             fail,
             scroll: Some((scroll, scroll_proto)),
         })

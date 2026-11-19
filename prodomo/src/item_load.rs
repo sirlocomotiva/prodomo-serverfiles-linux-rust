@@ -1046,8 +1046,10 @@ mod tests {
         assert_eq!(
             placed,
             [
+                (1, INVENTORY_MAX_NUM + 1),
                 (2, INVENTORY_MAX_NUM + 2),
                 (3, INVENTORY_MAX_NUM + 3),
+                (4, INVENTORY_MAX_NUM + 4),
                 (8, INVENTORY_MAX_NUM + 8),
             ]
         );
@@ -1057,8 +1059,6 @@ mod tests {
             .map(|refusal| (refusal.id, refusal.why.clone()))
             .collect();
         let expected = [
-            (1, WornSystem::Aura),
-            (4, WornSystem::Unique),
             (5, WornSystem::Timer),
             (6, WornSystem::Timer),
             (7, WornSystem::Immunity),

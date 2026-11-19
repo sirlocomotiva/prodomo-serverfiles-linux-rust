@@ -2117,6 +2117,13 @@ where
         .game
         .pickup_item(vid, record.vid, place, actor)
         .await;
+    if let Ok(Ok(moved)) = &answer {
+        if !moved.quest.1.is_empty()
+            && !store_quest_guild_stores(session, addr, context, held, &moved.quest.1).await
+        {
+            return false;
+        }
+    }
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -2207,6 +2214,13 @@ where
         .game
         .refine(vid, (record.pos, record.ty), actor)
         .await;
+    if let Ok(Ok(moved)) = &answer {
+        if !moved.quest.1.is_empty()
+            && !store_quest_guild_stores(session, addr, context, held, &moved.quest.1).await
+        {
+            return false;
+        }
+    }
     finish_item_step(session, addr, context, held, actor, answer).await
 }
 
@@ -7106,6 +7120,13 @@ where
                 if let Err(error) = db::guilds::set_ladder(&context.store, *guild_id, *ladder).await
                 {
                     warn!(%addr, %error, "A quest ladder could not be stored; closing");
+                    return false;
+                }
+            }
+            GuildQuestStore::Gold { guild_id, gold } => {
+                let gold = i32::try_from(*gold).unwrap_or(i32::MAX);
+                if let Err(error) = db::guilds::set_gold(&context.store, *guild_id, gold).await {
+                    warn!(%addr, %error, "Guild gold could not be stored; closing");
                     return false;
                 }
             }

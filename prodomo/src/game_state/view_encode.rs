@@ -461,6 +461,9 @@ impl GameState {
                         let _sent = self.write_to_client(other, record);
                     }
                 }
+                RelayScope::Player(target) => {
+                    let _sent = self.write_to_client(*target, record.clone());
+                }
             }
         }
     }

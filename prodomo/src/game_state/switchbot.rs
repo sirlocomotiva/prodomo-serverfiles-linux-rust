@@ -211,6 +211,77 @@ impl GameState {
         bot.alternatives[slot] = [[ItemAttribute::new(0, 0); 5]; SWITCHBOT_ALTERNATIVES];
     }
 
+    /// `CSwitchbot::IsActive(slot)` (`G/char_item.cpp:7209`).
+    pub(super) fn switchbot_is_active(&self, pid: u32, cell: u16) -> bool {
+        let slot = usize::from(cell);
+        slot < SWITCHBOT_SLOTS
+            && self
+                .switchbots
+                .get(&pid)
+                .is_some_and(|bot| bot.active[slot])
+    }
+
+    /// `CHARACTER::UseItem` switchbot branch (`G/char_item.cpp:7205-7225`): an active slot
+    /// refuses silently; an inactive slot moves the item into the first free inventory cell,
+    /// or chats `"@@(char_item.cpp)tradus:full inventory."` when full.
+    pub(super) fn use_switchbot_item(
+        &mut self,
+        vid: Vid,
+        at: protocol::item_pos::ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let character = self
+            .characters
+            .find_by_vid(vid)
+            .map_err(|_| MoveItemRefused::NoSuchCharacter { vid })?;
+        let pid = character.player_id();
+        let Some(item) = character.items().item_at(at).cloned() else {
+            return Err(MoveItemRefused::Refused(
+                world::character::MoveRefused::Empty,
+            ));
+        };
+        if self.switchbot_is_active(pid, at.cell) {
+            return Ok(self.empty_moved(pid, vid, actor));
+        }
+        let usable = common::item_slots::usable_inventory_cells(character.inven_point());
+        let Some(cell) = character
+            .items()
+            .find_free_inventory_cell(usable, item.size)
+        else {
+            let mut moved = self.empty_moved(pid, vid, actor);
+            moved.records.push(crate::chat_line::chat_packet(
+                actor.recipient(&self.locale),
+                protocol::gc_chat::CHAT_TYPE_INFO,
+                b"@@(char_item.cpp)tradus:full inventory.",
+                &[],
+            ));
+            return Ok(moved);
+        };
+        let dest =
+            protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
+        let req = world::character::MoveRequest {
+            from: at,
+            to: dest,
+            count: item.count,
+        };
+        self.move_item(vid, req, actor)
+    }
+
+    fn empty_moved(&self, pid: u32, vid: Vid, actor: Mover) -> MovedItems {
+        MovedItems::new(
+            pid,
+            vid.raw(),
+            world::character::MoveDone {
+                kind: world::character::MoveKind::Used,
+                records: Vec::new(),
+                changes: Vec::new(),
+            },
+            actor,
+            &self.protos,
+            &self.locale,
+        )
+    }
+
     /// Whether `from` is a switchbot slot the bot runs: the move source gate
     /// (`G/char_item.cpp:7703-7707`).
     pub(super) fn switchbot_source_active(

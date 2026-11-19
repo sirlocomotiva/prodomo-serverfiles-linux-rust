@@ -70340,3 +70340,355 @@ fn kept_game_logs_emit_on_the_gamelog_target() {
     server.wait_for_next("gamelog: LoginLog");
     drop(server);
 }
+
+/// `cg.game.item_use`, `data.item.special_group`, `sys.item.core`: a switchbot right-click
+/// moves the item back to inventory while inactive and is refused silently while active
+/// (`G/char_item.cpp:7205-7222`); an aura costume equips, draining its shield's defense and
+/// scaling its applies (`G/item.cpp:983-1019`, `G/char.cpp:2796-2819`); and two `ITEM_UNIQUE`
+/// items sharing a `special_item_group.txt` unique group refuse the second with `[LS;468]`
+/// (`G/char_item.cpp:10149-10154`).
+fn drain_all_game(client: &mut Keyed, ms: u64) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+    let mut out = Vec::new();
+    while let Some(r) = client.read_game_until(deadline) {
+        out.push(r);
+    }
+    out
+}
+
+fn verify_aura_and_unique_group(alice: &mut Keyed, database: &ScratchDatabase) {
+    // Equip the level-250 aura costume (drains shield 13009 def 57*25%=14 and +200*25%=+50 HP).
+    alice.send_record(&client_item_use(2));
+    let wire = drain_all_game(alice, 400);
+    let changes = decoded_point_changes(&wire);
+    assert!(
+        changes.iter().any(|&(k, _)| k == POINT_MAX_HP),
+        "aura equip updates POINT_MAX_HP: changes={changes:?} wire={wire:02x?}"
+    );
+    assert!(
+        changes.iter().any(|&(k, _)| k == 16),
+        "aura equip updates POINT_DEF_GRADE: changes={changes:?} wire={wire:02x?}"
+    );
+    check(database, "SELECT window_type = 2 FROM item WHERE id = 62");
+    // Equip first unique (70005), then second unique (70043) in same special group -> [LS;468].
+    alice.send_record(&client_item_use(3));
+    let _ = drain_all_game(alice, 300);
+    check(database, "SELECT window_type = 2 FROM item WHERE id = 63");
+    alice.send_record(&client_item_use(4));
+    let wire = drain_all_game(alice, 400);
+    assert!(
+        wire.contains(&an_info_line(b"[LS;468]")),
+        "second unique in same special group chats [LS;468]: {wire:02x?}"
+    );
+    check(
+        database,
+        "SELECT window_type = 1 AND pos = 4 FROM item WHERE id = 64",
+    );
+}
+
+#[test]
+fn switchbot_right_click_aura_equip_and_same_special_group_unique_refuse() {
+    use protocol::gc_item_window::GcItemSet;
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let sig = "locale/europe/special_item_group.txt";
+    let mut sig_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(sig),
+    )
+    .expect("the owner's special_item_group.txt");
+    sig_text.extend_from_slice(
+        b"\nGroup\tUniquePair\n{\n\tVnum\t10001\n\t1\t70005\t1\t100\n\t2\t70043\t1\t100\n}\n",
+    );
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(sig, &sig_text)],
+        "no_wander = true",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 20 WHERE name = 'Alpha'",
+    );
+    for stmt in [
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 60, id, 1, 0, 1, 19 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 61, id, 1, 1, 10, 71084 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, socket1, attrtype0, attrvalue0) SELECT 62, id, 1, 2, 1, 49006, 13009, 125000000, 1, 200 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 63, id, 1, 3, 1, 70005 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 64, id, 1, 4, 1, 70043 FROM player WHERE name = 'Alpha'",
+    ] {
+        sql(&database, stmt);
+    }
+    let (mut alice, _listed, _entered) = enter_equipped_world_with(&server, b"alice", 5);
+    std::thread::sleep(Duration::from_millis(1600));
+    let switchbot = common::item_slots::EWindows::Switchbot as u8;
+    let inventory = common::item_slots::EWindows::Inventory as u8;
+    let to_sb = protocol::cg_item_move::CgItemMove::new(
+        protocol::item_pos::ItemPos::new(inventory, 0),
+        protocol::item_pos::ItemPos::new(switchbot, 0),
+        0,
+    )
+    .encode();
+    let use_sb =
+        protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(switchbot, 0))
+            .encode();
+    alice.send_record(&to_sb);
+    let _ = drain_all_game(&mut alice, 300);
+    alice.send_record(&use_sb);
+    let wire = drain_all_game(&mut alice, 400);
+    assert!(
+        wire.iter().any(|r| {
+            r[0] == ITEM_SET
+                && r.len() == ITEM_SET_LEN
+                && GcItemSet::decode(r).is_ok_and(|s| {
+                    s.cell.window_type == inventory && s.cell.cell == 0 && s.vnum == 19
+                })
+        }),
+        "switchbot right-click moves sword back: {wire:02x?}"
+    );
+    alice.send_record(&to_sb);
+    let _ = drain_all_game(&mut alice, 300);
+    let mut start = vec![CG_SWITCHBOT, 30, 0, 0, 0, 0, 0];
+    for _ in 0..10 {
+        start.push(1);
+        start.extend(3000i16.to_le_bytes());
+    }
+    alice.send_record(&start);
+    let _ = drain_all_game(&mut alice, 300);
+    alice.send_record(&use_sb);
+    let _ = drain_all_game(&mut alice, 300);
+    check(
+        &database,
+        "SELECT window_type = 8 AND pos = 0 FROM item WHERE id = 60",
+    );
+    alice.send_record(&[CG_SWITCHBOT, 7, 0, 0, 0, 1, 0]);
+    let _ = drain_all_game(&mut alice, 300);
+    verify_aura_and_unique_group(&mut alice, &database);
+}
+
+fn find_ground_vnum(wire: &[Vec<u8>], want: u32) -> Option<u32> {
+    wire.iter().find_map(|r| {
+        (r[0] == GROUND_ADD
+            && r.len() >= 21
+            && u32::from_le_bytes(r[17..21].try_into().ok()?) == want)
+            .then(|| u32::from_le_bytes(r[13..17].try_into().expect("gvid")))
+    })
+}
+
+fn seed_party_pickup_accounts(server: &Server, database: &ScratchDatabase) {
+    create_account(server, "alice");
+    create_account(server, "bob");
+    add_characters(database);
+    for stmt in [
+        "UPDATE player SET level = 20, st = 90 WHERE name = 'Alpha'",
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) \
+         SELECT id, 0, 'Yankee', 1, 20, 470000, 950000 FROM account WHERE login = 'bob'",
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) \
+         SELECT 70, id, 1, 0, 1, 30300 FROM player WHERE name = 'Alpha'",
+    ] {
+        sql(database, stmt);
+    }
+}
+
+/// `cg.game.item_pickup`, `cg.game.item_drop`, `cg.game.item_drop2`: a party mate picking up
+/// another member's drop places it in the owner's inventory and notifies both (`[LS;446]` /
+/// `[LS;449]`, `G/char_item.cpp:8089-8157`), and picking up an `ITEM_QUEST` while a quest is
+/// running is refused (`@fixme150`, `G/char_item.cpp:7984-7993`) until the quest closes.
+#[test]
+fn party_member_pickup_routes_to_owner_and_quest_pickup_blocks_while_questing() {
+    const PICK_BLOCK: &[u8] = b"quest pick_block begin\n\tstate start begin\n\t\twhen 20016.click begin\n\t\t\tsay(\"hold\")\n\t\t\tselect(\"done\")\n\t\tend\n\tend\nend\n";
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let npc = "locale/europe/map/metin2_map_a1/npc.txt";
+    let mut npc_text = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata")
+            .join(npc),
+    )
+    .expect("the owner's npc.txt");
+    npc_text.extend_from_slice(DOG_AT_ALPHA.as_bytes());
+    npc_text.extend_from_slice(b"m\t606\t540\t0\t0\t0\t1\t1000s\t100\t1\t20016\n");
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            (npc, &npc_text),
+            ("locale/europe/mob_drop_item.txt", DOG_DROPS),
+            ("locale/europe/quest/zz_probe/pick_block.lua", PICK_BLOCK),
+        ],
+        "no_wander = true",
+    );
+    seed_party_pickup_accounts(&server, &database);
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered_a = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let alpha_vid = u32::from_le_bytes(entered_a.add[1..5].try_into().expect("a VID"));
+    let dog = vid_shown_at(
+        entered_a.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let smith = vid_shown_at(entered_a.shown.inserts(), (470_200, 950_000));
+    let (mut yankee, _listed_b, _items_b) = load_character(&server, b"bob", 0);
+    let entered_b = enter_game_shown(&mut yankee);
+    read_login_event(&mut yankee);
+    let yankee_vid = u32::from_le_bytes(entered_b.add[1..5].try_into().expect("a VID"));
+    let _ = alpha.drain_game(Duration::from_millis(300), game_len);
+    let _ = form_party(&mut alpha, &mut yankee, yankee_vid, alpha_vid);
+    let mut sword_ground = None;
+    for _ in 0..40 {
+        alpha.send_record(&client_attack(dog));
+        let (wire, _) = alpha.drain_game(Duration::from_millis(250), game_len);
+        if let Some(vid) = find_ground_vnum(&wire, 19) {
+            sword_ground = Some(vid);
+            break;
+        }
+    }
+    let sword_gvid = sword_ground.expect("the dog dropped sword 19");
+    let _ = yankee.drain_game(Duration::from_millis(250), game_len);
+    yankee.send_record(&protocol::cg_item_pickup::CgItemPickup::new(sword_gvid).encode());
+    let (y_wire, _) = yankee.drain_game(Duration::from_millis(400), game_len);
+    let (a_wire, _) = alpha.drain_game(Duration::from_millis(400), game_len);
+    assert!(y_wire.contains(&an_info_line(b"[LS;449;Alpha;Sabie+9]")));
+    assert!(a_wire.contains(&an_info_line(b"[LS;446;Yankee;Sabie+9]")));
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE vnum = 19 AND window_type = 1 \
+         AND owner_id = (SELECT id FROM player WHERE name = 'Alpha')",
+    );
+    alpha.send_record(&client_item_drop(0, None));
+    let (wire, _) = alpha.drain_game(Duration::from_millis(400), game_len);
+    let quest_gvid = find_ground_vnum(&wire, 30_300).expect("quest item 30300 on the ground");
+    alpha.send_record(&client_click(smith));
+    assert_eq!(alpha.read_game()[0], GC_SCRIPT, "quest opened on click");
+    alpha.send_record(&protocol::cg_item_pickup::CgItemPickup::new(quest_gvid).encode());
+    let (wire, _) = alpha.drain_game(Duration::from_millis(400), game_len);
+    assert!(wire.contains(&an_info_line(
+        b"You cannot pickup this item if you're using quests"
+    )));
+    alpha.send_record(&[CG_SCRIPT_ANSWER, 0]);
+    assert_eq!(alpha.read_game()[0], GC_SCRIPT, "quest closed on answer");
+    alpha.send_record(&protocol::cg_item_pickup::CgItemPickup::new(quest_gvid).encode());
+    let _ = alpha.drain_game(Duration::from_millis(400), game_len);
+    check(
+        &database,
+        "SELECT COUNT(*) = 1 FROM item WHERE id = 70 AND window_type = 1 \
+         AND owner_id = (SELECT id FROM player WHERE name = 'Alpha')",
+    );
+}
+
+fn seed_guild_smith_fixture(database: &ScratchDatabase) {
+    let setup = Server::start(binary(), database.url());
+    for login in ["alice", "bob", "charlie"] {
+        create_account(&setup, login);
+    }
+    drop(setup);
+    add_characters(database);
+    for stmt in [
+        "UPDATE account SET empire = 1 WHERE login IN ('alice', 'bob')",
+        "UPDATE account SET empire = 2 WHERE login = 'charlie'",
+        "UPDATE player SET gold = 50000, x = 468200, y = 901300 WHERE name = 'Alpha'",
+        "INSERT INTO player (account_id, slot, name, job, gold, x, y) \
+         SELECT id, 0, 'Yankee', 1, 50000, 468200, 901300 FROM account WHERE login = 'bob'",
+        "INSERT INTO player (account_id, slot, name, job, gold, x, y) \
+         SELECT id, 0, 'Zulu', 0, 50000, 468200, 901300 FROM account WHERE login = 'charlie'",
+        "INSERT INTO guild (id, name, master_pid, level, gold) \
+         SELECT 7, 'MyGuild', id, 10, 1000 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) \
+         SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, \
+         CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 15) grade",
+        "INSERT INTO guild_member (pid, guild_id, grade) \
+         SELECT id, 7, 1 FROM player WHERE name = 'Alpha'",
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (5, 7)",
+        "INSERT INTO building_object (id, land_id, vnum, map_index, x, y, x_rot, y_rot, z_rot, life) \
+         VALUES (3, 5, 14013, 1, 468200, 901300, 0, 0, 0, 0)",
+    ] {
+        sql(database, stmt);
+    }
+    for (id, name) in [(81, "Alpha"), (82, "Yankee"), (83, "Zulu")] {
+        sql(
+            database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) \
+                 SELECT {id}, id, 1, 0, 1, 10 FROM player WHERE name = '{name}'"
+            ),
+        );
+    }
+}
+
+/// `sys.item.refine`: a guild weapon smith (20044, built by object 14013 on guild land 5) gives
+/// a guild member a 10% fee discount and deposits 10% of a non-member's fee (100% same empire,
+/// 300% foreign empire) into the smith's guild bank (`ComputeRefineFee` / `PayRefineFee`,
+/// `G/char.cpp:8168-8222`).
+#[test]
+fn guild_smith_discounts_member_and_deposits_non_members_cut() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    seed_guild_smith_fixture(&database);
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true",
+    );
+    // Member Alpha: 10% discount (600 -> 540), no guild cut (guild.gold stays 1000).
+    let (mut alpha, _listed, entered_a) = enter_world_seeing_guilded(
+        &server,
+        b"alice",
+        0,
+        1,
+        Some(&[(803, 147, 8), (804, 146, 8), (805, 53, 10)]),
+    );
+    let smith = shown_vid(&entered_a, 20_044, "guild weapon smith 20044");
+    let alpha_vid = u32::from_le_bytes(entered_a.add[1..5].try_into().expect("a VID"));
+    alpha.send_record(&client_give(smith, 0));
+    assert_eq!(
+        alpha.read_game(),
+        server_refine_information(0, (10, 11), (540, 90), &[])
+    );
+    assert!(refine_the_first_cell(&mut alpha));
+    assert_eq!(alpha.read_game(), gold_change(alpha_vid, 0, 49_460));
+    check(&database, "SELECT gold = 1000 FROM guild WHERE id = 7");
+    drop(alpha);
+    // Same-empire non-member Yankee: 100% fee (600), 10% cut (+60 -> guild.gold = 1060).
+    let (mut yankee, _listed, _items) = load_character(&server, b"bob", 0);
+    let entered_b = enter_game_shown(&mut yankee);
+    read_login_event(&mut yankee);
+    let smith_b = shown_vid(&entered_b, 20_044, "guild weapon smith 20044");
+    let yankee_vid = u32::from_le_bytes(entered_b.add[1..5].try_into().expect("a VID"));
+    yankee.send_record(&client_give(smith_b, 0));
+    assert_eq!(
+        yankee.read_game(),
+        server_refine_information(0, (10, 11), (600, 90), &[])
+    );
+    assert!(refine_the_first_cell(&mut yankee));
+    assert_eq!(yankee.read_game(), gold_change(yankee_vid, 0, 49_400));
+    wait_for(&database, "SELECT gold = 1060 FROM guild WHERE id = 7");
+    drop(yankee);
+    // Foreign-empire non-member Zulu: 300% fee (1800), 10% cut (+180 -> guild.gold = 1240).
+    let (mut zulu, _listed, _items) = load_character(&server, b"charlie", 0);
+    let entered_c = enter_game_shown(&mut zulu);
+    read_login_event(&mut zulu);
+    let smith_c = shown_vid(&entered_c, 20_044, "guild weapon smith 20044");
+    let zulu_vid = u32::from_le_bytes(entered_c.add[1..5].try_into().expect("a VID"));
+    zulu.send_record(&client_give(smith_c, 0));
+    assert_eq!(
+        zulu.read_game(),
+        server_refine_information(0, (10, 11), (1_800, 90), &[])
+    );
+    zulu.send_record(&client_refine(0, 0));
+    assert_eq!(
+        zulu.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 2, b"RefineSuceeded")
+    );
+    assert_eq!(zulu.read_game()[..4], [ITEM_SET, 1, 0, 0]);
+    assert_eq!(zulu.read_game()[..4], [ITEM_SET, 1, 0, 0]);
+    assert_eq!(zulu.read_game(), gold_change(zulu_vid, 0, 48_200));
+    wait_for(&database, "SELECT gold = 1240 FROM guild WHERE id = 7");
+}

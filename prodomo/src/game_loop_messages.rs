@@ -3255,6 +3255,9 @@ pub enum RelayScope {
     /// included, as the member map is walked in PID order (`G/guild.h` `m_member`, a
     /// `std::map<DWORD, TGuildMember>`). Nothing when the character has no guild.
     Guild,
+    /// One specific player by VID (used when a party member picks up another member's drop,
+    /// so the recipient receives its `GC_ITEM_SET` and `[LS;446]` only after the store commits).
+    Player(common::vid::Vid),
 }
 
 /// Where a character enters the world.

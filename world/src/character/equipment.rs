@@ -72,6 +72,76 @@ const SASH_ABSORPTION_SOCKET: usize = 0;
 /// `SASH_ABSORBED_SOCKET`: the socket holding the absorbed item's vnum.
 const SASH_ABSORBED_SOCKET: usize = 1;
 
+/// `APPLY_MOV_SPEED` (`C/item_length.h`, skipped by `COSTUME_AURA` drain at `G/item.cpp:1007`).
+const APPLY_MOV_SPEED: u8 = 8;
+/// `ITEM_SOCKET_AURA_DRAIN_ITEM_VNUM` (`C/item_length.h:473`).
+const AURA_DRAIN_SOCKET: usize = 0;
+/// `ITEM_SOCKET_AURA_CURRENT_LEVEL` (`C/item_length.h:474`).
+const AURA_LEVEL_SOCKET: usize = 1;
+/// `ITEM_SOCKET_AURA_BOOST` (`C/item_length.h:475`).
+const AURA_BOOST_SOCKET: usize = 2;
+/// `ITEM_AURA_BOOST_ITEM_VNUM_BASE` (`G/unique_item.h:26`).
+const AURA_BOOST_VNUM_BASE: u32 = 49_980;
+/// `s_aiAuraRefineInfo[grade - 1][AURA_REFINE_INFO_LEVEL_MIN]` (`G/constants.cpp:1023-1054`).
+const AURA_LEVEL_MIN: [u8; 6] = [1, 50, 100, 150, 200, 250];
+
+/// `GetAuraRefineInfo(vnum % 10, AURA_REFINE_INFO_LEVEL_MIN)` (`G/item_manager.cpp:450-453`,
+/// `G/constants.cpp:1048-1054`), guarding `grade == 0` (legacy's `bGrade - 1` underflows, ADR-0008).
+#[must_use]
+pub fn aura_base_level(vnum: u32) -> u8 {
+    let grade = usize::try_from(vnum % 10).unwrap_or(0);
+    grade
+        .checked_sub(1)
+        .and_then(|idx| AURA_LEVEL_MIN.get(idx).copied())
+        .unwrap_or(0)
+}
+
+/// `fAuraDrainPer` in per-mille (tenths of a percent, `G/item.cpp:987-998`, `G/char.cpp:2799-2809`).
+fn aura_drain_per_mille(item: &Item, protos: &ItemProtos) -> i64 {
+    let level_raw = (item.sockets[AURA_LEVEL_SOCKET] / 100_000) - 1000;
+    let level = u8::try_from(level_raw.clamp(0, 255)).unwrap_or(0);
+    let mut per_mille = i64::from(level);
+    let boost_raw = item.sockets[AURA_BOOST_SOCKET] / 100_000_000;
+    if let Ok(boost_idx) = u32::try_from(boost_raw) {
+        if boost_idx > 0 {
+            if let Some(booster) = protos.get(AURA_BOOST_VNUM_BASE.saturating_add(boost_idx)) {
+                per_mille =
+                    per_mille.saturating_add(i64::from(booster.values[0]).saturating_mul(10));
+            }
+        }
+    }
+    per_mille.max(0)
+}
+
+/// `static_cast<int>((fValue < 1.0f) ? ceilf(fValue) : truncf(fValue))` (`G/item.cpp:1011`).
+fn aura_scale(value: i64, per_mille: i64) -> i32 {
+    if value <= 0 || per_mille <= 0 {
+        return 0;
+    }
+    let scaled = value.saturating_mul(per_mille);
+    if scaled < 1000 {
+        1
+    } else {
+        narrow(scaled / 1000)
+    }
+}
+
+/// Drained proto of a `COSTUME_AURA` item when it is a shield, wrist, neck or ear armor.
+fn aura_drained_proto<'a>(item: &Item, protos: &'a ItemProtos) -> Option<&'a ItemProto> {
+    let vnum = u32::try_from(item.sockets[AURA_DRAIN_SOCKET]).ok()?;
+    if vnum == 0 {
+        return None;
+    }
+    let drained = protos.get(vnum)?;
+    if drained.item_type == ITEM_ARMOR
+        && [ARMOR_SHIELD, ARMOR_WRIST, ARMOR_NECK, ARMOR_EAR].contains(&drained.sub_type)
+    {
+        Some(drained)
+    } else {
+        None
+    }
+}
+
 /// `SASH_EFFECT_FROM_ABS`: the share from which a sash shows its glowing look.
 const SASH_EFFECT_FROM_ABS: i32 = 19;
 
@@ -231,15 +301,27 @@ impl<'a> Equipment<'a> {
     /// armour, its proto's `value1` plus twice its `value5`.
     #[must_use]
     pub fn armour(&self) -> i32 {
-        let sum: i64 = self
-            .worn()
-            .map(|(_, worn)| worn.proto)
-            .filter(|proto| {
-                proto.item_type == ITEM_ARMOR
-                    && [ARMOR_BODY, ARMOR_HEAD, ARMOR_FOOTS, ARMOR_SHIELD].contains(&proto.sub_type)
-            })
-            .map(|proto| i64::from(proto.values[1]) + 2 * i64::from(proto.values[5]))
-            .sum();
+        let mut sum: i64 = 0;
+        for (_, worn) in self.worn() {
+            let proto = worn.proto;
+            if proto.item_type == ITEM_ARMOR
+                && [ARMOR_BODY, ARMOR_HEAD, ARMOR_FOOTS, ARMOR_SHIELD].contains(&proto.sub_type)
+            {
+                sum =
+                    sum.saturating_add(i64::from(proto.values[1]) + 2 * i64::from(proto.values[5]));
+            } else if proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_AURA {
+                if let Some(protos) = self.protos {
+                    if let Some(drained) = aura_drained_proto(worn.item, protos) {
+                        if drained.sub_type == ARMOR_SHIELD {
+                            let per_mille = aura_drain_per_mille(worn.item, protos);
+                            let base =
+                                i64::from(drained.values[1]) + 2 * i64::from(drained.values[5]);
+                            sum = sum.saturating_add(i64::from(aura_scale(base, per_mille)));
+                        }
+                    }
+                }
+            }
+        }
         narrow(sum)
     }
 
@@ -628,12 +710,35 @@ pub fn item_applies(
         }
     }
     proto_applies(item, proto, absorbed, accessory_grade, &mut applies);
+    let aura = proto.item_type == ITEM_COSTUME && proto.sub_type == COSTUME_AURA;
+    let aura_per_mille = if aura {
+        aura_drain_per_mille(item, protos)
+    } else {
+        0
+    };
+    if aura {
+        if let Some(drained) = aura_drained_proto(item, protos) {
+            for apply in &drained.applies {
+                let [kind, ..] = apply.kind.to_le_bytes();
+                if kind == APPLY_NONE || kind == APPLY_MOV_SPEED || apply.value <= 0 {
+                    continue;
+                }
+                applies.push((kind, aura_scale(i64::from(apply.value), aura_per_mille)));
+            }
+        }
+    }
     if !ATTRIBUTES_SKIPPED.contains(&item.vnum) {
         for attribute in &item.attributes {
             if attribute.b_type == 0 {
                 continue;
             }
             let mut value = i32::from(attribute.s_value);
+            if aura {
+                if attribute.s_value <= 0 {
+                    continue;
+                }
+                value = aura_scale(i64::from(attribute.s_value), aura_per_mille);
+            }
             if sash {
                 value = scale(i64::from(value), absorption);
                 if attribute.s_value > 0 && value <= 0 {
