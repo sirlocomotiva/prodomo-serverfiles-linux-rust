@@ -45,6 +45,11 @@ const TYPE_ZERO_KEPT: [u32; 14] = [
     121, 122, 124, 126, 127, 128, 129, 130, 131, 141, 142, 164, 165, 166,
 ];
 
+/// The type-5 rows: the four riding skills (`G/skill.h:154-157`, `G/char_skill.cpp:278-284`,
+/// `:4165-4168`): `SKILL_HORSE_WILDATTACK` (137), `SKILL_HORSE_CHARGE` (138),
+/// `SKILL_HORSE_ESCAPE` (139) and `SKILL_HORSE_WILDATTACK_RANGE` (140).
+const TYPE_FIVE_KEPT: [u32; 4] = [137, 138, 139, 140];
+
 /// The type-6 rows `/skillup` can reach (`do_skillup`'s switch,
 /// `G/cmd_general.cpp:953-969`): the eight wards (221-228) and the eight boosts
 /// (236-243), whose `24*k`/`16*k` point polys the help/anti functor arms read
@@ -54,7 +59,6 @@ const TYPE_ZERO_KEPT: [u32; 14] = [
 const TYPE_SIX_KEPT: [u32; 16] = [
     221, 222, 223, 224, 225, 226, 227, 228, 236, 237, 238, 239, 240, 241, 242, 243,
 ];
-
 /// `SKILL_COUNT` (`G/char_skill.cpp:4107`): six skills per job and group.
 pub const SKILL_COUNT: usize = 6;
 
@@ -229,8 +233,9 @@ impl PcSkills {
             let skill_type = number_at(&table, row, "bType")?;
             let typed = (PC_TYPE_MIN..=4).contains(&skill_type) && vnum <= PC_VNUM_MAX;
             let sub = skill_type == 0 && TYPE_ZERO_KEPT.contains(&vnum);
+            let horse = skill_type == 5 && TYPE_FIVE_KEPT.contains(&vnum);
             let extra = skill_type == 6 && TYPE_SIX_KEPT.contains(&vnum);
-            if !typed && !sub && !extra {
+            if !typed && !sub && !horse && !extra {
                 continue;
             }
             let record = decode_row(&table, row, vnum)?;
@@ -582,10 +587,13 @@ fn flag_mask(field: &[u8], vnum: u32) -> Result<u32, PcSkillError> {
     Ok(mask)
 }
 
-/// The `eSkillType+0` index: MySQL enum order NORMAL/MELEE/RANGE/MAGIC from 1.
+/// The `eSkillType+0` index: MySQL enum order NORMAL/MELEE/RANGE/MAGIC from 1,
+/// with an empty enum value reading 0 (as row 140 `SKILL_HORSE_WILDATTACK_RANGE`
+/// carries in `player.sql`).
 fn attr_index(field: &[u8], vnum: u32) -> Result<u8, PcSkillError> {
     let field = String::from_utf8_lossy(field);
     match field.trim() {
+        "" => Ok(0),
         "NORMAL" => Ok(1),
         "MELEE" => Ok(2),
         "RANGE" => Ok(3),
@@ -761,8 +769,11 @@ mod tests {
         assert!(skills.get(61).unwrap().is_castable_melee());
         // Vnum 3: a SELFONLY buff — not a melee cast.
         assert!(!skills.get(3).unwrap().is_castable_melee());
-        // Horse (137) and guild (151) rows are not PC rows.
-        assert!(skills.get(137).is_none());
+        // Horse rows (137-140) load as type 5; guild rows (151-159) are not PC rows.
+        for vnum in [137, 138, 139, 140] {
+            let row = skills.get(vnum).unwrap();
+            assert_eq!(row.record.skill_type, 5, "{vnum}");
+        }
         assert!(skills.get(151).is_none());
         // The 16 type-6 ward/boost rows load with their trigger polys; 229 and
         // 244 have rows but nothing reads them, so they stay out.
@@ -782,9 +793,9 @@ mod tests {
         ] {
             assert!(skills.get(vnum).is_some(), "{vnum}");
         }
-        // 123 is dead; 132-140 and 143-150 stay out.
+        // 123 is dead; 132-136 and 143-150 stay out.
         assert!(skills.get(123).is_none());
-        assert!(skills.get(137).is_none());
+        assert!(skills.get(132).is_none());
         // 164-166 are the `10 * k` new passives.
         for vnum in [164, 165, 166] {
             let row = skills.get(vnum).unwrap();

@@ -69107,3 +69107,301 @@ fn a_used_event_detector_pays_by_its_tier_points_and_burns_out_at_ten() {
     wait_for(&database, "(SELECT socket0 = 5 FROM item WHERE id = 31)");
     drop(server);
 }
+
+/// `CG_USE_SKILL` (`G/packet.h`) for `vnum` aimed at `target`.
+fn client_use_skill_on(vnum: u32, target: u32) -> Vec<u8> {
+    let mut record = vec![CG_USE_SKILL];
+    record.extend_from_slice(&vnum.to_le_bytes());
+    record.extend_from_slice(&target.to_le_bytes());
+    record
+}
+
+/// `POINT_SP` (`common::point_slot::POINT_SP`): 7.
+const POINT_SP_BYTE: u8 = 7;
+/// `POINT_HORSE_SKILL` (`common::point_slot::POINT_HORSE_SKILL`): 113.
+const POINT_HORSE_SKILL_BYTE: u8 = 113;
+
+/// Wait for one `GC_POINT_CHANGE` of `kind` for `vid`, draining unrelated fight records (a
+/// stone's spawned monsters may swing or add while a rider tests skills beside it).
+fn read_fight_point_change(client: &mut Keyed, vid: u32, kind: u8) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut seen = Vec::new();
+    loop {
+        let record = client
+            .read_fight_until(deadline)
+            .unwrap_or_else(|| panic!("point {kind} moves for {vid}"));
+        let hit = record[0] == GC_POINT_CHANGE
+            && record.len() == POINT_CHANGE_LEN
+            && record[4..8] == vid.to_le_bytes()
+            && record[8] == kind;
+        seen.push(record);
+        if hit {
+            return seen;
+        }
+    }
+}
+
+/// Wait for one `GC_DAMAGE_INFO` aimed at `target`, or return it if `already` holds one.
+fn read_damage_on(client: &mut Keyed, target: u32, already: &[Vec<u8>]) {
+    let on_target =
+        |record: &Vec<u8>| record[0] == GC_DAMAGE_INFO && record[1..5] == target.to_le_bytes();
+    if already.iter().any(on_target) {
+        return;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let record = client
+            .read_fight_until(deadline)
+            .unwrap_or_else(|| panic!("damage lands on {target}"));
+        if on_target(&record) {
+            return;
+        }
+    }
+}
+
+/// Climb `vnum` by `/skillup`, asserting `POINT_HORSE_SKILL` moves to `after`, and verify byte 76.
+fn horse_skill_up(client: &mut Keyed, vid: u32, vnum: usize, after: i64) {
+    client.send_record(&client_chat(
+        CHAT_TALKING,
+        format!("/skillup {vnum}").as_bytes(),
+    ));
+    assert_eq!(
+        read_skill_move(
+            client,
+            &point_change(vid, POINT_HORSE_SKILL_BYTE, 0, after),
+            vnum
+        ),
+        1,
+        "horse skill {vnum} climbs to 1"
+    );
+}
+
+/// Forget `vnum` with the `FORGET_BOOK` in cell 0, asserting `POINT_HORSE_SKILL` refunds to `after`.
+fn horse_skill_forget(client: &mut Keyed, vid: u32, vnum: usize, after: i64) {
+    client.send_record(&client_item_use(0));
+    let (window, at, _vnum, count) = set_fields(&client.read_game());
+    assert_eq!((window, at, count), (1, 0, 0), "forget book goes");
+    assert_eq!(
+        read_skill_move(
+            client,
+            &point_change(vid, POINT_HORSE_SKILL_BYTE, 0, after),
+            vnum
+        ),
+        0,
+        "horse skill {vnum} drops back to 0"
+    );
+    assert_eq!(client.read_game(), an_info_line(b"[LS;78]"));
+}
+
+/// Select and enter a high-level horse-equipped character, draining its post-enter quest and
+/// horse skill sync records.
+fn enter_horse_rider(server: &Server, login: &[u8], item_count: usize) -> (Keyed, Listed, Entered) {
+    let (mut keyed, _empire, list) = select_screen(server, login);
+    let character = listed(&list, 0);
+    keyed.send_record(&client_select(0));
+    select_equipped_enter(&mut keyed, item_count);
+    let entered = enter_game_shown(&mut keyed);
+    let _ = records_within(&mut keyed, Duration::from_millis(800));
+    (keyed, character, entered)
+}
+
+/// The four type-5 horse skills (`137..=140`): `/skillup` spends `POINT_HORSE_SKILL` (113,
+/// `G/char_skill.cpp:833`) — with 140 refused for a non-assassin (`:280`) — and a forget book
+/// refunds it (`:703`); `CanUseSkill` (`:4165-4168`) refuses all four while dismounted and admits
+/// all four on a grade-3 horse; `SKILL_HORSE_WILDATTACK` (137) strikes on `CG_ATTACK`,
+/// `SKILL_HORSE_CHARGE` (138) dashes and strikes eagerly on `CG_USE_SKILL`, `SKILL_HORSE_ESCAPE`
+/// (139) strikes eagerly via `SELFONLY` splash and caps `CG_ATTACK` at 10 hits per victim
+/// (`CheckSkillHitCount`, `:4234`, below `iMaxHit = 12`), and `SKILL_HORSE_WILDATTACK_RANGE`
+/// (140) shoots with bow and arrow via `CG_SHOOT` (`eSkillType` 0 -> `DAMAGE_TYPE_NONE`).
+fn seed_horse_riders(server: &Server, database: &ScratchDatabase) {
+    create_account(server, "alice");
+    create_account(server, "bob");
+    add_characters(database);
+    sql(database, "UPDATE account SET empire = 1");
+    sql(
+        database,
+        "UPDATE player SET job = 0, level = 55, skill_group = 1, hp = 5000, sp = 2000, \
+         x = 470000, y = 950000, horse_level = 21, horse_hp = 50, horse_stamina = 200, \
+         horse_riding = false, horse_hp_droptime = extract(epoch FROM now())::bigint, \
+         horse_skill_point = 4 WHERE name = 'Alpha'",
+    );
+    sql(
+        database,
+        "UPDATE player SET account_id = (SELECT id FROM account WHERE login = 'bob'), slot = 0, \
+         job = 1, level = 55, skill_group = 1, hp = 5000, sp = 2000, x = 470000, y = 950000, \
+         horse_level = 21, horse_hp = 50, horse_stamina = 200, horse_riding = false, \
+         horse_hp_droptime = extract(epoch FROM now())::bigint, horse_skill_point = 4 \
+         WHERE name = 'Beta'",
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 70, \
+             id, 1, 0, 1, {FORGET_BOOK}, 137 FROM player WHERE name = 'Alpha'"
+        ),
+    );
+    sql(
+        database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) SELECT 71, \
+             id, 1, 0, 1, {FORGET_BOOK}, 140 FROM player WHERE name = 'Beta'"
+        ),
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 72, id, 2, 4, \
+         1, 2000 FROM player WHERE name = 'Beta'",
+    );
+    sql(
+        database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 73, id, 2, 9, \
+         50, 8000 FROM player WHERE name = 'Beta'",
+    );
+}
+
+fn exercise_warrior_horse_skills(server: &mut Server, database: &ScratchDatabase) {
+    let (mut alpha, alpha_listed, alpha_entered) = enter_horse_rider(server, b"alice", 1);
+    let alpha_vid = alpha_listed.id;
+    let stone = vid_shown_at(
+        alpha_entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/skillup 140"));
+    alpha.quiet_for("a warrior cannot learn 140", Duration::from_millis(400));
+    horse_skill_up(&mut alpha, alpha_vid, 137, 3);
+    horse_skill_forget(&mut alpha, alpha_vid, 137, 4);
+    horse_skill_up(&mut alpha, alpha_vid, 137, 3);
+    horse_skill_up(&mut alpha, alpha_vid, 138, 2);
+    horse_skill_up(&mut alpha, alpha_vid, 139, 1);
+
+    alpha.send_record(&client_target(stone));
+    assert_eq!(alpha.read_fight()[0], GC_TARGET);
+    for (vnum, target) in [(137, stone), (138, stone), (139, 0)] {
+        alpha.send_record(&client_use_skill_on(vnum, target));
+    }
+    alpha.quiet_for(
+        "137-139 refuse CanUseSkill while dismounted",
+        Duration::from_millis(500),
+    );
+
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    sql(
+        database,
+        "UPDATE player SET horse_riding = true WHERE name = 'Alpha'",
+    );
+    let (mut alpha, alpha_listed, alpha_entered) = enter_horse_rider(server, b"alice", 0);
+    let alpha_vid = alpha_listed.id;
+    let stone = vid_shown_at(
+        alpha_entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    alpha.send_record(&client_target(stone));
+    assert_eq!(alpha.read_fight()[0], GC_TARGET);
+    // 137: SP charge on CG_USE_SKILL, melee strike on CG_ATTACK.
+    alpha.send_record(&client_use_skill_on(137, stone));
+    let _sp = read_fight_point_change(&mut alpha, alpha_vid, POINT_SP_BYTE);
+    alpha.send_record(&client_attack_typed(137, stone));
+    read_damage_on(&mut alpha, stone, &[]);
+
+    // 138: charge skill dashes and strikes eagerly on CG_USE_SKILL with a victim.
+    alpha.send_record(&client_use_skill_on(138, stone));
+    let burst = read_fight_point_change(&mut alpha, alpha_vid, POINT_SP_BYTE);
+    read_damage_on(&mut alpha, stone, &burst);
+
+    // 139: SELFONLY + SPLASH strikes once on CG_USE_SKILL, then 11 CG_ATTACKs land exactly 10.
+    alpha.send_record(&client_use_skill_on(139, 0));
+    let burst = read_fight_point_change(&mut alpha, alpha_vid, POINT_SP_BYTE);
+    read_damage_on(&mut alpha, stone, &burst);
+    let attack_139 = client_attack_typed(139, stone);
+    for _ in 0..11 {
+        alpha.send_record(&attack_139);
+    }
+    let wire = records_within(&mut alpha, Duration::from_millis(800));
+    let hits_139 = wire
+        .iter()
+        .filter(|record| record[0] == GC_DAMAGE_INFO && record[1..5] == stone.to_le_bytes())
+        .count();
+    assert_eq!(hits_139, 10, "139 caps CG_ATTACK at 10 hits per victim");
+    drop(alpha);
+    server.wait_for_next("Character disconnected; wrote the row");
+}
+
+fn exercise_assassin_horse_skill(server: &mut Server, database: &ScratchDatabase) {
+    let (mut beta, beta_listed, beta_entered) = enter_horse_rider(server, b"bob", 3);
+    let beta_vid = beta_listed.id;
+    let stone = vid_shown_at(
+        beta_entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    horse_skill_up(&mut beta, beta_vid, 140, 3);
+    horse_skill_forget(&mut beta, beta_vid, 140, 4);
+    horse_skill_up(&mut beta, beta_vid, 140, 3);
+
+    beta.send_record(&client_target(stone));
+    assert_eq!(beta.read_fight()[0], GC_TARGET);
+    beta.send_record(&client_use_skill_on(140, stone));
+    beta.quiet_for(
+        "140 refuses CanUseSkill while dismounted",
+        Duration::from_millis(500),
+    );
+
+    drop(beta);
+    server.wait_for_next("Character disconnected; wrote the row");
+    sql(
+        database,
+        "UPDATE player SET horse_riding = true WHERE name = 'Beta'",
+    );
+    let (mut beta, beta_listed, beta_entered) = enter_horse_rider(server, b"bob", 2);
+    let beta_vid = beta_listed.id;
+    let stone = vid_shown_at(
+        beta_entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    beta.send_record(&client_target(stone));
+    assert_eq!(beta.read_fight()[0], GC_TARGET);
+    beta.send_record(&client_fly(CG_FLY_TARGETING, stone, ALPHA_ENTERS_AT));
+    beta.send_record(&client_use_skill_on(140, stone));
+    let _sp = read_fight_point_change(&mut beta, beta_vid, POINT_SP_BYTE);
+    beta.send_record(&[CG_SHOOT, 140]);
+    let shot = records_within(&mut beta, Duration::from_millis(800));
+    let arrow_spent = shot
+        .iter()
+        .any(|record| record[0] == ITEM_UPDATE && update_fields(record) == (2, 189, 49));
+    assert!(
+        arrow_spent,
+        "140 spends one arrow from WEAR_ARROW: {shot:02x?}"
+    );
+    let hits_140 = shot
+        .iter()
+        .filter(|record| record[0] == GC_DAMAGE_INFO && record[1..5] == stone.to_le_bytes())
+        .count();
+    assert_eq!(hits_140, 1, "140 lands its shot damage on the stone");
+    drop(beta);
+    server.wait_for_next("Character disconnected; wrote the row");
+}
+
+#[test]
+fn horse_skills_climb_forget_cast_only_when_riding_and_cap_escape_hits() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        STONE_AT_ALPHA,
+        "no_wander = true\ntest_server = false\nping_event_second_cycle = 600",
+    );
+    seed_horse_riders(&server, &database);
+    exercise_warrior_horse_skills(&mut server, &database);
+    exercise_assassin_horse_skill(&mut server, &database);
+    wait_for(
+        &database,
+        "(SELECT horse_skill_point = 1 FROM player WHERE name = 'Alpha') \
+         AND (SELECT horse_skill_point = 3 FROM player WHERE name = 'Beta') \
+         AND (SELECT count(*) = 0 FROM item WHERE id IN (70, 71)) \
+         AND (SELECT count = 49 FROM item WHERE id = 73)",
+    );
+    drop(server);
+}

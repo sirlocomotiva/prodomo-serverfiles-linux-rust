@@ -57916,3 +57916,61 @@ cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_
 passed, 0 failed in 46 targets; with it 5,721 passed, 0 failed in 46 targets (486 s); doc-tests
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No test failed on the first run. The 720-721 run (g721) had lost `a_unique_is_worn_and_taken_off_by_its_use` and `a_friend_request_answered_yes_lists_both_directions_and_relogin_keeps_it`; both were scenario clocks (ledger 726) and are fixed in this tree.
 Parity: 1,716 `ported`, 93 `partial`, 518 `unused`, 4 `missing`, 0 `codec`, of 2,331 rows; 577 scenarios. No ADR changed.
+
+## 727. The horse skills (137–140) and the closure of `skill-arms.md`
+
+Closes all eight remaining open rows of `.scratch/parity/skill-arms.md` (`skill-arms.md` is now
+73/73 closed: 65 `ported`, 8 `unused`, 0 `partial`, 0 `missing`).
+
+**Hosting the type-5 horse skills (`137..=140`).** `gamedata::pc_skill_data::PcSkills::from_dumps`
+now accepts `TYPE_FIVE_KEPT` (`137`, `138`, `139`, `140` — `SKILL_HORSE_WILDATTACK`,
+`SKILL_HORSE_CHARGE`, `SKILL_HORSE_ESCAPE`, `SKILL_HORSE_WILDATTACK_RANGE`) alongside types 1–4,
+`TYPE_ZERO_KEPT` and `TYPE_SIX_KEPT`, and `attr_index` accepts an empty `eSkillType` enum string
+as `0` (`SKILL_ATTR_TYPE_NORMAL`), matching legacy `CClientManager::InitializeSkillTable`'s
+`FindSkillAttrType` (`D/ClientManagerBoot.cpp:715-742`) for vnum `140` (`eSkillType = ''` in
+`legacy/sql/gamedata/player.sql`).
+
+**Three Rewrite mistakes found while porting 138, 139, and 140, fixed:**
+- `cast_skill` (`prodomo/src/game_state/pc_skill.rs`) dispatched `SKILL_FLAG_SELFONLY` before
+  checking `SKILL_FLAG_ATTACK`, so a `SELFONLY | ATTACK` skill (like `SKILL_HORSE_ESCAPE` 139)
+  took the self-buff branch instead of `compute_skill` (`G/char_skill.cpp:2996-3066`).
+  `SELFONLY` skills with `SKILL_FLAG_ATTACK` now reach `compute_skill`.
+- `skill_functor` (`prodomo/src/game_state/pc_skill.rs`) matched only `SKILL_ATTR_MAGIC`,
+  treating `SKILL_ATTR_TYPE_NORMAL` (0, used by `140`) as `SKILL_ATTR_MELEE` (`damage_melee` and
+  melee defence subtraction), whereas legacy `FuncSplashDamage` (`G/char_skill.cpp:1530-1605`)
+  keeps `dt = DAMAGE_TYPE_NONE` and `iDam` unchanged for `SKILL_ATTR_TYPE_NORMAL` and passes it
+  through `CHARACTER::Damage` (`damage_special` in Rust). `SkillDamageKind::None` now routes
+  through `world::character::damage_special`.
+- `skill_attack` (`prodomo/src/game_state/pc_skill.rs`) routed `CRUSH` skills (`137`) straight
+  to `compute_skill_melee` without `compute_skill`'s crush/splash dispatch; `is_castable_splash_melee`
+  and `CRUSH`/`CRUSH_LONG` now route through `compute_skill`, and `CheckSkillHitCount`
+  (`G/char_skill.cpp:4184-4254`) was extracted to `check_skill_hit_count`. `shoot_one` now admits
+  `SKILL_HORSE_WILDATTACK_RANGE` (140) alongside the assassin bow skills (`46..=50`).
+
+**`skill.level_up.0` closed as `unused`.** `case 0: idx = POINT_SUB_SKILL` (`G/char_skill.cpp:820`)
+runs only under `SKILL_UP_BY_POINT` (`do_skillup`, `G/cmd_general.cpp:930,971`). Across all 49
+`bType = 0` rows in `legacy/sql/gamedata/player.sql`: 17 player passives (`121-132`, `141-142`,
+`164-166`) carry `DISABLE_BY_POINT_UP` (refused at `:789`); 8 retired anti-skills (`112-119`,
+`NONAME_112..119`) require `GetSkillLevel > 0` (`:745-748`) and no item in `item_proto.txt`
+(positive control: 50516 grants 221) or quest in `legacy/gamedata/locale/europe/quest/` ever
+grants them; 9 guild skills (`151-159`) are refused for players by Ledger 720's Defect fix;
+`160-162` are absent from `CanUseSkill`/`do_skillup`; `256-269` are mob skills (`>= SKILL_MAX_NUM`,
+refused at `:760`).
+
+**Scenario.** `horse_skills_climb_forget_cast_only_when_riding_and_cap_escape_hits`
+(`prodomo/tests/parity.rs`, running in shipped `test_server = false` mode, verified 8× in
+parallel) proves all seven ported rows: `/skillup` spending `POINT_HORSE_SKILL` (113) for
+`137-139` on warrior Alpha and `140` on assassin Beta (and refusing warrior `140`), forget books
+refunding `POINT_HORSE_SKILL` for `137` and `140`, dismounted refusal of `CG_USE_SKILL(137..=140)`,
+mounted casts on a grade-3 horse (`137` via `CG_ATTACK`, `138` eager charge, `139` eager
+`SELFONLY` splash plus `CheckSkillHitCount` capping 11 `CG_ATTACK(139)` records at exactly 10
+`GC_DAMAGE_INFO` hits, and `140` via `CG_SHOOT` spending 1 arrow and landing `DAMAGE_TYPE_NONE`
+damage).
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,722
+passed, 0 failed in 46 targets; with it 5,722 passed, 0 failed in 46 targets (482 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run.
+Parity: 1,723 `ported`, 85 `partial`, 519 `unused`, 4 `missing`, 0 `codec`, of 2,331 rows; 578
+scenarios. No ADR changed.

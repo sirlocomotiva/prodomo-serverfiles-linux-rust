@@ -44,17 +44,18 @@ use common::vid::Vid;
 use gamedata::item_kind::{ITEM_WEAPON, WEAPON_ARROW, WEAPON_BOW};
 use gamedata::mob_proto::AIFLAG_NOMOVE;
 use gamedata::mob_skill_data::{
-    SKILL_ATTR_MAGIC, SKILL_ATTR_RANGE, SKILL_FLAG_ATTACK, SKILL_FLAG_CRUSH, SKILL_FLAG_CRUSH_LONG,
-    SKILL_FLAG_DISABLE_BY_POINT_UP, SKILL_FLAG_FIRE_CONT, SKILL_FLAG_IGNORE_TARGET_RATING,
-    SKILL_FLAG_PARTY, SKILL_FLAG_PENETRATE, SKILL_FLAG_POISON, SKILL_FLAG_REMOVE_BAD_AFFECT,
-    SKILL_FLAG_SELFONLY, SKILL_FLAG_SPLASH, SKILL_FLAG_STUN, SKILL_FLAG_TOGGLE,
-    SKILL_FLAG_USE_ARROW_DAMAGE,
+    SKILL_ATTR_MAGIC, SKILL_ATTR_MELEE, SKILL_ATTR_RANGE, SKILL_FLAG_ATTACK, SKILL_FLAG_CRUSH,
+    SKILL_FLAG_CRUSH_LONG, SKILL_FLAG_DISABLE_BY_POINT_UP, SKILL_FLAG_FIRE_CONT,
+    SKILL_FLAG_IGNORE_TARGET_RATING, SKILL_FLAG_PARTY, SKILL_FLAG_PENETRATE, SKILL_FLAG_POISON,
+    SKILL_FLAG_REMOVE_BAD_AFFECT, SKILL_FLAG_SELFONLY, SKILL_FLAG_SPLASH, SKILL_FLAG_STUN,
+    SKILL_FLAG_TOGGLE, SKILL_FLAG_USE_ARROW_DAMAGE,
 };
 use gamedata::pc_skill_data::SHOOT_LIST;
 use world::character::{
     attack_rating, battle_damage_floor, calc_arrow_skill_atk, calc_melee_skill_atk, damage_magic,
-    damage_melee, damage_normal_range, damage_range, number, skill_magic_attr, skill_melee_attr,
-    skill_range_attr, AttackRatingInput, Equipment, Points, PolyAttack, Striker, Struck,
+    damage_melee, damage_normal_range, damage_range, damage_special, number, skill_magic_attr,
+    skill_melee_attr, skill_range_attr, AttackRatingInput, Equipment, Points, PolyAttack, Striker,
+    Struck,
 };
 use world::npc::Npc;
 
@@ -390,6 +391,8 @@ impl Default for PcSkillState {
 /// plain bow shot (`damage_normal_range`, which also answers the stolen gold).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SkillDamageKind {
+    /// `DAMAGE_TYPE_NONE` (`SKILL_ATTR_TYPE_NORMAL`, e.g. `SKILL_HORSE_WILDATTACK_RANGE` 140).
+    None,
     /// `DAMAGE_TYPE_RANGE`.
     Range,
     /// `DAMAGE_TYPE_MAGIC`.
@@ -555,11 +558,9 @@ impl GameState {
     /// 137-140, the 7/8 anti 112-119, 141/142, the 7/8 anti/help 221-228/236-243
     /// — `__7AND8TH_SKILLS__` is ON in `prodomodefines.h:165`), the 112-119
     /// zero-level refusal (the quest/grand shapes are ported and the 7/8 types
-    /// are hosted), the `SkillCanUp` sibling refusal on 221-243
-    /// (`:737-742`), the unknown-row refusal (a hosted row, so the switch's
-    /// 137-140 and the 112-119 anti vnums refuse here: none is hosted), the
-    /// `>= 255` refusal,
-    /// `IsLearnableSkill`, the GRAND/PERFECT master refusals, the NORMAL +
+    /// sibling refusal on 221-243 (`:737-742`), the unknown-row refusal (a hosted
+    /// row, so the 112-119 anti vnums refuse here: none is hosted), the `>= 255`
+    /// refusal,
     /// `DISABLE_BY_POINT_UP` point-method gate, the level limit, the prereq arm,
     /// the `FIX_SECONDARY_SKILL` group gate, the spend (`SUB_SKILL` for type 0,
     /// `SKILL` for 1-4/6, `HORSE_SKILL` for 5), the climb (`SetSkillLevel`'s
@@ -836,8 +837,7 @@ impl GameState {
     /// 40, a type-0 below its max, a type-5 (140 needs an assassin), else a
     /// grouped row of the job's type, a type-6 anti vnum with no sibling
     /// learned, or a learned new/help vnum (221-228/236-243, the compiled-in
-    /// `__7AND8TH_SKILLS__` arm). No type-5 row is hosted, so that arm never
-    /// fires here; the 112-119 arms never fire either (their rows stay out).
+    /// `__7AND8TH_SKILLS__` arm). The 112-119 arms never fire (their rows stay out).
     fn is_learnable_skill(
         &self,
         vid: Vid,
@@ -1593,8 +1593,7 @@ impl GameState {
     }
 
     /// `CSkillProto::IsChargeSkill` (`G/skill.h:244-247`): the TANHWAN pair —
-    /// the warrior's 5 and the horse's 138. Only 5 is hosted (type-5 rows never
-    /// load), so 138's arms are coded and dead.
+    /// the warrior's 5 and the horse's 138.
     const fn is_charge_skill(vnum: u32) -> bool {
         vnum == SKILL_TANHWAN || vnum == SKILL_HORSE_CHARGE
     }
@@ -1895,7 +1894,11 @@ impl GameState {
             .get(skill_vnum)
             .map_or(0, |skill| skill.record.flag);
         if flag & SKILL_FLAG_SELFONLY != 0 {
-            self.compute_skill_affect(vid, skill_vnum, vid.raw(), k, level);
+            if is_attack {
+                self.compute_skill(vid, skill_vnum, vid.raw());
+            } else {
+                self.compute_skill_affect(vid, skill_vnum, vid.raw(), k, level);
+            }
         } else if flag & SKILL_FLAG_PARTY != 0 {
             self.compute_skill_party(vid, skill_vnum, k, level);
         } else if !is_attack {
@@ -2697,11 +2700,60 @@ impl GameState {
             .npc_by_vid(target_vid)
             .expect("the victim stood above")
             .clone();
-        // `CheckSkillHitCount` (`G/char_skill.cpp:4184-4254`), before `Attack`: an unused
-        // skill refuses; YONGKWON 62/HWAYEOMPOK 77/DAEJINGAK 18/PAERYONG 93 refuse the attack
-        // record; then each victim's count is capped (3 for SAMYEON=1/CHARYUN=33, 10 for
-        // HORSE_ESCAPE=139, else 1). The YEONSA-7/HORSE_WILDATTACK_RANGE-5 arms are
-        // unreachable: both skills are on the shoot list, refused here before the count.
+        if !self.check_skill_hit_count(vid, skill_vnum, target_vid) {
+            return false;
+        }
+        // `battle_is_attackable` (`G/battle.cpp:165`): beyond it the attack is `BATTLE_NONE`
+        // and sends nothing. There is no melee reach here: `ComputeSkill`'s target-range
+        // arm (`+ 50`) below is the only distance gate.
+        if !self.is_attackable(vid, (place.1, spot.x, spot.y), &npc_snapshot) {
+            return false;
+        }
+        // `Attack(bType)`'s skill-term gate (`G/char_battle.cpp:297-304`): past 1500 ms
+        // after `m_dwLastSkillTime` the cast is refused. `use_skill` stamps the pulse,
+        // so the `>` fires past 37 Pulses.
+        let now = self.last_pulse;
+        let term = self
+            .pc_skills
+            .get(&vid.raw())
+            .and_then(|state| state.last_skill)
+            .is_some_and(|last| now.saturating_sub(last) > SKILL_TERM_PULSES);
+        if term {
+            return false;
+        }
+        if row.is_castable_splash_melee()
+            || row.record.flag & (SKILL_FLAG_CRUSH | SKILL_FLAG_CRUSH_LONG) != 0
+        {
+            self.compute_skill(vid, skill_vnum, target_vid);
+        } else {
+            self.compute_skill_melee(vid, &row, target_vid);
+        }
+        // The `ComputeSkill` `OnMove(true)` for a non-NORMAL attr
+        // (`G/char_skill.cpp:2576-2577`): every 230d row is MELEE-attr.
+        let now_ms = self.clock.now();
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.fighting = true;
+            body.last_move = now_ms;
+            body.last_attack = Some(now_ms);
+        }
+        self.cancel_mining(vid);
+        // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`G/char_battle.cpp:219-223`).
+        let (nx, ny) = self
+            .npc_by_vid(target_vid)
+            .map(|npc| (npc.x, npc.y))
+            .expect("the victim stood above");
+        if let Some(body) = self.bodies.get_mut(&vid) {
+            body.rotation = rotation_to_xy(nx.saturating_sub(spot.x), ny.saturating_sub(spot.y));
+        }
+        true
+    }
+
+    /// `CheckSkillHitCount` (`G/char_skill.cpp:4184-4254`), before `Attack`: an unused
+    /// skill refuses; `YONGKWON` 62, `HWAYEOMPOK` 77, `DAEJINGAK` 18 and `PAERYONG` 93 refuse
+    /// the attack record; then each victim's count is capped (3 for `SAMYEON` 1 / `CHARYUN` 33,
+    /// 10 for `HORSE_ESCAPE` 139, else 1). The `YEONSA` (7) and `HORSE_WILDATTACK_RANGE` (5)
+    /// arms are unreachable: both skills are on the shoot list, refused before the count.
+    fn check_skill_hit_count(&mut self, vid: Vid, skill_vnum: u32, target_vid: u32) -> bool {
         if matches!(skill_vnum, 62 | 77 | 18 | 93) {
             return false;
         }
@@ -2731,42 +2783,6 @@ impl GameState {
         count
             .hits_per_victim
             .insert(target_vid, seen.saturating_add(1));
-        // `battle_is_attackable` (`G/battle.cpp:165`): beyond it the attack is `BATTLE_NONE`
-        // and sends nothing. There is no melee reach here: `ComputeSkill`'s target-range
-        // arm (`+ 50`) below is the only distance gate.
-        if !self.is_attackable(vid, (place.1, spot.x, spot.y), &npc_snapshot) {
-            return false;
-        }
-        // `Attack(bType)`'s skill-term gate (`G/char_battle.cpp:297-304`): past 1500 ms
-        // after `m_dwLastSkillTime` the cast is refused. `use_skill` stamps the pulse,
-        // so the `>` fires past 37 Pulses.
-        let now = self.last_pulse;
-        let term = self
-            .pc_skills
-            .get(&vid.raw())
-            .and_then(|state| state.last_skill)
-            .is_some_and(|last| now.saturating_sub(last) > SKILL_TERM_PULSES);
-        if term {
-            return false;
-        }
-        self.compute_skill_melee(vid, &row, target_vid);
-        // The `ComputeSkill` `OnMove(true)` for a non-NORMAL attr
-        // (`G/char_skill.cpp:2576-2577`): every 230d row is MELEE-attr.
-        let now_ms = self.clock.now();
-        if let Some(body) = self.bodies.get_mut(&vid) {
-            body.fighting = true;
-            body.last_move = now_ms;
-            body.last_attack = Some(now_ms);
-        }
-        self.cancel_mining(vid);
-        // `SetPosition(POS_FIGHTING)` and `SetRotationToXY` (`G/char_battle.cpp:219-223`).
-        let (nx, ny) = self
-            .npc_by_vid(target_vid)
-            .map(|npc| (npc.x, npc.y))
-            .expect("the victim stood above");
-        if let Some(body) = self.bodies.get_mut(&vid) {
-            body.rotation = rotation_to_xy(nx.saturating_sub(spot.x), ny.saturating_sub(spot.y));
-        }
         true
     }
 
@@ -3491,7 +3507,7 @@ impl GameState {
                 SkillDamageKind::Magic,
                 AggroDamage::Magic,
             )
-        } else {
+        } else if attr == SKILL_ATTR_MELEE {
             let damage = skill_melee_attr(
                 amount,
                 weapon.as_ref(),
@@ -3503,6 +3519,10 @@ impl GameState {
             let (struck, events) = self.skill_damage_melee(vid, victim, damage, weapon.as_ref());
             self.show_strike(vid, victim, events);
             return self.after_skill_damage(vid, row, victim, struck, k, AggroDamage::Melee);
+        } else {
+            // `SKILL_ATTR_TYPE_NORMAL` (1) and an empty enum (0, row 140) both keep
+            // `dt = DAMAGE_TYPE_NONE` and `iDam` unchanged (`G/char_skill.cpp:1530-1605`).
+            (amount, SkillDamageKind::None, AggroDamage::Normal)
         };
         let (struck, _stolen, events) = self.skill_damage_typed(vid, victim, damage, kind);
         self.show_strike(vid, victim, events);
@@ -3922,6 +3942,10 @@ impl GameState {
             .get_mut(at)
             .expect("the victim stood above");
         match kind {
+            SkillDamageKind::None => {
+                let (struck, events) = damage_special(&mut self.dice, &mut striker, npc, damage);
+                (struck, 0, events)
+            }
             SkillDamageKind::Range => {
                 let (struck, events) = damage_range(&mut self.dice, &mut striker, npc, damage);
                 (struck, 0, events)
@@ -4070,8 +4094,8 @@ impl GameState {
                 || u32::from(vnum) == SKILL_HORSE_WILDATTACK_RANGE =>
             {
                 // The arrow skills (`:3149-3230`): `== iUseArrow` needs 1 arrow, then the
-                // `OnMove`s, `BeginFight`, `ComputeSkill` and `UseArrow(1)`. Only vnum 47
-                // is hosted; the others refuse as unknown rows in `compute_skill`.
+                // `OnMove`s, `BeginFight`, `ComputeSkill` and `UseArrow(1)`. Vnums 47 and
+                // 140 are hosted; the others refuse as unknown rows in `compute_skill`.
                 if self.arrow_and_bow(vid).is_none() {
                     return (None, Vec::new());
                 }
