@@ -246,6 +246,7 @@ pub use sash::{
     SASH_REFINE, SASH_REMOVE,
 };
 pub use set_attr::SetAttrStored;
+pub use ship::ShipWaveFiles;
 pub use shop::{ShopAnswer, ShopDeclined, ShopStep, SAFEBOX_OPEN_NOTICE};
 pub use skill_admin::{SetJobLanded, SetSkillLanded, SetSkillOtherLanded};
 pub use stat::{SetStatHeld, StatHeld};
@@ -1096,6 +1097,8 @@ pub struct GameState {
     tanaka: tanaka::TanakaEntries,
     /// The map-230 walks' placed entries. See [`event_cycle`].
     event_cycles: event_cycle::EventCycleFiles,
+    /// The ship-defence wave regen entries (`data/dungeon/ship_defense/wave*.txt`). See [`ship`].
+    ship_waves: ship::ShipWaveFiles,
     /// What each non-player keeps of its fight: its killer, its owner and its events. See
     /// [`fight`].
     npc_combat: HashMap<u32, fight::NpcCombat>,
@@ -1345,6 +1348,12 @@ impl GameState {
     #[must_use]
     pub fn with_event_cycles(mut self, files: event_cycle::EventCycleFiles) -> Self {
         self.event_cycles = files;
+        self
+    }
+    /// Share the ship-defence wave regen entries loaded from `data/dungeon/ship_defense/`.
+    #[must_use]
+    pub fn with_ship_waves(mut self, files: ship::ShipWaveFiles) -> Self {
+        self.ship_waves = files;
         self
     }
 

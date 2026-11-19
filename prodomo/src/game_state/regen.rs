@@ -453,10 +453,21 @@ impl GameState {
         if regen.missing() == 0 {
             return;
         }
+        let base = if map >= super::dungeons::PRIVATE_MAP_BASE {
+            map / super::dungeons::PRIVATE_MAP_BASE
+        } else {
+            map
+        };
         let (Some(respawner), Some(region), Some(cells)) = (
             self.regens.respawner.as_mut(),
-            self.regens.regions.get(&key),
-            self.regens.cells.get(map),
+            self.regens
+                .regions
+                .get(&key)
+                .or_else(|| self.regens.regions.get(&(channel, base))),
+            self.regens
+                .cells
+                .get(map)
+                .or_else(|| self.regens.cells.get(base)),
         ) else {
             return;
         };
@@ -963,6 +974,121 @@ impl GameState {
             Some(vid)
         } else {
             None
+        }
+    }
+
+    /// `SpawnMobRange(GetSummonVnum(), ...)` for Battle's summoner arm (`G/char_state.cpp:1051-1064`):
+    /// aggressive helper in `area`, linked into `leader`'s mob party.
+    pub(super) fn spawn_summoned_monster(
+        &mut self,
+        leader: u32,
+        place: (u8, i32),
+        vnum: u32,
+        area: (i32, i32, i32, i32),
+    ) -> Option<u32> {
+        let pulse = self.last_pulse;
+        let (Some(region), Some(cells), Some(respawner)) = (
+            self.regens.regions.get(&place).cloned(),
+            self.regens.cells.get(place.1).cloned(),
+            self.regens.respawner.as_mut(),
+        ) else {
+            return None;
+        };
+        let mut stood =
+            match respawner.spawn_mob_line((&region, &cells), vnum, area, false, &mut self.dice) {
+                Ok(stood) => stood?,
+                Err(error) => {
+                    warn!(?place, %error, "a battle summon outnumbered the VIDs left");
+                    return None;
+                }
+            };
+        stood.ai_flags |= gamedata::mob_proto::AIFLAG_AGGRESSIVE;
+        stood.leader = Some(leader);
+        let vid = stood.vid;
+        self.stand_runtime(place, vec![stood], pulse);
+        Some(vid)
+    }
+
+    /// `regen_do` + `regen_spawn_dungeon` (`G/regen.cpp:256-508`): spawn `entries` (whose
+    /// coordinates are map-relative centimetres) on private map `map` copied from `base_map`.
+    /// When `once` is true, each entry spawns once with no repeating timer; when `once` is false,
+    /// each entry with `time > 0` joins the map's `regens` list and schedules `Due::Regen`
+    /// (`dungeon_regen_event`, `:385-408`). When the dungeon is destroyed its `MapNpcs` leaves
+    /// `self.npcs`, so later `Due::Regen` and `Destroy` ticks drop cleanly (`CDungeon::IsValidRegen`,
+    /// `G/char.cpp:575-578`).
+    pub(super) fn spawn_dungeon_regen(
+        &mut self,
+        channel: u8,
+        map: i32,
+        base_map: i32,
+        entries: &[RegenEntry],
+        once: bool,
+    ) {
+        let place = (channel, map);
+        let (base_x, base_y) = self
+            .maps
+            .get(&place)
+            .map_or((0, 0), super::view::MapIndex::base);
+        let Some(region) = self
+            .regens
+            .region_of(channel, base_map)
+            .or_else(|| self.regens.regions.get(&place).cloned())
+        else {
+            return;
+        };
+        let Some(cells) = self
+            .regens
+            .cells_of(map)
+            .or_else(|| self.regens.cells_of(base_map))
+        else {
+            return;
+        };
+        let pulse = self.last_pulse;
+        for &raw in entries {
+            if !raw.spawns() {
+                continue;
+            }
+            if !once && raw.time == 0 {
+                continue;
+            }
+            let mut shifted = raw;
+            shifted.sx = shifted.sx.saturating_add(base_x);
+            shifted.ex = shifted.ex.saturating_add(base_x);
+            shifted.sy = shifted.sy.saturating_add(base_y);
+            shifted.ey = shifted.ey.saturating_add(base_y);
+            let regen = world::npc::Regen {
+                entry: shifted,
+                count: 0,
+                first_fire: shifted.time,
+            };
+            let at = self.npcs.get(&place).map_or(0, |list| list.regens.len());
+            let Some(respawner) = self.regens.respawner.as_mut() else {
+                return;
+            };
+            let stood = match respawner.respawn((&region, &cells), &regen, at, &mut self.dice) {
+                Ok(stood) => stood,
+                Err(error) => {
+                    warn!(?place, %error, "a dungeon regen outnumbered the VIDs left");
+                    return;
+                }
+            };
+            if once {
+                let (mut npcs, _) = stood;
+                for npc in &mut npcs {
+                    npc.regen = None;
+                }
+                self.stand_runtime(place, npcs, pulse);
+                continue;
+            }
+            {
+                let list = self.npcs.entry(place).or_default();
+                std::sync::Arc::make_mut(list).regens.push(regen);
+            }
+            let when = pulse.saturating_add(pulses(shifted.time));
+            self.regens
+                .due
+                .insert((when, Due::Regen { channel, map, at }));
+            self.stand_more(place, at, stood, pulse);
         }
     }
 
@@ -2057,5 +2183,64 @@ mod tests {
             world.regens.due.contains(&(2, far_due)),
             "`all` moves the far regen too"
         );
+    }
+
+    /// `spawn_dungeon_regen` supports both one-shot (`once = true`) and repeating (`once = false`)
+    /// dungeon entries, and destroying the dungeon map drops pending `Due::Regen` ticks cleanly
+    /// (`CDungeon::IsValidRegen`, `G/char.cpp:575-578`).
+    #[test]
+    fn spawn_dungeon_regen_supports_once_and_repeating_and_teardown_clears_it() {
+        let (mut world, _inbox) = a_map(Vec::new(), Vec::new());
+        let dungeon_map = PLACE.1 * 10_000;
+        world.host_map(
+            PLACE.0,
+            dungeon_map,
+            gamedata::server_attr::SectreeGrid {
+                x: 0,
+                y: 0,
+                columns: 4,
+                rows: 4,
+            },
+        );
+        let mut entry = at_a_point(101, 1, 2);
+        entry.sx = 1000;
+        entry.ex = 1000;
+        entry.sy = 1000;
+        entry.ey = 1000;
+        // One-shot spawns one unit without adding a repeating regen entry.
+        world.spawn_dungeon_regen(PLACE.0, dungeon_map, PLACE.1, &[entry], true);
+        let list_once = world
+            .npcs
+            .get(&(PLACE.0, dungeon_map))
+            .expect("dungeon map");
+        assert_eq!(list_once.npcs.len(), 1);
+        assert!(list_once.regens.is_empty());
+        assert!(list_once.npcs[0].regen.is_none());
+        // Repeating spawns a second unit with a scheduled `Due::Regen`.
+        world.spawn_dungeon_regen(PLACE.0, dungeon_map, PLACE.1, &[entry], false);
+        let list_rep = world
+            .npcs
+            .get(&(PLACE.0, dungeon_map))
+            .expect("dungeon map");
+        assert_eq!(list_rep.npcs.len(), 2);
+        assert_eq!(list_rep.regens.len(), 1);
+        assert_eq!(list_rep.regens[0].count, 1);
+        let rep_vid = list_rep.npcs[1].vid;
+        // Destroying the repeating unit drops count to 0, then the due Pulse respawns it.
+        world.destroy_npc(rep_vid);
+        assert_eq!(
+            world.npcs.get(&(PLACE.0, dungeon_map)).unwrap().regens[0].count,
+            0
+        );
+        world.process_pulse(pulses(2));
+        assert_eq!(
+            world.npcs.get(&(PLACE.0, dungeon_map)).unwrap().regens[0].count,
+            1,
+            "dungeon_regen_event respawned the missing unit"
+        );
+        // Tearing down the dungeon map invalidates the scheduled regen without panicking.
+        world.npcs.remove(&(PLACE.0, dungeon_map));
+        world.maps.remove(&(PLACE.0, dungeon_map));
+        world.process_pulse(pulses(4));
     }
 }

@@ -183,8 +183,8 @@ pub const AIFLAG_BERSERK: u32 = 1 << 7;
 /// `AIFLAG_STONESKIN` (`common/length.h:696`): the bit `STONESKIN` sets.
 pub const AIFLAG_STONESKIN: u32 = 1 << 8;
 
-/// `AIFLAG_GODSPEED` (`common/length.h:697`): the bit `GODSPEED` sets. No reader yet;
-/// the constant closes the hole in the bit table.
+/// `AIFLAG_GODSPEED` (`common/length.h:697`, `G/char_state.cpp:1130-1133`): the bit
+/// `GODSPEED` sets, which Battle turns on when hit points fall below `bGodSpeedPoint`.
 pub const AIFLAG_GODSPEED: u32 = 1 << 9;
 
 /// `AIFLAG_DEATHBLOW` (`common/length.h:698`, `G/char_battle.cpp:2286-2296`): the bit

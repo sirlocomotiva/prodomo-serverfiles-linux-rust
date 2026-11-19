@@ -1419,12 +1419,11 @@ impl GameState {
             hits.extend(self.make_drop_hit(50_123, 1, -1));
         }
         // `new_xmas_event` ×2 (`:1768-1778`): the carry check short-circuits before the draw,
-        // and a hit is `AutoGiveItem`, not a ground item (D5).
-        if self.count_xmas_sock_hits(attacker, delta, range) != 0 {
-            tracing::warn!(
-                vnum = 50_010,
-                "a kill granted a sock; AutoGiveItem waits for D5"
-            );
+        // and each hit runs `AutoGiveItem(50010)`.
+        for _ in 0..self.count_xmas_sock_hits(attacker, delta, range) {
+            if let Some(sock) = self.make_drop_hit(50_010, 1, -1) {
+                self.give_drop_directly(attacker, sock);
+            }
         }
         if self.drop_per_kill_pct(100, 2000, delta, b"halloween_drop")
             >= number(&mut self.dice, 1, range)

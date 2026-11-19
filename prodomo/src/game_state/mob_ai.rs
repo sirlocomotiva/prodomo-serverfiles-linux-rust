@@ -67,10 +67,10 @@
 //! - **The monster clips.** Every NPC moves at its stamped `RUN` clip's speed (ledger 628),
 //!   300 where its folder has none.
 //!
-//! The berserk and god-speed resets wait for the fight too: 148 mob protos carry `BERSERK` and 46
-//! `GODSPEED`, but only Battle turns either on (`G/char_state.cpp:1125-1133`), so Idle finds
-//! nothing to reset (`:643-649`). No affect stuns an NPC and none keeps a shop, so `CanMove`
-//! always holds. The `test_server` walk toggle (`:740-746`) sets a wandering monster
+//! Berserk (`BERSERK`) and god-speed (`GODSPEED`) turn on in Battle below `bBerserkPoint` and
+//! `bGodSpeedPoint` (`G/char_state.cpp:1125-1133`) and clear when Idle runs (`:643-649`).
+//! Summoning monsters (`dwSummonVnum != 0`) spawn up to three helpers in Battle
+//! (`:1038-1064`). The `test_server` walk toggle (`:740-746`) sets a wandering monster
 //! running 60 times in 101 (ledger 620): legacy's `test_server` defaults to 1
 //! (`G/config.cpp:72`), and the owner never turned it off (owner question 5).
 //!
@@ -208,6 +208,16 @@ pub(super) struct Mind {
     pub(super) fighting: bool,
     /// `m_isBerserk`.
     pub(super) berserk: bool,
+    /// `m_isGodSpeed`: whether Battle raised `POINT_ATT_SPEED` to 250.
+    pub(super) god_speed: GodSpeed,
+}
+
+/// Whether a monster's `GODSPEED` boost is active (`m_isGodSpeed`, `G/char.cpp:8472-8487`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum GodSpeed {
+    #[default]
+    Off,
+    On,
 }
 
 impl Mind {
@@ -226,6 +236,7 @@ impl Mind {
             victim_npc: None,
             fighting: false,
             berserk: false,
+            god_speed: GodSpeed::Off,
         }
     }
 }
@@ -537,9 +548,16 @@ impl GameState {
             self.coward_escape(vid, who.map);
             return;
         }
-        // Berserk off (`:643-644`); god speed is dormant (no `POINT_GODSPEED`).
+        // Berserk and god-speed off (`:643-649`).
         if let Some(mind) = self.minds.get_mut(vid) {
             mind.berserk = false;
+        }
+        if self
+            .minds
+            .get(vid)
+            .is_some_and(|mind| mind.god_speed == GodSpeed::On)
+        {
+            self.set_god_speed(vid, false);
         }
         // Steps 4-6: the held victim — PC or NPC — is dropped when it is gone, dead
         // or on BANPK (`:653-668`), and an aggressive wanderer with no building
@@ -605,6 +623,23 @@ impl GameState {
             return;
         }
         self.monster_chat_wait(vid, who);
+    }
+
+    /// `CHARACTER::SetGodSpeed(bool bMode)` (`G/char.cpp:8472-8487`): on raises
+    /// `POINT_ATT_SPEED` to 250; off restores the proto's `sAttackSpeed`.
+    pub(super) fn set_god_speed(&mut self, vid: u32, mode: bool) {
+        if let Some(mind) = self.minds.get_mut(vid) {
+            mind.god_speed = if mode { GodSpeed::On } else { GodSpeed::Off };
+        }
+        if let Some(npc) = self.npc_mut(vid) {
+            let speed = if mode {
+                250
+            } else {
+                i32::from(npc.fight.group_speeds[0])
+            };
+            npc.fight
+                .set_point(common::point_slot::POINT_ATT_SPEED, speed);
+        }
     }
 
     /// `__StateIdle_Stone` (`G/char_state.cpp:389-505`): the stone spawns its group at each

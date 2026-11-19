@@ -67,6 +67,12 @@ pub struct MobFight {
     pub dam_multiply_bits: u32,
     /// `bBerserkPoint`: below this share of its hit points a berserker turns berserk.
     pub berserk_point: u8,
+    /// `bGodSpeedPoint`: below this share of its hit points a god-speed monster raises
+    /// `POINT_ATT_SPEED` to 250 (`G/char_state.cpp:1130-1133`, `G/char.cpp:8472-8487`).
+    pub god_speed_point: u8,
+    /// `dwSummonVnum`: the helper vnum Battle summons around the monster up to
+    /// `SUMMON_MONSTER_COUNT` (3) (`G/char_state.cpp:1038-1064`).
+    pub summon_vnum: u32,
     /// `bDeathBlowPoint`: the death-blow chance.
     pub death_blow_point: u8,
     /// `bRevivePoint`: the reviver search's pass line (`G/char.cpp:8518`).
@@ -111,6 +117,8 @@ impl MobFight {
             aggressive_sight: proto.aggressive_sight,
             dam_multiply_bits: proto.dam_multiply.to_bits(),
             berserk_point: proto.berserk_point,
+            god_speed_point: proto.god_speed_point,
+            summon_vnum: proto.summon_vnum,
             death_blow_point: proto.death_blow_point,
             revive_point: proto.revive_point,
             group_speeds: [proto.attack_speed, proto.moving_speed],
@@ -176,6 +184,15 @@ impl MobFight {
             self.points.insert(slot, sum);
         }
     }
+
+    /// `SetPoint`: replaces `slot` with `value`, removing it at 0 (`G/char.cpp:8479-8485`).
+    pub fn set_point(&mut self, slot: usize, value: i32) {
+        if value == 0 {
+            self.points.remove(&slot);
+        } else {
+            self.points.insert(slot, value);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +217,8 @@ mod tests {
             aggressive_sight: 2000,
             dam_multiply: 3.0,
             berserk_point: 20,
+            god_speed_point: 15,
+            summon_vnum: 992,
             death_blow_point: 30,
             str: 11,
             dex: 13,
@@ -278,6 +297,7 @@ mod tests {
         assert_eq!(fight.aggressive_sight, 2000);
         assert_eq!(fight.dam_multiply().to_bits(), 3.0_f32.to_bits());
         assert_eq!((fight.berserk_point, fight.death_blow_point), (20, 30));
+        assert_eq!((fight.god_speed_point, fight.summon_vnum), (15, 992));
     }
 
     #[test]

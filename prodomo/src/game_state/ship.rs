@@ -115,190 +115,52 @@ const BARRIER_CELLS: [(i32, i32); 4] = [(400, 372), (369, 372), (400, 435), (369
 /// base plus (405, 480), in map units.
 pub(super) const LAND_SPOT: (i32, i32) = (405, 480);
 
-/// The `data/dungeon/ship_defense/wave1.txt` rows: the cell and vnum of each `m` row.
-const WAVE1: [((i32, i32), u32); 20] = [
-    ((393, 427), 3955),
-    ((376, 427), 3955),
-    ((389, 429), 3955),
-    ((380, 429), 3955),
-    ((385, 430), 3955),
-    ((387, 428), 3955),
-    ((382, 428), 3955),
-    ((374, 426), 3955),
-    ((394, 424), 3955),
-    ((386, 424), 3955),
-    ((382, 424), 3954),
-    ((377, 424), 3954),
-    ((390, 424), 3954),
-    ((394, 421), 3954),
-    ((389, 421), 3954),
-    ((381, 422), 3954),
-    ((376, 422), 3954),
-    ((373, 422), 3954),
-    ((395, 422), 3954),
-    ((384, 425), 3956),
-];
+/// The ship-defence wave regen files (`data/dungeon/ship_defense/wave*.txt`), loaded at
+/// boot via [`gamedata::regen::load_file`] with map-relative coordinates (`(0, 0)` base).
+/// For wave 4's step file, `wave4_1.txt` is tried first (matching `G/ShipDefense.cpp:470`),
+/// falling back to `wave4 _1.txt` for the owner's filename space.
+#[derive(Clone, Debug, Default)]
+pub struct ShipWaveFiles {
+    /// `wave1.txt` .. `wave4.txt`.
+    pub waves: [Vec<gamedata::regen::RegenEntry>; 4],
+    /// `wave2_1.txt`, `wave3_1.txt`, `wave4_1.txt` (or `wave4 _1.txt`).
+    pub steps: [Vec<gamedata::regen::RegenEntry>; 3],
+}
 
-/// The `data/dungeon/ship_defense/wave2.txt` rows.
-const WAVE2: [((i32, i32), u32); 26] = [
-    ((385, 377), 3404),
-    ((383, 377), 3405),
-    ((380, 377), 3402),
-    ((378, 377), 3401),
-    ((376, 377), 3605),
-    ((388, 377), 3602),
-    ((390, 377), 3604),
-    ((392, 377), 3601),
-    ((377, 377), 3603),
-    ((385, 430), 3953),
-    ((383, 430), 3953),
-    ((380, 430), 3953),
-    ((378, 430), 3953),
-    ((376, 430), 3953),
-    ((383, 430), 3953),
-    ((383, 430), 3953),
-    ((394, 430), 3955),
-    ((385, 430), 3955),
-    ((383, 430), 3955),
-    ((380, 430), 3955),
-    ((378, 430), 3955),
-    ((394, 430), 3954),
-    ((385, 430), 3954),
-    ((383, 430), 3954),
-    ((380, 430), 3954),
-    ((378, 430), 3954),
-];
-
-/// The `data/dungeon/ship_defense/wave2_1.txt` rows.
-const WAVE2_1: [((i32, i32), u32); 4] = [
-    ((405, 418), 3950),
-    ((405, 385), 3950),
-    ((364, 418), 3950),
-    ((364, 385), 3950),
-];
-
-/// The `data/dungeon/ship_defense/wave3.txt` rows.
-const WAVE3: [((i32, i32), u32); 28] = [
-    ((385, 377), 3404),
-    ((383, 377), 3405),
-    ((380, 377), 3402),
-    ((378, 377), 3401),
-    ((376, 377), 3605),
-    ((388, 377), 3602),
-    ((390, 377), 3604),
-    ((392, 377), 3601),
-    ((377, 377), 3603),
-    ((385, 430), 3953),
-    ((383, 430), 3953),
-    ((380, 430), 3953),
-    ((378, 430), 3953),
-    ((376, 430), 3953),
-    ((383, 430), 3953),
-    ((383, 430), 3953),
-    ((394, 430), 3955),
-    ((385, 430), 3955),
-    ((383, 430), 3955),
-    ((380, 430), 3955),
-    ((378, 430), 3955),
-    ((382, 430), 3955),
-    ((394, 430), 3954),
-    ((385, 430), 3954),
-    ((383, 430), 3954),
-    ((380, 430), 3954),
-    ((378, 430), 3954),
-    ((382, 430), 3954),
-];
-
-/// The `data/dungeon/ship_defense/wave3_1.txt` rows.
-const WAVE3_1: [((i32, i32), u32); 8] = [
-    ((403, 389), 3951),
-    ((403, 388), 3951),
-    ((403, 387), 3951),
-    ((403, 386), 3951),
-    ((365, 389), 3951),
-    ((365, 388), 3951),
-    ((365, 387), 3951),
-    ((365, 386), 3951),
-];
-
-/// The `data/dungeon/ship_defense/wave4.txt` rows, wave 4's set steps included.
-const WAVE4: [((i32, i32), u32); 44] = [
-    ((385, 377), 3404),
-    ((383, 377), 3405),
-    ((380, 377), 3402),
-    ((378, 377), 3401),
-    ((376, 377), 3605),
-    ((388, 377), 3602),
-    ((390, 377), 3604),
-    ((392, 377), 3601),
-    ((377, 377), 3603),
-    ((385, 430), 3953),
-    ((383, 430), 3953),
-    ((380, 430), 3953),
-    ((378, 430), 3953),
-    ((376, 430), 3953),
-    ((383, 430), 3953),
-    ((383, 430), 3953),
-    ((394, 430), 3955),
-    ((385, 430), 3955),
-    ((383, 430), 3955),
-    ((380, 430), 3955),
-    ((378, 430), 3955),
-    ((382, 430), 3955),
-    ((394, 430), 3954),
-    ((385, 430), 3954),
-    ((383, 430), 3954),
-    ((380, 430), 3954),
-    ((378, 430), 3954),
-    ((382, 430), 3954),
-    ((403, 389), 3952),
-    ((403, 388), 3952),
-    ((403, 387), 3952),
-    ((403, 386), 3952),
-    ((365, 389), 3952),
-    ((365, 388), 3952),
-    ((365, 387), 3952),
-    ((365, 386), 3952),
-    ((365, 415), 3952),
-    ((365, 416), 3952),
-    ((365, 414), 3952),
-    ((365, 413), 3952),
-    ((403, 415), 3952),
-    ((403, 416), 3952),
-    ((403, 414), 3952),
-    ((403, 413), 3952),
-];
-
-/// The `wave4_1.txt` the wave-4 steps ask for does not exist: the owner ships
-/// `wave4 _1.txt` (with a space) instead, so legacy's `fopen` fails, logs
-/// `SYSTEM: regen_do: ... file not found`, and spawns nothing
-/// (`G/regen.cpp:419-425`). The Rewrite reads the shipped file's rows — the step
-/// spawns they name — rather than the missing name: the miss is a Defect, and the
-/// shipped rows are what the owner means to spawn.
-/// The `wave4_1.txt` the wave-4 steps ask for does not exist: the owner ships
-/// `wave4 _1.txt` (with a space) instead, so legacy's `fopen` fails, logs
-/// `SYSTEM: regen_do: ... file not found`, and spawns nothing
-/// (`G/regen.cpp:419-425`). The Rewrite reads the shipped file's rows — the step
-/// spawns they name — rather than the missing name: the miss is a Defect, and the
-/// shipped rows are what the owner means to spawn.
-const WAVE4_1: [((i32, i32), u32); 16] = [
-    ((403, 389), 3952),
-    ((403, 388), 3952),
-    ((403, 387), 3952),
-    ((403, 386), 3952),
-    ((365, 389), 3952),
-    ((365, 388), 3952),
-    ((365, 387), 3952),
-    ((365, 386), 3952),
-    ((365, 416), 3952),
-    ((365, 415), 3952),
-    ((365, 414), 3952),
-    ((365, 413), 3952),
-    ((403, 416), 3952),
-    ((403, 415), 3952),
-    ((403, 414), 3952),
-    ((403, 413), 3952),
-];
+impl ShipWaveFiles {
+    /// Load all seven wave regen files from `dir` (typically `data/dungeon/ship_defense`).
+    /// Any missing or unparseable file loads empty with a warning, matching `regen_do`.
+    #[must_use]
+    pub fn load_from_dir(dir: &std::path::Path) -> Self {
+        let load_one = |names: &[&str]| -> Vec<gamedata::regen::RegenEntry> {
+            for (idx, name) in names.iter().enumerate() {
+                let path = dir.join(name);
+                match gamedata::regen::load_file(&path, 0, 0) {
+                    Ok(entries) => return entries,
+                    Err(error) => {
+                        if idx + 1 == names.len() {
+                            tracing::warn!(file = name, %error, "Ship defence wave regen refused");
+                        }
+                    }
+                }
+            }
+            Vec::new()
+        };
+        Self {
+            waves: [
+                load_one(&["wave1.txt"]),
+                load_one(&["wave2.txt"]),
+                load_one(&["wave3.txt"]),
+                load_one(&["wave4.txt"]),
+            ],
+            steps: [
+                load_one(&["wave2_1.txt"]),
+                load_one(&["wave3_1.txt"]),
+                load_one(&["wave4_1.txt", "wave4 _1.txt"]),
+            ],
+        }
+    }
+}
 
 /// One ship-defence run: the `CShipDefense` narrowed to what the bridged names and
 /// the deck ticks read and write.
@@ -1232,19 +1094,16 @@ impl GameState {
     /// `regen_do(file, index, base, base, NULL, true)` stands each `m` row's vnum
     /// at its cell once (`regen_spawn_dungeon`, `G/regen.cpp:256-295`), with a drawn
     /// facing (`direction == 0`, `:288`).
-    fn ship_spawn_regen(&mut self, index: i32, wave: u8, _once: bool) {
-        let rows: &[((i32, i32), u32)] = match wave {
-            1 => &WAVE1,
-            2 => &WAVE2,
-            3 => &WAVE3,
-            4 => &WAVE4,
-            _ => return,
+    fn ship_spawn_regen(&mut self, index: i32, wave: u8, once: bool) {
+        let Some(entries) = wave
+            .checked_sub(1)
+            .and_then(|slot| self.ship_waves.waves.get(usize::from(slot)))
+            .cloned()
+        else {
+            return;
         };
         let channel = self.ship_channel(index);
-        let pulse = self.last_pulse;
-        for (cell, vnum) in rows {
-            self.ship_spawn(channel, index, *vnum, *cell, 0, pulse);
-        }
+        self.spawn_dungeon_regen(channel, index, MAP, &entries, once);
     }
 
     /// Stand the mini-hydra `vnum` at `slot` (`SpawnMiniHydra`,
@@ -1865,17 +1724,15 @@ impl GameState {
     /// Stand the `wave<n>_1.txt` step file's rows at once (`SpawnEvent`,
     /// `G/ShipDefense.cpp:392-483`).
     fn ship_spawn_regen_step(&mut self, index: i32, wave: u8, _step: u8) {
-        let rows: &[((i32, i32), u32)] = match wave {
-            2 => &WAVE2_1,
-            3 => &WAVE3_1,
-            4 => &WAVE4_1,
-            _ => return,
+        let Some(entries) = wave
+            .checked_sub(2)
+            .and_then(|slot| self.ship_waves.steps.get(usize::from(slot)))
+            .cloned()
+        else {
+            return;
         };
         let channel = self.ship_channel(index);
-        let pulse = self.last_pulse;
-        for (cell, vnum) in rows {
-            self.ship_spawn(channel, index, *vnum, *cell, 0, pulse);
-        }
+        self.spawn_dungeon_regen(channel, index, MAP, &entries, true);
     }
 
     /// Remove the first affect of `kind` from the non-player `vid`, computed off
@@ -2105,6 +1962,11 @@ mod tests {
             ),
             NpcVids::starting_at(FIRST_NPC_VID + 100),
         );
+        let ship_waves = ShipWaveFiles::load_from_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../legacy/gamedata/data/dungeon/ship_defense"),
+        );
+        world = world.with_ship_waves(ship_waves);
         world.install_respawner(respawner, ship_cells());
         world.stand_npcs(
             1,

@@ -10806,6 +10806,7 @@ struct GameData {
     /// The Tanaka cycle's placed entries, which each round spawns once.
     tanaka: Vec<gamedata::regen::RegenEntry>,
     event_cycles: prodomo::game_state::EventCycleFiles,
+    ship_waves: prodomo::game_state::ShipWaveFiles,
     /// The shops a keeper opens, which the game thread holds.
     shops: Arc<NpcShops>,
     /// The renewal tabs a keeper opens, which the game thread holds.
@@ -10914,6 +10915,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
     let lands = load_lands(config)?;
     let tanaka = load_tanaka(config, &atlas);
     let event_cycles = load_event_cycles(config, &atlas);
+    let ship_waves = load_ship_waves(config);
     let object_protos = load_object_protos(config)?;
     let daily_weeks = load_daily_weeks(config)?;
     let cube_recipes = load_cube_recipes(config)?;
@@ -10932,6 +10934,7 @@ fn load_game_data(config: &ServerConfig) -> Result<(GameData, Quests), String> {
         npcs,
         tanaka,
         event_cycles,
+        ship_waves,
         shops,
         renewal_shops,
         drops,
@@ -11334,6 +11337,12 @@ fn load_event_cycles(
     ];
     files.mining = load("mining_event_regen_type_0.txt");
     files
+}
+/// Load the ship-defence wave regen files from `data/dungeon/ship_defense/`.
+fn load_ship_waves(config: &ServerConfig) -> prodomo::game_state::ShipWaveFiles {
+    prodomo::game_state::ShipWaveFiles::load_from_dir(
+        &config.data_dir().join("dungeon/ship_defense"),
+    )
 }
 
 fn load_lands(config: &ServerConfig) -> Result<Arc<gamedata::land::Lands>, String> {
@@ -11980,6 +11989,7 @@ fn build_world(
         .with_no_wander(config.game.no_wander)
         .with_tanaka(data.tanaka.clone())
         .with_event_cycles(data.event_cycles.clone())
+        .with_ship_waves(data.ship_waves.clone())
         .with_locale_strings(Arc::clone(&data.locale))
         .with_locale_dir(config.locale_dir())
         .with_quest_translate(Arc::clone(&data.quest_translate))

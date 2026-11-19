@@ -36831,7 +36831,12 @@ fn a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "no_wander = true\n",
+    );
     seat_alpha_and_zulu(&server, &database, &[]);
     sql(
         &database,
@@ -36962,22 +36967,31 @@ fn assert_mesh_wire(sent: &[Vec<u8>], vid: u32, cleared: bool, note: &str) {
         assert_eq!(&removed[1..5], &id, "{note}: round {round} names Zulu");
         at += 1;
         // The re-adds: Zulu's own pair first, then every entity Zulu sees.
+        // Only PCs and `CHAR_TYPE_NPC` carry `GC_CHAR_ADDITIONAL_INFO`
+        // (`G/char.cpp:1111`); monsters, stones and warps send `GC_CHARACTER_ADD` alone.
         let mut pairs = 0;
         while wire
             .get(at)
             .is_some_and(|record| record[0] == GC_CHARACTER_ADD)
         {
-            let info = wire.get(at + 1).expect("{note}: round {round} informs");
-            assert_eq!(
-                info[0], GC_CHAR_ADDITIONAL_INFO,
-                "{note}: round {round} informs"
-            );
             if pairs == 0 {
+                let info = wire.get(at + 1).expect("{note}: round {round} informs");
+                assert_eq!(
+                    info[0], GC_CHAR_ADDITIONAL_INFO,
+                    "{note}: round {round} informs"
+                );
                 assert_eq!(&wire[at][1..5], &id, "{note}: round {round} re-adds Zulu");
                 assert_eq!(&info[1..5], &id, "{note}: round {round} informs Zulu");
+                at += 2;
+            } else if wire
+                .get(at + 1)
+                .is_some_and(|record| record[0] == GC_CHAR_ADDITIONAL_INFO)
+            {
+                at += 2;
+            } else {
+                at += 1;
             }
             pairs += 1;
-            at += 2;
         }
         assert!(pairs >= 1, "{note}: round {round} re-adds");
         let end = wire[at..]
@@ -64703,9 +64717,10 @@ const DRAGON_LINES: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t8031\n\
      m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t2493\n";
 
 /// The owner's mob proto with the dragon's damage flattened to 200, its defence
-/// to 0 and its critical and penetrate enchants to 0: the punch rates past the
-/// `battle_damage_floor` draw, and the swing's only draws left feed nothing the
-/// head asserts, so both numbers pin (the dice seed is random per boot).
+/// to 0, its critical and penetrate enchants to 0 and its `SUMMON` (col 52, 2404)
+/// to 0: the punch rates past the `battle_damage_floor` draw, and the swing's only
+/// draws left feed nothing the head asserts (no 1-in-4 helper spawn in battle), so
+/// both numbers pin (the dice seed is random per boot).
 fn dragon_proto(owner: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for line in owner.split_inclusive(|&byte| byte == b'\n') {
@@ -64721,6 +64736,7 @@ fn dragon_proto(owner: &[u8]) -> Vec<u8> {
             cells[26] = b"0";
             cells[38] = b"0";
             cells[39] = b"0";
+            cells[52] = b"0";
             out.extend_from_slice(&cells.join(&b'\t'));
             out.extend_from_slice(b"\r\n");
         } else {
@@ -70691,4 +70707,185 @@ fn guild_smith_discounts_member_and_deposits_non_members_cut() {
     assert_eq!(zulu.read_game()[..4], [ITEM_SET, 1, 0, 0]);
     assert_eq!(zulu.read_game(), gold_change(zulu_vid, 0, 48_200));
     wait_for(&database, "SELECT gold = 1240 FROM guild WHERE id = 7");
+}
+
+/// `data.drop.mob`, `data.drop.common`, `data.drop.etc`, `data.drop.group`, `sys.combat.core`:
+/// killing wolf 102 (`PAWN`, `DROP_ITEM = 30028`) with custom drop tables and
+/// `new_xmas_event` drops one ground item from each of the four tables and auto-gives the
+/// Christmas sock (50010) directly into inventory (`G/item_manager.cpp:1111-1277`, `:1768-1778`).
+#[test]
+fn a_mob_kill_drops_from_mob_common_etc_group_tables_and_auto_gives_xmas_sock() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let npc_txt = b"m\t605\t540\t0\t0\t0\t1\t60s\t100\t1\t102\n";
+    let mob_drop = b"Group\twolf_kill\n{\n\tMob\t102\n\tType\tkill\n\tkill_drop\t1\n\t1\t27002\t1\t100\t0\n}\n";
+    let common_drop = b"header\n\t1\t10\t40.0\t27004\t1\n";
+    let etc_drop = b"30028\t40.0\n";
+    let group_drop = b"Group\twolf_group\n{\n\tVnum\t1\n\tMob\t102\n\t1\t27005\t40.0\t1\n}\n";
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[
+            (
+                "locale/europe/map/metin2_map_a1/npc.txt",
+                npc_txt.as_slice(),
+            ),
+            ("locale/europe/mob_drop_item.txt", mob_drop.as_slice()),
+            ("locale/europe/common_drop_item.txt", common_drop.as_slice()),
+            ("locale/europe/etc_drop_item.txt", etc_drop.as_slice()),
+            ("locale/europe/drop_item_group.txt", group_drop.as_slice()),
+        ],
+        "no_wander = true\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) \
+         SELECT id, 'Alpha', 'IMPLEMENTOR' FROM account WHERE login = 'alice'",
+    );
+    sql(
+        &database,
+        "UPDATE account SET item_premium_expire = 2100000000 WHERE login = 'alice'",
+    );
+    // Alpha stands next to the wolf at (460_000, 954_800) with Baby Reindeer 53002 in bag
+    // so `new_xmas_event` passes its carry gate and runs `AutoGiveItem(50010)`.
+    sql(
+        &database,
+        "UPDATE player SET level = 3, st = 90 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) \
+         SELECT 91, id, 1, 0, 1, 53002, 2100000000 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    let _ = drain_all_game(&mut alpha, 300);
+    let wolf = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    // With `item_premium_expire` active (`double = true`), `mob_item_buyer = 1000` gives
+    // `delta = 100 * 1000 / 100 * 2 = 2000`, `PRIV_ITEM_DROP = 200` gives
+    // `range = 4_000_000 * 100 / 300 = 1_333_333`, and `new_xmas_event = 50` gives
+    // `40_000 * 2000 / 50 = 1_600_000 >= 1_333_333`: 100% on all five drop sources.
+    alpha.send_record(&client_chat(CHAT_TYPE_TALKING, b"/e mob_item_buyer 1000"));
+    alpha.send_record(&client_chat(CHAT_TYPE_TALKING, b"/priv_empire 0 1 200 1"));
+    alpha.send_record(&client_chat(CHAT_TYPE_TALKING, b"/e new_xmas_event 50"));
+    let _ = drain_all_game(&mut alpha, 300);
+    let mut ground_vnums = Vec::new();
+    let mut set_vnums = Vec::new();
+    for _ in 0..30 {
+        alpha.send_record(&client_attack(wolf));
+        let wire = drain_all_game(&mut alpha, 120);
+        for record in &wire {
+            if record.first() == Some(&GROUND_ADD) && record.len() == GROUND_ADD_LEN {
+                let vnum = u32::from_le_bytes(record[17..21].try_into().expect("vnum"));
+                ground_vnums.push(vnum);
+            } else if record.first() == Some(&ITEM_SET) && record.len() == ITEM_SET_LEN {
+                let set = protocol::gc_item_window::GcItemSet::decode(record).expect("item set");
+                set_vnums.push(set.vnum);
+            }
+        }
+        if [27_002, 27_004, 30_028, 27_005]
+            .iter()
+            .all(|v| ground_vnums.contains(v))
+            && set_vnums.contains(&50_010)
+        {
+            break;
+        }
+    }
+    assert!(
+        ground_vnums.contains(&27_002),
+        "mob_drop_item kill drop 27002 missed: {ground_vnums:?}"
+    );
+    assert!(
+        ground_vnums.contains(&27_004),
+        "common_drop_item drop 27004 missed: {ground_vnums:?}"
+    );
+    assert!(
+        ground_vnums.contains(&30_028),
+        "etc_drop_item drop 30028 missed: {ground_vnums:?}"
+    );
+    assert!(
+        ground_vnums.contains(&27_005),
+        "drop_item_group drop 27005 missed: {ground_vnums:?}"
+    );
+    assert!(
+        set_vnums.contains(&50_010),
+        "new_xmas_event AutoGiveItem(50010) missed: {set_vnums:?}"
+    );
+}
+
+/// `sys.mob.ai`, `sys.mob.proto`, `data.proto.mob`: a summoning monster (`991`, `NOMOVE`,
+/// `SUMMON = 992`) spawns up to `SUMMON_MONSTER_COUNT` (3) `992` helpers on the wire during
+/// Battle (`G/char_state.cpp:1038-1064`).
+#[test]
+fn a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    // Six `991`s (`AGGR,NOMOVE`, `SUMMON = 992`) stand at Alpha's spot. Alpha wakes all six
+    // into Battle with one punch each, then steps 300 units east (past their 175-unit melee
+    // reach, inside the 4000-unit drop bound) so they stay in Battle without hitting Alpha
+    // and draw 1-in-4 roughly twice per second each (~120 draws in 10 s, `(3/4)^120 < 1e-15`).
+    let npc_txt = b"m\t605\t540\t0\t0\t0\t1\t60s\t100\t6\t991\n";
+    let (server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[(
+            "locale/europe/map/metin2_map_a1/npc.txt",
+            npc_txt.as_slice(),
+        )],
+        "no_wander = true\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 39, ht = 90, hp = 4000 WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alpha);
+    read_login_event(&mut alpha);
+    let bosses: Vec<u32> = entered
+        .shown
+        .monsters
+        .iter()
+        .filter(|m| m.len() >= 24 && u16::from_le_bytes(m[22..24].try_into().expect("race")) == 991)
+        .map(|m| u32::from_le_bytes(m[1..5].try_into().expect("vid")))
+        .collect();
+    assert_eq!(bosses.len(), 6, "six 991 summoners shown");
+    for &boss in &bosses {
+        alpha.send_record(&client_attack(boss));
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    alpha.send_record(&client_move(
+        FUNC_WAIT,
+        0,
+        0,
+        ALPHA_ENTERS_AT.0 + 300,
+        ALPHA_ENTERS_AT.1,
+        0,
+    ));
+    let mut helpers = std::collections::BTreeSet::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    while std::time::Instant::now() < deadline && helpers.len() < 3 {
+        let Some(record) = alpha.read_game_raw_until(deadline) else {
+            break;
+        };
+        if record.first() == Some(&GC_CHARACTER_ADD) && record.len() >= 24 {
+            let vid = u32::from_le_bytes(record[1..5].try_into().expect("vid"));
+            let race = u16::from_le_bytes(record[22..24].try_into().expect("race"));
+            if race == 992 {
+                helpers.insert(vid);
+            }
+        }
+    }
+    assert!(
+        !helpers.is_empty() && helpers.len() <= 18,
+        "expected 1..=18 summoned 992 helpers, saw {helpers:?}"
+    );
 }

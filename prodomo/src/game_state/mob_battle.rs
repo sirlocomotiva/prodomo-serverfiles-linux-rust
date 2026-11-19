@@ -56,10 +56,10 @@ use common::cfloat::{f32_to_i32, i32_to_f32, u32_to_f32};
 use common::point_slot as point;
 use common::vid::Vid;
 use gamedata::mob_proto::{
-    AIFLAG_BERSERK, AIFLAG_COWARD, AIFLAG_NOATTCHUNJO, AIFLAG_NOATTJINNO, AIFLAG_NOATTSHINSU,
-    AIFLAG_NOMOVE, BATTLE_TYPE_MAGIC, BATTLE_TYPE_MELEE, BATTLE_TYPE_POWER, BATTLE_TYPE_RANGE,
-    BATTLE_TYPE_SUPER_POWER, BATTLE_TYPE_SUPER_TANKER, BATTLE_TYPE_TANKER, CHAR_TYPE_MONSTER,
-    CHAR_TYPE_NPC, MOB_RANK_BOSS,
+    AIFLAG_BERSERK, AIFLAG_COWARD, AIFLAG_GODSPEED, AIFLAG_NOATTCHUNJO, AIFLAG_NOATTJINNO,
+    AIFLAG_NOATTSHINSU, AIFLAG_NOMOVE, BATTLE_TYPE_MAGIC, BATTLE_TYPE_MELEE, BATTLE_TYPE_POWER,
+    BATTLE_TYPE_RANGE, BATTLE_TYPE_SUPER_POWER, BATTLE_TYPE_SUPER_TANKER, BATTLE_TYPE_TANKER,
+    CHAR_TYPE_MONSTER, CHAR_TYPE_NPC, MOB_RANK_BOSS,
 };
 use protocol::gc_actors::GcCharacterMove;
 use protocol::gc_inventory::HEADER_GC_SYNC_POSITION;
@@ -146,6 +146,8 @@ struct Fighter {
     move_speed: f32,
     hp_pct: i32,
     berserk_point: u8,
+    god_speed_point: u8,
+    summon_vnum: u32,
     battle_type: u8,
 }
 
@@ -525,6 +527,8 @@ impl GameState {
             ),
             hp_pct,
             berserk_point: npc.fight.berserk_point,
+            god_speed_point: npc.fight.god_speed_point,
+            summon_vnum: npc.fight.summon_vnum,
             battle_type: npc.fight.battle_type,
         })
     }
@@ -674,6 +678,7 @@ impl GameState {
         let Some((victim, target)) = state else {
             return;
         };
+        self.maybe_summon_monster(mob, fighter);
         if self.battle_engage(mob, fighter, victim, target) {
             return;
         }
@@ -837,15 +842,8 @@ impl GameState {
                 return;
             }
         }
-        // Berserk on (`:1125-1133`); god speed is dormant.
-        if fighter.ai_flags & AIFLAG_BERSERK != 0
-            && fighter.hp_pct < i32::from(fighter.berserk_point)
-            && self.minds.get(mob).is_none_or(|mind| !mind.berserk)
-        {
-            if let Some(mind) = self.minds.get_mut(mob) {
-                mind.berserk = true;
-            }
-        }
+        // Berserk and god-speed on (`:1125-1133`).
+        self.maybe_enrage(mob, fighter);
         let hit = if self.is_guard(mob) {
             self.guard_attack(mob, victim)
         } else {
@@ -1004,15 +1002,8 @@ impl GameState {
                 return;
             }
         }
-        // Berserk on (`:1125-1133`); god speed is dormant.
-        if fighter.ai_flags & AIFLAG_BERSERK != 0
-            && fighter.hp_pct < i32::from(fighter.berserk_point)
-            && self.minds.get(mob).is_none_or(|mind| !mind.berserk)
-        {
-            if let Some(mind) = self.minds.get_mut(mob) {
-                mind.berserk = true;
-            }
-        }
+        // Berserk and god-speed on (`:1125-1133`).
+        self.maybe_enrage(mob, fighter);
         // The skill scan (`:1138-1170`): a cast holds the state and skips the swing.
         if self.battle_skill(mob, victim) {
             return;
@@ -1042,6 +1033,60 @@ impl GameState {
         self.packet_around(me, &record, Some(me));
         let seconds = self.npc_by_vid(mob).and_then(Npc::attack_s);
         self.set_duration(mob, swing_hold(seconds));
+    }
+
+    /// Turn berserk (`AIFLAG_BERSERK`) and god-speed (`AIFLAG_GODSPEED`) on once hit points
+    /// fall below their proto thresholds (`G/char_state.cpp:1125-1133`).
+    fn maybe_enrage(&mut self, mob: u32, fighter: Fighter) {
+        if fighter.ai_flags & AIFLAG_BERSERK != 0
+            && fighter.hp_pct < i32::from(fighter.berserk_point)
+            && self.minds.get(mob).is_none_or(|mind| !mind.berserk)
+        {
+            if let Some(mind) = self.minds.get_mut(mob) {
+                mind.berserk = true;
+            }
+        }
+        if fighter.ai_flags & AIFLAG_GODSPEED != 0
+            && fighter.hp_pct < i32::from(fighter.god_speed_point)
+            && self
+                .minds
+                .get(mob)
+                .is_none_or(|mind| mind.god_speed == super::mob_ai::GodSpeed::Off)
+        {
+            self.set_god_speed(mob, true);
+        }
+    }
+
+    /// `IsSummonMonster() && !IsDead() && !IsStun()` in Battle (`G/char_state.cpp:1038-1064`):
+    /// one in four turns summons `dwSummonVnum` within +/-300 of the monster until
+    /// `SUMMON_MONSTER_COUNT` (3) live helpers stand in its party.
+    fn maybe_summon_monster(&mut self, mob: u32, fighter: Fighter) {
+        const SUMMON_MONSTER_COUNT: usize = 3;
+        if fighter.summon_vnum == 0 || number(&mut self.dice, 0, 3) != 0 {
+            return;
+        }
+        let live = self
+            .party_of(mob)
+            .into_iter()
+            .filter(|&vid| {
+                self.npc_by_vid(vid)
+                    .is_some_and(|npc| npc.vnum == fighter.summon_vnum && !npc.dead)
+            })
+            .count();
+        if live >= SUMMON_MONSTER_COUNT {
+            return;
+        }
+        let Some(&(channel, map, _)) = self.npc_of.get(&mob) else {
+            return;
+        };
+        let leader = self.party_leader(mob).unwrap_or(mob);
+        let area = (
+            fighter.at.0.saturating_sub(300),
+            fighter.at.1.saturating_sub(300),
+            fighter.at.0.saturating_add(300),
+            fighter.at.1.saturating_add(300),
+        );
+        self.spawn_summoned_monster(leader, (channel, map), fighter.summon_vnum, area);
     }
 
     /// `__CHARACTER_GotoNearTarget` (`G/char_state.cpp:759-780`): NOMOVE refuses; RANGE and
@@ -2040,6 +2085,116 @@ mod tests {
         assert!(!world.minds.get(ME).unwrap().berserk);
     }
 
+    /// God-speed turns on below `bGodSpeedPoint`, raising `POINT_ATT_SPEED` to 250, and
+    /// Idle restores the proto's `sAttackSpeed` (`G/char_state.cpp:1130-1133`, `:646-649`).
+    #[test]
+    fn god_speed_raises_attack_speed_and_idle_restores_it() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut npc = a_fighter(
+            ME,
+            2402,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            gamedata::mob_proto::AIFLAG_GODSPEED,
+            SPOT,
+            10_000,
+        );
+        npc.fight.group_speeds = [110, 120];
+        npc.fight.set_point(point::POINT_ATT_SPEED, 110);
+        npc.fight.god_speed_point = 50;
+        npc.hp = 1_000;
+        npc.max_hp = 10_000;
+        let mut world = stand_field(&clock, vec![npc], open_cells(), true);
+        let mut one = enter(&mut world, 1, NEAR, 12_345);
+        world.process_pulse(P0);
+        drained(&mut one);
+        hit(&mut world, 1, ME);
+        world.process_pulse(P0 + 1);
+        assert_eq!(
+            world.minds.get(ME).unwrap().god_speed,
+            crate::game_state::mob_ai::GodSpeed::On
+        );
+        assert_eq!(
+            world
+                .npc_by_vid(ME)
+                .unwrap()
+                .fight
+                .point(point::POINT_ATT_SPEED),
+            250
+        );
+        world.set_victim(ME, None);
+        for pulse in P0 + 2..=P0 + 60 {
+            world.process_pulse(pulse);
+            let mind = world.minds.get(ME).unwrap();
+            if mind.state == Fsm::Idle && mind.god_speed == crate::game_state::mob_ai::GodSpeed::Off
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            world.minds.get(ME).unwrap().god_speed,
+            crate::game_state::mob_ai::GodSpeed::Off
+        );
+        assert_eq!(
+            world
+                .npc_by_vid(ME)
+                .unwrap()
+                .fight
+                .point(point::POINT_ATT_SPEED),
+            110
+        );
+    }
+
+    /// A summoning monster spawns helpers linked into its party up to `SUMMON_MONSTER_COUNT` (3).
+    #[test]
+    fn a_summoning_monster_spawns_helpers_up_to_the_cap() {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut boss = a_fighter(
+            ME,
+            991,
+            BATTLE_TYPE_MELEE,
+            (175, 2000),
+            gamedata::mob_proto::AIFLAG_NOMOVE,
+            SPOT,
+            50_000,
+        );
+        boss.fight.summon_vnum = 992;
+        let mut world = stand_field(&clock, vec![boss], open_cells(), true);
+        let helper = gamedata::mob_proto::MobProto {
+            line: 2,
+            table: gamedata::records::MobTableRecord {
+                vnum: 992,
+                mob_type: CHAR_TYPE_MONSTER,
+                max_hp: 1000,
+                ..gamedata::records::MobTableRecord::default()
+            },
+        };
+        let respawner = world::npc::Respawner::new(
+            std::sync::Arc::new(gamedata::mob_proto::MobProtos::from_rows(vec![helper])),
+            std::sync::Arc::new(gamedata::mob_group::MobGroups::default()),
+            std::sync::Arc::new(
+                gamedata::mob_locale_names::MobLocaleNames::parse(b"VNUM\tNAME\n").unwrap(),
+            ),
+            world::npc::NpcVids::starting_at(ME + 10),
+        );
+        world.install_respawner(respawner, open_cells());
+        let _one = enter(&mut world, 1, NEAR, 50_000);
+        world.process_pulse(P0);
+        hit(&mut world, 1, ME);
+        let fighter = world.fighter(ME).expect("boss fighter");
+        for _ in 0..80 {
+            world.maybe_summon_monster(ME, fighter);
+        }
+        let helpers: Vec<u32> = world
+            .party_of(ME)
+            .into_iter()
+            .filter(|&vid| world.npc_by_vid(vid).is_some_and(|n| n.vnum == 992))
+            .collect();
+        assert_eq!(helpers.len(), 3, "caps at SUMMON_MONSTER_COUNT (3)");
+    }
+
     /// A coward in Battle drops its victim (G22).
     #[test]
     fn a_coward_in_battle_drops_its_victim() {
@@ -2135,6 +2290,8 @@ mod tests {
             move_speed: 394.7368,
             hp_pct: 100,
             berserk_point: 0,
+            god_speed_point: 0,
+            summon_vnum: 0,
             battle_type: BATTLE_TYPE_MELEE,
         };
         let standing = VictimState {

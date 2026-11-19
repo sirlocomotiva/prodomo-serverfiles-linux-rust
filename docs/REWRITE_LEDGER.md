@@ -58253,3 +58253,47 @@ First run failed `game_state::tests::a_character_whose_script_waits_uses_drops_a
 and 4 Clippy lints in the new scenarios (extracted helpers); second full run passed 5,745/0.
 Parity: 1,770 `ported`, 42 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 591
 scenarios. No ADR changed.
+
+## 734. Package B2 (Monsters, Combat, Drops) and Ship Defense regen files
+
+Closes all ten Package B2 rows (`sys.combat.core`, `sys.mob.ai`, `sys.mob.proto`, `data.proto.mob`,
+`data.drop.mob`, `data.drop.common`, `data.drop.etc`, `data.drop.group`, `data.map.regen`,
+`sys.world.regen`) plus the two Ship Defense regen rows in B6 (`data.regen.dungeon`,
+`sys.dungeon.ship_defense`), cutting open rows from 42 to 30 (`1,782 ported`, `30 partial`,
+`520 unused`).
+
+- **`bGodSpeedPoint` and `dwSummonVnum` (`sys.mob.proto`, `data.proto.mob`, `sys.mob.ai`):**
+  `world::npc::MobFight` carries `god_speed_point` and `summon_vnum` from `mob_proto.txt`.
+  `prodomo/src/game_state/mob_ai.rs` adds `GodSpeed` on `Mind` and `set_god_speed` (`G/char.cpp:8472-8487`,
+  raising `POINT_ATT_SPEED` to 250 below `bGodSpeedPoint` under `AIFLAG_GODSPEED` and restoring
+  `sAttackSpeed` on `idle_monster` reset, `G/char_state.cpp:1130-1133`). `mob_battle.rs` ports
+  `maybe_summon_monster` (`G/char_state.cpp:1038-1064`, 1-in-4 roll on battle turns spawning
+  `dwSummonVnum` into the summoner's party up to `SUMMON_MONSTER_COUNT = 3`). Unit-covered by
+  `god_speed_raises_attack_speed_and_idle_restores_it` and
+  `a_summoning_monster_spawns_helpers_up_to_the_cap`.
+- **Dungeon regen (`data.regen.dungeon`, `data.map.regen`, `sys.world.regen`, `sys.dungeon.ship_defense`):**
+  `prodomo/src/game_state/regen.rs` adds `spawn_dungeon_regen` (`G/regen.cpp:256-295`, `regen_load_in_file`
+  with one-shot or repeating `Due::Regen`, `IsValidRegen` and teardown clearing, falling back to the
+  base map's region/cells for private dungeon maps); unit-covered by
+  `spawn_dungeon_regen_supports_once_and_repeating_and_teardown_clears_it`.
+  `prodomo/src/game_state/ship.rs` replaces hardcoded wave tables with `ShipWaveFiles::load_from_dir`
+  reading `data/dungeon/ship_defense/wave{1,2,2_1,3,3_1,4,4_1}.txt` (using `wave4_1.txt` for wave 4's
+  second file as legacy `G/ShipDefense.cpp` fallback).
+- **Christmas sock `AutoGiveItem` and drop scenarios (`sys.combat.core`, `data.drop.{mob,common,etc,group}`):**
+  `prodomo/src/game_state/reward.rs` routes `new_xmas_event` sock hits (`50010`) through
+  `give_drop_directly` (`AutoGiveItem`, `G/item_manager.cpp:1768-1778`) instead of dropping to ground.
+- **Scenarios (all 8× parallel clean):** `a_mob_kill_drops_from_mob_common_etc_group_tables_and_auto_gives_xmas_sock`
+  (proves all four drop tables plus `new_xmas_event` direct grant on one kill) and
+  `a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle` (proves `dwSummonVnum` up to the cap).
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,750
+passed, 0 failed in 46 targets; with it 5,750 passed, 0 failed in 46 targets (482 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+Run 1 failed `the_dragon_stones_scale_the_dragons_blows_both_ways` (2493's `SUMMON = 2404` now
+summons helpers in battle; cleared col 52 in `dragon_proto`). Run 2 failed
+`a_set_moves_a_named_characters_race_sex_job_alignment_and_gaya` (a wandering monster in
+`metin2_map_a1` sent `GC_CHARACTER_ADD` without `GC_CHAR_ADDITIONAL_INFO` per `G/char.cpp:1111`;
+fixed `assert_mesh_wire` for non-PC/non-NPC adds and set `no_wander = true`). Run 3 passed
+5,750/0. Parity: 1,782 `ported`, 30 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows;
+593 scenarios. No ADR changed.
