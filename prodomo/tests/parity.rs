@@ -70294,3 +70294,49 @@ fn event_flags_show_prob_suffixes_and_cooked_fish_refuses_in_arena() {
     server.wait_for("Character disconnected; wrote the row");
     drop(server);
 }
+
+/// `sys.log`: kept game logs emit structured `tracing` events on the `gamelog` target
+/// (`docs/STATUS.md`, owner question 73): `BootLog` at startup, `LoginLog` and
+/// `DetailLoginLog` on enter/disconnect, `GMCommandLog` on GM commands, `LevelLog` on
+/// level-up, `ShoutLog` on shout, and `CharLog` on warp.
+#[test]
+fn kept_game_logs_emit_on_the_gamelog_target() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    server.wait_for("gamelog: BootLog");
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 20 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) \
+         SELECT id, 'Alpha', 'IMPLEMENTOR' FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _alpha, _qs, _items) =
+        load_with_quickslots_on(&server, 1, b"alice", 0, ENGLISH);
+    let _entered = enter_game_shown(&mut alice);
+    server.wait_for("gamelog: LoginLog");
+    server.wait_for("gamelog: DetailLoginLog");
+    alice.send_record(&client_chat(CHAT_TALKING, b"/level 21"));
+    server.wait_for("gamelog: GMCommandLog");
+    server.wait_for("gamelog: LevelLog");
+    alice.send_record(&client_chat(
+        protocol::gc_chat::CHAT_TYPE_SHOUT,
+        b"hello gamelog",
+    ));
+    server.wait_for("gamelog: ShoutLog");
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    server.wait_for_next("gamelog: LoginLog");
+    drop(server);
+}

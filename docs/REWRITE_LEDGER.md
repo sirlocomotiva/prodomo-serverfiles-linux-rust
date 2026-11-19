@@ -58173,3 +58173,33 @@ assert `[LS;1205]` for `27_875` and `[LS;403]` for unlisted `70_056`; second ful
 0 failures.
 Parity: 1,759 `ported`, 53 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 587
 scenarios. No ADR changed.
+
+## 732. `sys.log`: the `gamelog` tracing target and all 20 kept log kinds
+
+Closes `sys.log` in Package B8 (`docs/STATUS.md`, owner question 73 settled 2026-11-15):
+
+- `prodomo/src/gamelog.rs`: adds one structured `tracing::info!(target: "gamelog", ...)` emitter
+  for each of the 20 kept legacy `LogManager` methods (`G/log.cpp`), preserving legacy names and
+  column fields without adding any PostgreSQL log table (ADR-0001): `HackLog`, `SpeedHackLog`,
+  `GMCommandLog`, `BootLog`, `LoginLog`, `DetailLoginLog`, `CharLog`, `ChangeNameLog`, `LevelLog`,
+  `ShoutLog`, `ItemLog`, `MoneyLog`, `GoldBarLog`, `RefineLog`, `SashLog`, `QuestRewardLog`,
+  `MeleyLog`, `OkayEventLog`, `TopPlayerAffLog`, and `DragonSlayLog`.
+- `common/src/logging.rs`: adds `"gamelog"` to `WORKSPACE_TARGETS` so operators can filter and
+  route `gamelog` events independently of crate logs while keeping them enabled by default.
+- Wired all live call sites across `prodomo/src/main.rs` (`BootLog`, `LoginLog`, `DetailLoginLog`,
+  `CharLog` on warp, `ChangeNameLog`, `ShoutLog`, `GMCommandLog`), `sync.rs` (`SpeedHackLog`),
+  `level.rs` (`LevelLog`, `TopPlayerAffLog`), `smith_refine.rs` (`HackLog`, `RefineLog`, `ItemLog`,
+  `MoneyLog`), `sash.rs` (`SashLog`), `trade.rs` (`ItemLog`, `MoneyLog`, `GoldBarLog`), `shop.rs`
+  (`ItemLog`, `MoneyLog`, `GoldBarLog`), `safebox.rs` (`ItemLog`), `cube.rs` (`ItemLog`,
+  `MoneyLog`), `quests.rs` (`ItemLog`, `QuestRewardLog`, `GoldBarLog`), `cards.rs`
+  (`OkayEventLog`), and `meley.rs` (`MeleyLog`).
+- Verified by unit test `gamelog::tests::all_twenty_kept_log_kinds_emit_on_the_gamelog_target`
+  and scenario `kept_game_logs_emit_on_the_gamelog_target` (8× in parallel).
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,740
+passed, 0 failed in 46 targets; with it 5,740 passed, 0 failed in 46 targets (493 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+No test failed on the first run.
+Parity: 1,760 `ported`, 52 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 588
+scenarios. No ADR changed.

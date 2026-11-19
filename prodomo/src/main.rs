@@ -275,6 +275,7 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
 
     info!("Configuration loaded from {}", config_path.display());
     info!(bind_ip = %config.bind_ip, public_ip = %config.public_ip, "Addresses");
+    let hostname = config.public_ip.to_string();
     for channel in &config.channels {
         info!(
             channel = channel.number,
@@ -283,6 +284,7 @@ fn initialize_server(config_path: &Path, verbose: bool) -> Result<ServerConfig, 
             maps = channel.maps.len(),
             "Channel configured"
         );
+        prodomo::gamelog::boot_log(&hostname, channel.number);
     }
     Ok(config)
 }
@@ -733,11 +735,41 @@ async fn handle_connection(
             "Character disconnected; wrote the row"
         );
     }
+    log_session_event(false, held.channel, addr, &held);
     if let Some(lease) = held.presence.as_ref() {
         info!(%addr, presence = lease.id(), "Leaving the client set");
     }
     // `held` drops here, which releases the lease and deregisters the character.
     drop(held);
+}
+
+/// Emit `LoginLog` and `DetailLoginLog` on the `gamelog` target for `held`.
+fn log_session_event(is_login: bool, channel: u8, addr: SocketAddr, held: &Held) {
+    if let (Some(account), Some(character)) = (held.account.as_ref(), held.character.as_ref()) {
+        let ip = addr.ip().to_string();
+        let ver = held
+            .client_version
+            .as_deref()
+            .map_or(std::borrow::Cow::Borrowed(""), String::from_utf8_lossy);
+        prodomo::gamelog::login_log(
+            is_login,
+            channel,
+            account.id.get(),
+            character.id,
+            character.level,
+            character.job,
+            u32::try_from(character.playtime_minutes).unwrap_or(0),
+        );
+        prodomo::gamelog::detail_login_log(
+            is_login,
+            held.gm_level > 0,
+            channel,
+            account.id.get(),
+            character.id,
+            &ip,
+            &ver,
+        );
+    }
 }
 
 /// Take this descriptor's character out of the game thread's world, if it is in it, and hold
@@ -3111,6 +3143,11 @@ where
         empire = held.character.as_ref().map_or(0, |character| character.empire),
         "WARP"
     );
+    if let Some(character) = held.character.as_ref() {
+        let ip = addr.ip().to_string();
+        let hint = format!("map={map} dest={}", request.private_map_index);
+        prodomo::gamelog::char_log(character.id, (x, y), 0, "WARP", &hint, &ip);
+    }
     WarpSettled::Warped
 }
 
@@ -3598,6 +3635,7 @@ where
             }
             ChatEffect::Shout { empire, text } => {
                 let sent = shout(context, *empire, text);
+                prodomo::gamelog::shout_log(held.channel, *empire, &String::from_utf8_lossy(text));
                 info!(%addr, empire, recipients = sent, "Shout sent to every Channel");
             }
         }
@@ -8796,6 +8834,7 @@ where
         presence = lease.id(),
         "Character entered the game; registered on its map"
     );
+    log_session_event(true, seat.number, addr, held);
     let outbox = lease.outbox();
     held.presence = Some(lease);
     let show = prodomo::game_loop_messages::Showing {
@@ -9575,12 +9614,17 @@ async fn rename_character(
     let Some(account) = account.as_mut() else {
         return Ok(Vec::new());
     };
+    let old_name = account
+        .lobby
+        .in_slot(record.index)
+        .map_or_default(|slot| slot.name.as_str().to_string());
     if !change_name(&context.store, account.id, player, &name)
         .await
         .map_err(|error| error.to_string())?
     {
         return Ok(vec![create_failure(CREATE_TAKEN)]);
     }
+    prodomo::gamelog::change_name_log(player, &old_name, name.as_str(), "");
     info!(account = account.id.get(), player, "Character renamed");
     Ok(renamed(&mut account.lobby, player, &name)
         .into_iter()
@@ -12099,6 +12143,19 @@ where
         }
         Interpreted::Run { entry, rest } => (entry, rest),
     };
+    if held.gm_level > 0 {
+        if let Some(character) = held.character.as_ref() {
+            let ip = addr.ip().to_string();
+            let cmd = String::from_utf8_lossy(line);
+            prodomo::gamelog::gm_command_log(
+                character.id,
+                &ip,
+                held.channel,
+                character.name.as_str(),
+                &cmd,
+            );
+        }
+    }
     run_line_command(session, entry, addr, context, locations, held, rest).await
 }
 

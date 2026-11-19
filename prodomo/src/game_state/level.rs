@@ -248,6 +248,9 @@ impl GameState {
             }
         }
         if new != old {
+            if let Ok(character) = self.characters.find_by_vid(vid) {
+                crate::gamelog::level_log(character.name(), new, 0, character.player_id(), 0);
+            }
             self.raise_quest_levelup(vid);
             self.set_member_levels(vid, new);
         }
@@ -514,6 +517,9 @@ impl GameState {
             },
             true,
         );
+        if let Ok(character) = self.characters.find_by_vid(vid) {
+            crate::gamelog::top_player_aff_log(character.player_id(), TOP_LEVEL, kind);
+        }
     }
 
     /// The held numbers of the player under `vid` after the reset.

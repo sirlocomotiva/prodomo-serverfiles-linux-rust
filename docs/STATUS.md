@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 731 |
+| measure | value at ledger 732 |
 |---|---|
-| Parity inventory | 2,332 rows: 1,759 `ported`, 53 `partial`, 520 `unused`, 0 `missing`; **B7, B9 and all B6 event rows closed** (53 open rows across B1–B6 and B8, each note ending in `Left:`) |
-| Scenarios | 587 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,738 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 731 has the receipt) |
+| Parity inventory | 2,332 rows: 1,760 `ported`, 52 `partial`, 520 `unused`, 0 `missing`; **B7, B9 and all B6 event rows closed** (52 open rows across B1–B6 and B8, each note ending in `Left:`) |
+| Scenarios | 588 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,740 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 732 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 45 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -109,7 +109,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 | B5. Guild and the cross-Channel paths (4) | `sys.guild.core`, `sys.guild.war`, `sys.guild.dungeon`, `sys.bus` |
 | B6. Quests, dungeons, events (6) | `sys.quest.runtime`, `questlib.questlib`, `sys.dungeon.core`, `sys.dungeon.ship_defense`, `sys.dungeon.dragon_lair`, `data.regen.dungeon` (all 5 event rows closed in ledger 731) |
 | B7. Life skills and custom systems (0) | Closed (ledger 730): `sys.life.fishing`, `sys.life.mining`, `sys.custom.dragon_soul`, `sys.custom.new_set_bonus` |
-| B8. Login, logs, data (7) | `sys.login.by_key`, `sys.login.enter`, `sys.log`, `data.proto.item`, `data.locale.strings`, `data.locale.names`, `data.map.index` |
+| B8. Login, logs, data (6) | `sys.login.by_key`, `sys.login.enter`, `data.proto.item`, `data.locale.strings`, `data.locale.names`, `data.map.index` (`sys.log` closed in ledger 732) |
 | B9. The arm tables (0) | Closed: `item-use.md` (0 open, ledger 728), `points.md` (0 open, ledger 729), `skill-arms.md` (0 open, ledger 727) |
 
 *Exit:* no `partial` or `missing` row is left; each is `ported`, `unused`, or on the owner's list.
@@ -283,7 +283,7 @@ route the target to its own file. Porting the sites is `sys.log` (package B8).
 | 1. Restructure | One `prodomo` binary, TOML configuration, the PostgreSQL store, the Operator commands. | Done (ledger 177-179). |
 | 2. Parity inventory | Every legacy system and handler in `.scratch/parity/`, and the scripted client. | Done (181). |
 | 3. Vertical slice | Handshake to logout with save, with a Warp between maps. | Done (228). |
-| 4. Game systems | Items, NPCs and Transfers, quests, monsters and combat, skills, party and guild, dungeons and events, the Prodomo custom systems, GM commands. | In its tail: 53 `partial` rows (packages B1–B6, B8 and C above). |
+| 4. Game systems | Items, NPCs and Transfers, quests, monsters and combat, skills, party and guild, dungeons and events, the Prodomo custom systems, GM commands. | In its tail: 52 `partial` rows (packages B1–B6, B8 and C above). |
 | 5. Game data and play test | The play-test kit, then the owner's play test with the Reference client. | Not started (packages D and E). |
 
 ### Acceptance

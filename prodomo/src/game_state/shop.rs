@@ -998,6 +998,19 @@ impl GameState {
                 } else {
                     done
                 };
+                let pid = character.player_id();
+                let spent = i64::try_from(gold).unwrap_or(i64::MAX)
+                    - i64::try_from(left).unwrap_or(i64::MAX);
+                crate::gamelog::item_log(pid, (0, 0), (0, offer.vnum), "SHOP_BUY", "", "");
+                crate::gamelog::money_log(crate::gamelog::MoneyLogKind::Shop, offer.vnum, -spent);
+                if crate::gamelog::is_gold_bar(offer.vnum) {
+                    crate::gamelog::gold_bar_log(
+                        pid,
+                        0,
+                        crate::gamelog::GoldBarHow::ShopBuy,
+                        &offer.vnum.to_string(),
+                    );
+                }
                 Ok(ShopAnswer::Moved(Box::new(paid(
                     character,
                     done,
@@ -1163,6 +1176,26 @@ impl GameState {
                 // Past the sale: the clamped count counts on the sold item
                 // (`RegisterItemMission(MISSION_TYPE_SELL, bCount, ...)`).
                 if matches!(answer, ShopAnswer::Moved(_)) {
+                    let pid = self
+                        .characters
+                        .find_by_vid(vid)
+                        .map_or(0, world::character::Character::player_id);
+                    let earned = i64::try_from(held).unwrap_or(i64::MAX)
+                        - i64::try_from(gold).unwrap_or(i64::MAX);
+                    crate::gamelog::item_log(pid, (0, 0), (0, sold_vnum), "SHOP_SELL", "", "");
+                    crate::gamelog::money_log(
+                        crate::gamelog::MoneyLogKind::Shop,
+                        sold_vnum,
+                        earned,
+                    );
+                    if crate::gamelog::is_gold_bar(sold_vnum) {
+                        crate::gamelog::gold_bar_log(
+                            pid,
+                            0,
+                            crate::gamelog::GoldBarHow::ShopSell,
+                            &sold_vnum.to_string(),
+                        );
+                    }
                     let clamped = count.min(sold_count).max(1);
                     self.pass_on_sell(vid, mover, clamped, sold_vnum);
                 }

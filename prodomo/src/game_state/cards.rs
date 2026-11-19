@@ -665,6 +665,11 @@ impl GameState {
             .characters
             .find_by_vid(vid)
             .map_or_default(|character| character.name().as_bytes().to_vec());
+        crate::gamelog::okay_event_log(
+            pid,
+            &String::from_utf8_lossy(&name),
+            i32::try_from(points).unwrap_or(i32::MAX),
+        );
         self.card_tables
             .okay
             .games

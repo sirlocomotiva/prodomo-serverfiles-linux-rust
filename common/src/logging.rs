@@ -8,9 +8,9 @@ use tracing_subscriber::{
     EnvFilter,
 };
 
-/// The workspace crates whose events the default filter lets through.
-const WORKSPACE_TARGETS: [&str; 8] = [
-    "common", "db", "gamedata", "net", "prodomo", "protocol", "quest", "world",
+/// The workspace crates (plus the `gamelog` target) whose events the default filter lets through.
+const WORKSPACE_TARGETS: [&str; 9] = [
+    "common", "db", "gamedata", "gamelog", "net", "prodomo", "protocol", "quest", "world",
 ];
 
 /// Log configuration for the server

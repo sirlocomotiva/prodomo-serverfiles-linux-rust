@@ -2084,7 +2084,7 @@ impl Game for Session<'_> {
         );
         self.records.extend(moved.records);
         self.item_rows.extend(moved.changes);
-        match outcome {
+        let id = match outcome {
             AutoGiven::NoProto | AutoGiven::NotMade => 0,
             AutoGiven::Merged(id) | AutoGiven::Placed { id, .. } => id,
             AutoGiven::Unplaced(item) => {
@@ -2092,7 +2092,26 @@ impl Game for Session<'_> {
                 self.laid.push(item);
                 id
             }
+        };
+        if id != 0 {
+            crate::gamelog::item_log(giver.owner_id, (0, 0), (id, vnum), "QUEST_GIVE", "", "");
+            crate::gamelog::quest_reward_log(
+                "quest",
+                giver.owner_id,
+                0,
+                i64::from(vnum),
+                i64::from(count),
+            );
+            if crate::gamelog::is_gold_bar(vnum) {
+                crate::gamelog::gold_bar_log(
+                    giver.owner_id,
+                    id,
+                    crate::gamelog::GoldBarHow::Quest,
+                    &vnum.to_string(),
+                );
+            }
         }
+        id
     }
 
     fn skill_group(&self) -> u8 {

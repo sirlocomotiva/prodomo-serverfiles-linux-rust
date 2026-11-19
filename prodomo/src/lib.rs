@@ -10,6 +10,9 @@ pub mod game_loop;
 /// The characters, item ids, and item prototypes one game thread owns.
 pub mod game_state;
 
+/// Kept game-log events on the `gamelog` tracing target (`docs/STATUS.md`, owner question 73).
+pub mod gamelog;
+
 /// Typed commands, effects, and terminal acknowledgements for the game loop.
 pub mod game_loop_messages;
 

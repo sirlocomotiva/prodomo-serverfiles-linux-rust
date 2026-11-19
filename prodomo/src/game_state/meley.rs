@@ -1003,7 +1003,7 @@ impl GameState {
             time.extend_from_slice(secs.to_string().as_bytes());
             time.extend_from_slice(b" second(s)");
         }
-        let _ = count;
+        crate::gamelog::meley_log(id, u32::try_from(count).unwrap_or(u32::MAX), need);
         self.tell_meley_guild(id, b"<Guild> Compliments, you defeat Meley.", &[]);
         self.tell_meley_guild(
             id,

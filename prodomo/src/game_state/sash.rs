@@ -655,6 +655,7 @@ impl GameState {
         moved.gold = Some(gold_delta(held, left));
         moved.points = points;
         moved.quickslots = Some(quickslots);
+        self.log_sash_result(vid, pid, (vnum, id, 1), absorb);
         if grade == 4 {
             moved.records.push(self.sash_line(
                 actor,
@@ -915,6 +916,9 @@ impl GameState {
         moved.changes.extend(done.changes);
         moved.points = points;
         moved.quickslots = Some(quickslots);
+        let pos = self.spot_of(vid.raw()).map_or((0, 0), |s| (s.x, s.y));
+        let abs = u8::try_from(one.sockets[SASH_ABSORPTION_SOCKET]).unwrap_or(0);
+        crate::gamelog::sash_log(pid, pos, (one.vnum, first, 1), abs, true);
         moved
             .records
             .push(self.sash_line(actor, SASH_SUCCESS_NOTICE, &[]));
@@ -931,5 +935,16 @@ impl GameState {
             1,
         );
         moved.records.push(refined.encode());
+    }
+
+    fn log_sash_result(&self, vid: Vid, pid: u32, item: (u32, u32, u16), absorb: u32) {
+        let pos = self.spot_of(vid.raw()).map_or((0, 0), |s| (s.x, s.y));
+        crate::gamelog::sash_log(
+            pid,
+            pos,
+            item,
+            u8::try_from(absorb).unwrap_or(u8::MAX),
+            true,
+        );
     }
 }

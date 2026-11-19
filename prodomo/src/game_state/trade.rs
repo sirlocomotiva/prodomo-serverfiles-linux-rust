@@ -629,6 +629,14 @@ impl GameState {
             &names[1],
         );
         let asked = self.hand_back(deal, Side::Asked, asked, asked_done, asked_gold, &names[0]);
+        if starter_gold != 0 {
+            crate::gamelog::money_log(crate::gamelog::MoneyLogKind::Misc, 0, starter_gold);
+        }
+        if asked_gold != 0 {
+            crate::gamelog::money_log(crate::gamelog::MoneyLogKind::Misc, 0, asked_gold);
+        }
+        crate::gamelog::item_log(starter.owner_id, (0, 0), (0, 0), "EXCHANGE_END", "", "");
+        crate::gamelog::item_log(asked.owner_id, (0, 0), (0, 0), "EXCHANGE_END", "", "");
         let (own, partner) = match closer {
             Side::Starter => (starter, asked),
             Side::Asked => (asked, starter),

@@ -402,6 +402,12 @@ impl GameState {
         let owner_id = character.player_id();
         let raw = character.vid().raw();
         let mut carried = MovedItems::new(owner_id, raw, done, mover, &self.protos, &self.locale);
+        let how = match mall {
+            None => "SAFEBOX PUT",
+            Some(false) => "SAFEBOX GET",
+            Some(true) => "MALL GET",
+        };
+        crate::gamelog::item_log(owner_id, (0, 0), (0, 0), how, "", "");
         carried.quickslots = Some(quickslots);
         SafeboxAnswer::Moved(Box::new(carried))
     }

@@ -311,6 +311,7 @@ impl GameState {
                 let set = character_refine_set(self, vid, at);
                 if set >= DEVIL_TOWER_SET_LIMIT {
                     tracing::warn!(pid, "DEVIL_TOWER_REFINE_HACK");
+                    crate::gamelog::hack_log("", "", "", "", "DEVIL_TOWER_REFINE_HACK");
                 } else if self.refine_flag(pid, DEVIL_TOWER_FLAG) != 0 {
                     self.do_refine(vid, at, true, actor, &mut moved);
                     if let Some(quests) = self.quests.as_mut() {
@@ -593,6 +594,28 @@ impl GameState {
         moved.gold = Some(gold_delta(plan.gold, left));
         moved.points = points;
         moved.quickslots = Some(quickslots);
+        self.log_refine_outcome(vid, pid, plan, success);
+    }
+
+    fn log_refine_outcome(&self, vid: Vid, pid: u32, plan: &RefinePlan, success: bool) {
+        let item_name = String::from_utf8_lossy(&plan.proto.name);
+        let step = super::use_to_item::refine_level(&plan.proto);
+        let pos = self.spot_of(vid.raw()).map_or((0, 0), |s| (s.x, s.y));
+        crate::gamelog::refine_log(pid, &item_name, plan.old.id, step, success, "POWER");
+        crate::gamelog::item_log(
+            pid,
+            pos,
+            (plan.old.id, plan.old.vnum),
+            if success {
+                "REFINE SUCCESS"
+            } else {
+                "REFINE FAIL"
+            },
+            &item_name,
+            "",
+        );
+        let neg_fee = -i64::try_from(plan.fee).unwrap_or(i64::MAX);
+        crate::gamelog::money_log(crate::gamelog::MoneyLogKind::Refine, plan.old.vnum, neg_fee);
     }
 }
 

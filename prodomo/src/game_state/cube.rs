@@ -329,6 +329,17 @@ impl GameState {
             let total = u64::from(recipe.reward.count) * u64::from(wins);
             let made = u16::try_from(total.min(u64::from(u16::MAX))).unwrap_or(u16::MAX);
             self.pass_on_craft(vid, actor, made, recipe.reward.vnum);
+            let pid = moved.owner_id;
+            let pos = self.spot_of(vid.raw()).map_or((0, 0), |s| (s.x, s.y));
+            crate::gamelog::item_log(pid, pos, (0, recipe.reward.vnum), "CUBE", "", "");
+            if recipe.gold != 0 {
+                let spent = i64::try_from(recipe.gold * u64::from(count)).unwrap_or(i64::MAX);
+                crate::gamelog::money_log(
+                    crate::gamelog::MoneyLogKind::Misc,
+                    recipe.reward.vnum,
+                    -spent,
+                );
+            }
         }
         self.pack_cube_done(vid, actor, moved, done);
         if !granted {

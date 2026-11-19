@@ -166,6 +166,15 @@ impl GameState {
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.sync_hack_count = actor.sync_hack_count;
         }
+        if actor.sync_hack_count > sync_hack_count
+            && actor.sync_hack_count >= crate::sync_position::SYNC_HACK_LIMIT_COUNT
+        {
+            let pid = self
+                .characters
+                .find_by_vid(vid)
+                .map_or(0, world::character::Character::player_id);
+            crate::gamelog::speed_hack_log(pid, spot.x, spot.y, actor.sync_hack_count);
+        }
         Some(result)
     }
 }
