@@ -69938,3 +69938,173 @@ fn wearing_dx_ht_sungma_sp_stamina_and_none_recomputes_on_the_wire() {
     server.wait_for("Character disconnected; wrote the row");
     drop(server);
 }
+
+/// `sys.life.fishing` (`fishing::Grill`, `G/fishing.cpp:825-848`): giving a live fish (`27803`) or
+/// a dead fish (`27833`) to a campfire (`12000`) chats `Baked %s`, consumes the stack, and gives
+/// the same count of the grilled fish (`27863`) through `AutoGiveItem`.
+#[test]
+fn grilling_a_live_or_dead_fish_at_a_campfire_bakes_it() {
+    const LIVE_CARP: u32 = 27_803;
+    const DEAD_CARP: u32 = 27_833;
+    const GRILLED_CARP: u32 = 27_863;
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) VALUES \
+             (50, (SELECT id FROM player WHERE name = 'Alpha'), 1, 0, 1, {CAMPFIRE}), \
+             (51, (SELECT id FROM player WHERE name = 'Alpha'), 1, 1, 2, {LIVE_CARP}), \
+             (52, (SELECT id FROM player WHERE name = 'Alpha'), 1, 2, 1, {DEAD_CARP})"
+        ),
+    );
+    let (mut alice, _alpha, _entered) = enter_equipped_world_with(&server, b"alice", 3);
+    std::thread::sleep(Duration::from_millis(1600));
+    alice.send_record(&client_item_use(0));
+    let _clear_fire = alice.read_game();
+    let insert = alice.read_game();
+    assert_eq!(insert[0], GC_CHARACTER_ADD, "campfire spawned");
+    assert_eq!(
+        u16::from_le_bytes([insert[22], insert[23]]),
+        12_000,
+        "campfire race"
+    );
+    let campfire_vid = u32::from_le_bytes(insert[1..5].try_into().expect("four bytes"));
+
+    // Grill 2 live crucian carp -> Baked chat + clear cell 1 + 2 grilled carp (27863).
+    alice.send_record(&client_give(campfire_vid, 1));
+    let (first, quiet) = alice.drain_game(Duration::from_millis(700), game_len);
+    assert_eq!(quiet, Quiet::Open);
+    assert!(
+        first
+            .iter()
+            .any(|r| r.first() == Some(&GC_CHAT) && r.windows(5).any(|w| w == b"Baked")),
+        "grilling live fish chats Baked: {first:?}"
+    );
+    assert!(
+        first.iter().any(|r| {
+            r.first() == Some(&ITEM_SET) && set_fields(r).2 == GRILLED_CARP && set_fields(r).3 == 2
+        }),
+        "grilling 2 live carp gives 2 grilled carp: {first:?}"
+    );
+
+    // Grill 1 dead crucian carp -> Baked chat + clear cell 2 + merge to count 3.
+    alice.send_record(&client_give(campfire_vid, 2));
+    let (second, quiet) = alice.drain_game(Duration::from_millis(700), game_len);
+    assert_eq!(quiet, Quiet::Open);
+    assert!(
+        second
+            .iter()
+            .any(|r| r.first() == Some(&GC_CHAT) && r.windows(5).any(|w| w == b"Baked")),
+        "grilling dead fish chats Baked: {second:?}"
+    );
+    let stored = rows_of(
+        &database,
+        "SELECT vnum, count FROM item WHERE owner_id = (SELECT id FROM player WHERE name = 'Alpha') ORDER BY vnum",
+    );
+    assert_eq!(stored, vec![(i64::from(GRILLED_CARP), 3)]);
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}
+
+/// `sys.custom.dragon_soul` (`DragonSoul_IsActiveFullDeck`, `G/char_dragonsoul.cpp:45-64`,
+/// `G/item.cpp:1095-1102`): activating a full deck of six grade-4 stones adds `+value * 4 / 10`
+/// to each active stone's attributes; pulling one stone out drops the deck below six and removes
+/// the full-deck bonus from the remaining active stones; deactivating returns cleanly to zero.
+#[test]
+fn a_full_dragon_soul_deck_scales_stone_bonuses_by_grade_and_clears_on_pull_out() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    // Qualify Alpha (AFFECT_DRAGON_SOUL_QUALIFIED = 540) and seed six grade-4 stones in deck 0
+    // (cells 244..=249), with APPLY_ATTBONUS_HUMAN (17) = 10 on slot 0 (114000).
+    sql(
+        &database,
+        "INSERT INTO player_affect (player_id, affect_type, apply_on, apply_value, flag, duration, sp_cost) \
+         SELECT id, 540, 0, 0, 0, 600000000, 0 FROM player WHERE name = 'Alpha'",
+    );
+    for (slot, vnum) in [114_000u32, 124_000, 134_000, 144_000, 154_000, 164_000]
+        .into_iter()
+        .enumerate()
+    {
+        let id = 60 + slot;
+        let cell = 244 + slot;
+        let (at, av) = if slot == 0 { (17, 10) } else { (0, 0) };
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0, attrtype0, attrvalue0) \
+                 SELECT {id}, id, 1, {cell}, 1, {vnum}, 600, {at}, {av} FROM player WHERE name = 'Alpha'"
+            ),
+        );
+    }
+    let (mut alice, _alpha, _entered) = enter_equipped_world_with(&server, b"alice", 6);
+    std::thread::sleep(Duration::from_millis(1600));
+
+    // Activate full grade-4 deck: POINT_ATTBONUS_HUMAN (43) becomes 10 + 10*4/10 = 14.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dragon_soul a 0"));
+    let (on_records, quiet) = alice.drain_game(Duration::from_millis(700), game_len);
+    assert_eq!(quiet, Quiet::Open);
+    let on_pts = decoded_point_changes(&on_records);
+    assert_eq!(
+        on_pts
+            .iter()
+            .rev()
+            .find(|&&(k, _)| k == 43)
+            .map(|&(_, v)| v),
+        Some(14),
+        "full grade-4 deck scales APPLY_ATTBONUS_HUMAN 10 -> 14: {on_pts:?}"
+    );
+
+    // Pull out slot 1 (cell 245) via direct CG_ITEM_USE: whether PullOut hits or misses,
+    // slot 1 leaves deck 0, breaking the full deck and dropping slot 0's bonus back to 10.
+    alice.send_record(&client_item_use(245));
+    let (pull_records, quiet) = alice.drain_game(Duration::from_millis(700), game_len);
+    assert_eq!(quiet, Quiet::Open);
+    let pull_pts = decoded_point_changes(&pull_records);
+    assert_eq!(
+        pull_pts
+            .iter()
+            .rev()
+            .find(|&&(k, _)| k == 43)
+            .map(|&(_, v)| v),
+        Some(10),
+        "breaking full deck drops POINT_ATTBONUS_HUMAN (43) back to base 10: {pull_pts:?}"
+    );
+
+    // Deactivate remaining deck: POINT_ATTBONUS_HUMAN returns cleanly to 0.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/dragon_soul d"));
+    let (off_records, quiet) = alice.drain_game(Duration::from_millis(700), game_len);
+    assert_eq!(quiet, Quiet::Open);
+    let off_pts = decoded_point_changes(&off_records);
+    assert_eq!(
+        off_pts
+            .iter()
+            .rev()
+            .find(|&&(k, _)| k == 43)
+            .map(|&(_, v)| v),
+        Some(0),
+        "deactivating deck returns POINT_ATTBONUS_HUMAN (43) to 0: {off_pts:?}"
+    );
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}

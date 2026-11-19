@@ -811,6 +811,7 @@ impl GameState {
             changes: Vec::new(),
         };
         self.deactivate_stone(vid, stone_pos.cell, &mut pre_done);
+        self.sync_ds_full_deck(vid);
         let plan = PullOutPlan {
             stone_pos,
             landing,

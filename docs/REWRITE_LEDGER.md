@@ -58082,3 +58082,46 @@ self-driving `APPLY_ENERGY` in `CBuffOnAttributes`), fixed above; second full ru
 failures.
 Parity: 1,750 `ported`, 62 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 583
 scenarios. No ADR changed.
+
+## 730. Package B7 closure: `fishing::Grill`, `DragonSoul_IsActiveFullDeck`, `sys.life.mining`, and `sys.custom.new_set_bonus`
+
+Closes all four rows of Package B7 (`sys.life.fishing`, `sys.life.mining`,
+`sys.custom.dragon_soul`, `sys.custom.new_set_bonus`), bringing open rows from 62 to 58.
+
+- `fishing::Grill` (`G/fishing.cpp:825-848`): added `GameState::grill_fish` in
+  `prodomo/src/game_state/fishing.rs`, removed `GiveUnported::Grill` from
+  `world/src/character/give.rs`, and wired `GiveAnswer::Grill` in
+  `prodomo/src/game_state.rs` (dropping the now-unreachable unported arm so `give_answer`
+  returns `MovedItems` directly). Live fish (`27803..=27830`) and dead fish (`27833..=27860`)
+  given to a campfire chat `Baked <name>`, destroy the stack, sync quickslots, and
+  `auto_give_item` the grilled counterpart (`fish_info[idx].grill_vnum`) with the same count.
+  Verified by scenario `grilling_a_live_or_dead_fish_at_a_campfire_bakes_it` (8× in parallel).
+- `DragonSoul_IsActiveFullDeck` (`ENABLE_DRAGONSOUL_ALCHEMY_PLUS`,
+  `G/char_dragonsoul.cpp:45-64`, `G/item.cpp:1095-1102`): added `ds_stone_grade_bonus` on
+  `GameState` and `active_full_deck_grade` / `sync_ds_full_deck` in
+  `prodomo/src/game_state/dragon_soul.rs` (hooked from `activate_stone`, `deactivate_stone`,
+  `run_dragon_soul` and `use_to_item.rs` pull-out). When all 6 active deck slots hold active
+  stones of the same grade `g > 0` (`(vnum / 1000) % 10`), each active stone's applies gain
+  `value * g / 10`; losing any stone strips the bonus cleanly from the remaining stones with
+  zero point leak. Fixes the legacy bug where `dsType == 0` at `G/char_dragonsoul.cpp:54`
+  could pass on an empty slot (ADR-0008). Verified by unit test
+  `an_active_full_deck_scales_stone_applies_by_grade_and_clears_on_loss` and scenario
+  `a_full_dragon_soul_deck_scales_stone_bonuses_by_grade_and_clears_on_pull_out` (8× in
+  parallel).
+- `sys.life.mining`: closed as `ported` with `a_pick_digs_a_vein_into_ore_and_trains_its_points`;
+  the `SkillLevelUp`/`CanSkillLevelUp` arms were already closed in `skill-arms.md` (ledger
+  727) and the `mining_event` map-230 walk in ledger 602.
+- `sys.custom.new_set_bonus`: closed as `ported` with
+  `a_costume_attr_bonus_scales_costume_bonuses_and_recomputes_on_wear`; `IsNewSetNeedRefresh`
+  on wear/unequip is already covered by `recompute` in `world/src/character/equip.rs`, and
+  the six `BuffOnAttr_RemoveBuffsFromItem` calls in `G/char_item.cpp` before `@fixme114`
+  (`if (item2->IsEquipped()) return false;`) are legacy Defects (unrestored strip on refusal),
+  not ported (ADR-0008).
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,733
+passed, 0 failed in 46 targets; with it 5,733 passed, 0 failed in 46 targets (484 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+No test failed on the first run.
+Parity: 1,754 `ported`, 58 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows; 585
+scenarios. No ADR changed.

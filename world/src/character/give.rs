@@ -98,8 +98,6 @@ pub enum GiveAnswer {
 /// A [`GiveAnswer`] arm this build does not serve yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GiveUnported {
-    /// The campfire grill (`fishing::Grill`).
-    Grill,
     /// The Meley statue.
     MeleyStatue,
 }
@@ -108,9 +106,9 @@ pub enum GiveUnported {
 #[must_use]
 pub fn unported_of(answer: GiveAnswer) -> Option<GiveUnported> {
     match answer {
-        GiveAnswer::Grill => Some(GiveUnported::Grill),
         GiveAnswer::MeleyStatue => Some(GiveUnported::MeleyStatue),
-        GiveAnswer::Take
+        GiveAnswer::Grill
+        | GiveAnswer::Take
         | GiveAnswer::Refused
         | GiveAnswer::RefusedWith(_)
         | GiveAnswer::RefineNormal
@@ -376,7 +374,7 @@ mod tests {
 
     #[test]
     fn the_unserved_arms_name_their_system_and_the_rest_name_none() {
-        assert_eq!(unported_of(GiveAnswer::Grill), Some(GiveUnported::Grill));
+        assert_eq!(unported_of(GiveAnswer::Grill), None);
         assert_eq!(unported_of(GiveAnswer::RefineNormal), None);
         assert_eq!(unported_of(GiveAnswer::RefineMoneyOnly), None);
         assert_eq!(unported_of(GiveAnswer::HorseRevive), None);

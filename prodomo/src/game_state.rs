@@ -714,6 +714,10 @@ pub struct GameState {
     /// since the last fire (`processing_time/passes_per_sec`,
     /// `G/item.cpp:1993-1994`). Set with the due Pulse, cleared with it.
     ds_timer_fell: HashMap<u32, i32>,
+    /// The full-deck grade bonus (`ENABLE_DRAGONSOUL_ALCHEMY_PLUS`, `G/item.cpp:1095-1102`)
+    /// currently applied to each active dragon-soul stone, by item id: 0/absent when unscaled,
+    /// `grade > 0` while all six slots of the active deck hold active stones of `grade`.
+    ds_stone_grade_bonus: HashMap<u32, i32>,
     /// The account's premium private-shop expiry each online character holds
     /// (`m_aiPremiumTimes[PREMIUM_PRIVATE_SHOP]`): the unix time the 507 use
     /// wrote, 0 when never bought. Seeded at admission, cleared on leave.
@@ -6088,7 +6092,7 @@ impl GameState {
         if distance_approx(place.x - npc_x, place.y - npc_y) > world::character::GIVE_DISTANCE {
             return Ok(moved);
         }
-        self.give_answer(
+        Ok(self.give_answer(
             vid,
             (target, race, npc_dead),
             (id, vnum),
@@ -6097,7 +6101,7 @@ impl GameState {
             place,
             actor,
             moved,
-        )
+        ))
     }
 
     /// The `CanReceiveItem` answer of [`Self::give_item`]: the take, the lines, the horse
@@ -6114,7 +6118,7 @@ impl GameState {
         place: GroundPlace,
         actor: Mover,
         mut moved: MovedItems,
-    ) -> Result<MovedItems, MoveItemRefused> {
+    ) -> MovedItems {
         match can_receive(race, npc_dead, vnum, proto) {
             GiveAnswer::Take => {
                 tracing::info!(
@@ -6127,33 +6131,31 @@ impl GameState {
                 );
                 let records = self.take_gift(vid, (target, race), id, place, actor, moved.owner_id);
                 moved.records.extend(records);
-                Ok(moved)
+                moved
             }
             GiveAnswer::RefusedWith(format) => {
                 moved.records.push(self.give_line(actor, format));
-                Ok(moved)
+                moved
             }
-            GiveAnswer::Refused => Ok(moved),
+            GiveAnswer::Refused => moved,
             answer @ (GiveAnswer::HorseRevive | GiveAnswer::HorseFeed) => {
                 self.give_horse_answer(vid, target, id, answer, actor, &mut moved);
-                Ok(moved)
+                moved
             }
             answer @ (GiveAnswer::RefineNormal | GiveAnswer::RefineMoneyOnly) => {
                 let money_only = answer == GiveAnswer::RefineMoneyOnly;
                 let records = self.smith_gift(vid, at, money_only, proto.refine_set, actor);
                 moved.records.extend(records);
-                Ok(moved)
+                moved
+            }
+            GiveAnswer::Grill => {
+                self.grill_fish(vid, id, vnum, actor, &mut moved);
+                moved
             }
             GiveAnswer::MeleyStatue => {
                 self.meley_gift(vid, target, place, (id, vnum), actor, &mut moved);
-                Ok(moved)
+                moved
             }
-            arm => match world::character::unported_of(arm) {
-                Some(system) => Err(MoveItemRefused::Refused(MoveRefused::NotPorted(
-                    world::character::Unported::Give(system),
-                ))),
-                None => Ok(moved),
-            },
         }
     }
 

@@ -720,6 +720,83 @@ impl GameState {
         Ok(moved)
     }
 
+    /// `fishing::Grill` (`G/fishing.cpp:825-848`): giving a live (`27803..=27830`) or dead
+    /// (`27833..=27860`) fish to a campfire (`12000`) chats `Baked %s`, consumes the whole stack,
+    /// and gives `count` of `fish_info[idx].grill_vnum` via `AutoGiveItem`.
+    pub(super) fn grill_fish(
+        &mut self,
+        vid: Vid,
+        item_id: u32,
+        vnum: u32,
+        actor: Mover,
+        moved: &mut MovedItems,
+    ) {
+        let idx = if (27_803..=27_830).contains(&vnum) {
+            usize::try_from(vnum - 27_800).unwrap_or(usize::MAX)
+        } else if (27_833..=27_860).contains(&vnum) {
+            usize::try_from(vnum - 27_830).unwrap_or(usize::MAX)
+        } else {
+            return;
+        };
+        let Some(grill_vnum) = self.fishing.fish().get(idx).map(|fish| fish.grill_vnum) else {
+            return;
+        };
+        let name = self
+            .protos
+            .get(vnum)
+            .map_or_else(Vec::new, |proto| proto.locale_name.clone());
+        let Ok(character) = self.characters.find_by_vid_mut(vid) else {
+            return;
+        };
+        let pid = character.player_id();
+        let (items, _, slots) = character.items_points_and_quickslots_mut();
+        let Some(item) = items.item(item_id).cloned() else {
+            return;
+        };
+        let count = item.count;
+        let Ok(pos) = items.release(item_id) else {
+            return;
+        };
+        let mut removed = MoveDone {
+            kind: MoveKind::Used,
+            records: vec![MoveRecord::Item(world::character::ItemRecord::Set(
+                world::item::gc_item_clear(pos),
+            ))],
+            changes: vec![world::character::ItemChange::Destroyed { id: item_id }],
+        };
+        if pos.window_type == common::item_slots::EWindows::Inventory as u8 {
+            removed
+                .records
+                .push(MoveRecord::QuickslotSync(world::character::QuickslotSync {
+                    from: pos.cell,
+                    to: world::character::SyncTo::Delete,
+                }));
+        }
+        world::character::sync_quickslots(&mut removed, slots, items);
+        let quickslots = character.quickslots().clone();
+        let _ = character;
+        let recipient = actor.recipient(&self.locale);
+        moved.records.push(chat_packet(
+            recipient,
+            CHAT_TYPE_INFO,
+            b"Baked %s",
+            &[Arg::Text(&name)],
+        ));
+        let cleared = MovedItems::new(pid, vid.raw(), removed, actor, &self.protos, &self.locale);
+        moved.records.extend(cleared.records);
+        moved.changes.extend(cleared.changes);
+        moved.quickslots = Some(quickslots);
+        let questing = self.quest_running(vid);
+        if let Some((outcome, done)) = self.auto_give(vid, (grill_vnum, count), -1, questing) {
+            if let AutoGiven::Unplaced(ground) = outcome {
+                self.lay_auto_given(vid, ground);
+            }
+            let gifts = MovedItems::new(pid, vid.raw(), done, actor, &self.protos, &self.locale);
+            moved.records.extend(gifts.records);
+            moved.changes.extend(gifts.changes);
+        }
+    }
+
     /// Whether the item at `at` of the character under `vid` is a bait.
     pub(super) fn bait_at(&self, vid: Vid, at: ItemPos) -> bool {
         self.characters

@@ -90,6 +90,12 @@ fn time_left(stone: &Item, wear_timed: bool) -> bool {
 fn is_active(stone: &Item) -> bool {
     stone.sockets[ACTIVE_SOCKET] != 0
 }
+
+/// `(vnum / 1000) % 10` (`G/char_dragonsoul.cpp:54`, `G/item.cpp:1099`): a dragon-soul stone's
+/// grade index (`0` rough .. `5` mythic).
+fn ds_grade(vnum: u32) -> i32 {
+    i32::try_from((vnum / 1000) % 10).unwrap_or(0)
+}
 /// The first fire of a started wear timer (`StartTimerBasedOnWearExpireEvent`,
 /// `G/item.cpp:2208-2216`): `remain % 60`, a whole minute when the remain divides 60.
 /// A zero remain starts no timer, so it answers 0.
@@ -270,6 +276,7 @@ impl GameState {
             self.ds_timer_due.remove(&id);
             let cell = stone.pos.cell;
             self.deactivate_stone(vid, cell, &mut done);
+            self.sync_ds_full_deck(vid);
         } else {
             let Ok(character) = self.characters.find_by_vid_mut(vid) else {
                 return;
@@ -405,6 +412,7 @@ impl GameState {
         for cell in start..end {
             self.activate_stone(vid, cell, deck, done);
         }
+        self.sync_ds_full_deck(vid);
     }
 
     /// `DragonSoul_DeactivateAll` (`G/char_dragonsoul.cpp:115-127`): every deck stone
@@ -557,14 +565,21 @@ impl GameState {
         let applies = self.protos.get(stone.vnum).map_or_default(|proto| {
             world::character::item_applies(&stone, proto, &self.protos, &self.item_groups)
         });
+        let bonus_grade = self.ds_stone_grade_bonus.remove(&stone.id).unwrap_or(0);
         for (kind, value) in &applies {
-            // `ModifyPoints(false)` (`G/item.cpp:781-1010`): each apply unapplied through
-            // `ApplyPoint`, except the skill type, which legacy XORs with `0x00800000`
-            // rather than negating.
+            // `ModifyPoints(false)` (`G/item.cpp:781-1010`, `:1095-1102`): each apply unapplied
+            // through `ApplyPoint` (including any full-deck grade scaling applied while active),
+            // except the skill type, which legacy XORs with `0x00800000` rather than negating.
             let back = if *kind == APPLY_SKILL {
                 *value ^ 0x0080_0000
             } else {
-                -*value
+                let total = *value
+                    + if bonus_grade > 0 {
+                        *value * bonus_grade / 10
+                    } else {
+                        0
+                    };
+                -total
             };
             if let Some(points) = self.pc_points_mut(vid.raw()) {
                 let records = points.apply_point(*kind, back);
@@ -577,6 +592,102 @@ impl GameState {
         let step = set_item_socket(character.items_mut(), stone.id, (ACTIVE_SOCKET, 0));
         done.records.extend(step.records);
         done.changes.extend(step.changes);
+    }
+
+    /// `CHARACTER::DragonSoul_IsActiveFullDeck` (`G/char_dragonsoul.cpp:45-64`,
+    /// `ENABLE_DRAGONSOUL_ALCHEMY_PLUS`): returns `Some(grade)` when the active deck holds an
+    /// active `ITEM_DS` stone in all six (`DS_SLOT_MAX`) slots and every stone shares `grade > 0`.
+    ///
+    /// Fixes legacy's Defect (`G/char_dragonsoul.cpp:54-58`) where `temp += dsType; if (temp ==
+    /// dsType * DS_SLOT_MAX) return true;` falsely matched a single grade-0 stone (`0 == 0 * 6`)
+    /// or mixed grades summing to `6 * last_grade`.
+    fn active_full_deck_grade(&self, vid: Vid) -> Option<i32> {
+        let deck = self.bodies.get(&vid).map_or(-1, |body| body.active_deck);
+        let deck = u16::try_from(deck).ok()?;
+        let character = self.characters.find_by_vid(vid).ok()?;
+        let start = DRAGON_SOUL_EQUIP_SLOT_START + DECK_SLOTS * deck;
+        let mut shared: Option<i32> = None;
+        for cell in start..start + DECK_SLOTS {
+            let at = ItemPos::new(EWindows::Inventory as u8, cell);
+            let stone = character.items().item_at(at)?;
+            if !is_active(stone) {
+                return None;
+            }
+            let proto = self.protos.get(stone.vnum)?;
+            if proto.item_type != gamedata::item_kind::ITEM_DS {
+                return None;
+            }
+            let grade = ds_grade(stone.vnum);
+            if grade <= 0 {
+                return None;
+            }
+            match shared {
+                None => shared = Some(grade),
+                Some(first) if first != grade => return None,
+                Some(_) => {}
+            }
+        }
+        shared
+    }
+
+    /// Reconciles the `ENABLE_DRAGONSOUL_ALCHEMY_PLUS` full-deck bonus
+    /// (`lValue * grade_idx / 10`, `G/item.cpp:1095-1102`) across the active deck's stones.
+    pub(super) fn sync_ds_full_deck(&mut self, vid: Vid) {
+        let deck = self.bodies.get(&vid).map_or(-1, |body| body.active_deck);
+        let Ok(deck) = u16::try_from(deck) else {
+            return;
+        };
+        let want = self.active_full_deck_grade(vid).unwrap_or(0);
+        let start = DRAGON_SOUL_EQUIP_SLOT_START + DECK_SLOTS * deck;
+        let stones: Vec<Item> = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .map_or_default(|character| {
+                (start..start + DECK_SLOTS)
+                    .filter_map(|cell| {
+                        let at = ItemPos::new(EWindows::Inventory as u8, cell);
+                        character
+                            .items()
+                            .item_at(at)
+                            .filter(|s| is_active(s))
+                            .cloned()
+                    })
+                    .collect()
+            });
+        for stone in stones {
+            let have = self
+                .ds_stone_grade_bonus
+                .get(&stone.id)
+                .copied()
+                .unwrap_or(0);
+            if have == want {
+                continue;
+            }
+            let applies = self.protos.get(stone.vnum).map_or_default(|proto| {
+                world::character::item_applies(&stone, proto, &self.protos, &self.item_groups)
+            });
+            let mut records = Vec::new();
+            if let Some(points) = self.pc_points_mut(vid.raw()) {
+                for &(kind, value) in &applies {
+                    if kind == APPLY_SKILL {
+                        continue;
+                    }
+                    let old_bonus = if have > 0 { value * have / 10 } else { 0 };
+                    let new_bonus = if want > 0 { value * want / 10 } else { 0 };
+                    let delta = new_bonus - old_bonus;
+                    if delta != 0 {
+                        records.extend(points.apply_point(kind, delta));
+                    }
+                }
+            }
+            self.send_point_records(vid, &records);
+            if want > 0 {
+                self.ds_stone_grade_bonus.insert(stone.id, want);
+            } else {
+                self.ds_stone_grade_bonus.remove(&stone.id);
+            }
+        }
     }
 
     /// Runs one `/ds_list` line (`do_ds_list`, `G/cmd_gm.cpp:5049-5059`): the caller hears
@@ -1560,6 +1671,87 @@ mod tests {
             (held.sockets[REMAIN_SOCKET], held.sockets[ACTIVE_SOCKET]),
             (0, 0),
             "zero writes 0 and deactivates"
+        );
+    }
+
+    /// `DragonSoul_IsActiveFullDeck` (`G/char_dragonsoul.cpp:45-64`, `G/item.cpp:1095-1102`):
+    /// six active stones of the same grade > 0 scale each stone's applies by `+value * grade / 10`;
+    /// five stones, mixed grades, or grade 0 apply no scaling; losing a stone strips the scaling
+    /// from the remaining five active stones with zero point leak.
+    #[test]
+    fn an_active_full_deck_scales_stone_applies_by_grade_and_clears_on_loss() {
+        use common::item_slots::{EWindows, DRAGON_SOUL_EQUIP_SLOT_START};
+        use world::character::APPLY_ATTBONUS_HUMAN;
+        const POINT_ATTBONUS_HUMAN: usize = 43;
+        let vid = Vid::new(1);
+        let vnums = [114_000, 124_000, 134_000, 144_000, 154_000, 164_000];
+        let mut seeded = Vec::new();
+        for (slot, &vnum) in vnums.iter().enumerate() {
+            let mut stone = a_stone(
+                10 + u32::try_from(slot).unwrap(),
+                vnum,
+                [600, 0, 0, 0, 0, 0],
+            );
+            if slot == 0 {
+                stone.attributes[0].b_type = APPLY_ATTBONUS_HUMAN;
+                stone.attributes[0].s_value = 10;
+            }
+            let cell = DRAGON_SOUL_EQUIP_SLOT_START + u16::try_from(slot).unwrap();
+            seeded.push((ItemPos::new(EWindows::Inventory as u8, cell), stone));
+        }
+        let (mut world, _inbox) = entered(&seeded);
+        qualify(&mut world, vid);
+        let base = world
+            .characters
+            .find_by_vid(vid)
+            .unwrap()
+            .points()
+            .unwrap()
+            .get_point(POINT_ATTBONUS_HUMAN);
+        // Full grade-4 deck: 10 + 10 * 4 / 10 = 14.
+        world.run_dragon_soul(vid, b"a 0").expect("activate deck 0");
+        assert_eq!(
+            world
+                .characters
+                .find_by_vid(vid)
+                .unwrap()
+                .points()
+                .unwrap()
+                .get_point(POINT_ATTBONUS_HUMAN),
+            base + 14,
+            "grade-4 full deck adds +40% (+4) on top of base 10"
+        );
+        // Deactivate one stone (slot 1): deck is no longer full -> slot 0 drops from 14 to 10.
+        let mut done = MoveDone {
+            kind: MoveKind::Socketed,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        world.deactivate_stone(vid, DRAGON_SOUL_EQUIP_SLOT_START + 1, &mut done);
+        world.sync_ds_full_deck(vid);
+        assert_eq!(
+            world
+                .characters
+                .find_by_vid(vid)
+                .unwrap()
+                .points()
+                .unwrap()
+                .get_point(POINT_ATTBONUS_HUMAN),
+            base + 10,
+            "losing one stone removes the full-deck bonus from the other active stones"
+        );
+        // Full deactivate clears back to base.
+        world.run_dragon_soul(vid, b"d").expect("deactivate all");
+        assert_eq!(
+            world
+                .characters
+                .find_by_vid(vid)
+                .unwrap()
+                .points()
+                .unwrap()
+                .get_point(POINT_ATTBONUS_HUMAN),
+            base,
+            "deactivating all clears back to baseline with zero leak"
         );
     }
 }
