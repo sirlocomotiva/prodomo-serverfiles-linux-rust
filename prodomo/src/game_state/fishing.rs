@@ -86,8 +86,7 @@ struct PortalRecall {
 
 /// `kill_campfire_event`'s delay (`G/char_item.cpp:2933`): 40 s.
 const CAMPFIRE_LIFETIME: u32 = 40;
-/// `AFFECT_FISH_MIND_PILL` (`G/affect.h:31`): 208, the eighth after `AFFECT_MOV_SPEED` (200).
-const AFFECT_FISH_MIND_PILL: u32 = 208;
+use crate::loading_phase::AFFECT_FISH_MIND_PILL;
 /// `UNIQUE_GROUP_FISH_MIND` (`G/unique_item.h:10`).
 const UNIQUE_GROUP_FISH_MIND: i32 = 10_009;
 /// `UNIQUE_ITEM_FISH_MIND` (`G/unique_item.h:47`).

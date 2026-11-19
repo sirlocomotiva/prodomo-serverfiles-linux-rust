@@ -184,6 +184,46 @@ fn arena_potion_refusal(
     }
 }
 
+/// Parameters for the storage half of `DSManager::PullOut`.
+#[derive(Clone, Copy)]
+struct PullOutPlan {
+    stone_pos: ItemPos,
+    landing: ItemPos,
+    extractor: Option<ItemPos>,
+    passed: bool,
+    stone_id: u32,
+}
+
+/// Moves `stone` from its deck cell `stone_pos` to its dragon-soul box cell `landing`,
+/// writing the clear, set, move change, and success notice onto `done`.
+fn pull_out_move_stone(
+    items: &mut world::character::CharacterItems,
+    stone_pos: ItemPos,
+    landing: ItemPos,
+    stone: &world::item::Item,
+    stone_id: u32,
+    done: &mut MoveDone,
+) -> Result<(), MoveRefused> {
+    items
+        .move_item(stone_pos, landing, stone)
+        .map_err(MoveRefused::Storage)?;
+    let moved = items.item(stone_id).ok_or(MoveRefused::Empty)?;
+    done.records.push(world::character::MoveRecord::Item(
+        world::character::ItemRecord::Set(world::item::gc_item_clear(stone_pos)),
+    ));
+    done.records.push(world::character::MoveRecord::Item(
+        world::character::ItemRecord::Set(moved.gc_item_set(landing, 1)),
+    ));
+    done.changes.push(world::character::ItemChange::Moved {
+        id: stone_id,
+        pos: landing,
+    });
+    done.records.push(world::character::MoveRecord::Notice(
+        world::character::PULLOUT_SUCCESS_NOTICE,
+    ));
+    Ok(())
+}
+
 /// The stone-removal waters (`case 71109` / `case 72719`, `G/char_item.cpp:4862-4935`).
 /// Only 71109 lives in the owner's protos.
 const STONE_WATERS: [u32; 2] = [71_109, 72_719];
@@ -668,14 +708,37 @@ impl GameState {
         Ok(moved)
     }
 
+    /// Whether `at` holds an equipped dragon-soul stone (`case ITEM_DS`,
+    /// `G/char_item.cpp:3059-3065`). An unworn stone stays on the world step's
+    /// `MoveKind::Unused` no-op path.
+    pub(super) fn worn_ds_at(&self, vid: Vid, at: ItemPos) -> bool {
+        let Ok(character) = self.characters.find_by_vid(vid) else {
+            return false;
+        };
+        let Some(item) = character.items().item_at(at) else {
+            return false;
+        };
+        world::character::is_equip_position(item.pos)
+            && self
+                .protos
+                .get(item.vnum)
+                .is_some_and(|proto| proto.item_type == gamedata::item_kind::ITEM_DS)
+    }
+
+    /// `case ITEM_DS` on an equipped stone (`G/char_item.cpp:3059-3065`): runs
+    /// `DSManager::PullOut(this, NPOS, item)` with no extractor (`bonus = 0`).
+    pub(super) fn pull_out_worn_ds(
+        &mut self,
+        vid: Vid,
+        at: ItemPos,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        self.pull_out_stone(vid, at, None, actor)
+    }
+
     /// The soul extractor's use (`PullOut`, `G/DragonSoul.cpp:491-589`): the worn soul
     /// stone at `dest` comes out of its deck cell past the grade's draw, or breaks
-    /// into its by-product. The use's checks run first, as the stone arm's do; an
-    /// empty cell or a non-soul target keeps everything silently, and an unworn
-    /// stone (`RemoveFromCharacter` false) does too. With no empty box cell the
-    /// extractor is kept and the full line chats; the draw spends the extractor and
-    /// moves the stone on a hit, or destroys it and auto-gives the by-product with
-    /// its line on a miss.
+    /// into its by-product.
     fn pull_out_step(
         &mut self,
         vid: Vid,
@@ -683,8 +746,41 @@ impl GameState {
         dest: ItemPos,
         actor: Mover,
     ) -> Result<MovedItems, MoveItemRefused> {
-        let held = self.extract_source(vid, at)?;
-        let Some((stone, worn)) = self.extract_target(vid, dest) else {
+        self.pull_out_stone(vid, dest, Some(at), actor)
+    }
+
+    /// Shared `DSManager::PullOut(this, NPOS, pItem, pExtractor)` (`G/DragonSoul.cpp:491-589`)
+    /// for both `EXTRACT_DRAGON_SOUL` (`extractor = Some(at)`) and `case ITEM_DS` on a worn
+    /// stone (`extractor = None`). Checks the source, target, and an empty dragon-soul box cell
+    /// first; if the stone is active (`socket2 != 0`), deactivates it as `RemoveFromCharacter`
+    /// -> `Unequip` -> `DeactivateDragonSoul` does (`G/item.cpp:1538-1540`); then moves it on a
+    /// hit or destroys it and auto-gives its by-product on a miss.
+    fn pull_out_stone(
+        &mut self,
+        vid: Vid,
+        stone_pos: ItemPos,
+        extractor: Option<ItemPos>,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        let bonus = if let Some(at) = extractor {
+            let held = self.extract_source(vid, at)?;
+            self.protos
+                .get(held.vnum)
+                .map_or(0, |proto| proto.values[0])
+        } else {
+            let secured = self
+                .characters
+                .find_by_vid(vid)
+                .ok()
+                .and_then(world::character::Character::points)
+                .is_some_and(world::character::Points::is_secured);
+            if secured {
+                return Err(MoveItemRefused::Refused(MoveRefused::Secured));
+            }
+            let _stone = self.extract_source(vid, stone_pos)?;
+            0
+        };
+        let Some((stone, worn)) = self.extract_target(vid, stone_pos) else {
             return Ok(self.extract_kept(vid, actor));
         };
         if !worn {
@@ -694,8 +790,7 @@ impl GameState {
             .protos
             .get(stone.vnum)
             .map_or(-1, |proto| proto.sub_type);
-        let landing = self.ds_landing(vid, &stone, sub_type);
-        let Some(landing) = landing else {
+        let Some(landing) = self.ds_landing(vid, &stone, sub_type) else {
             let mut kept = self.extract_kept(vid, actor);
             kept.records.push(crate::chat_line::chat_packet(
                 actor.recipient(&self.locale),
@@ -706,64 +801,121 @@ impl GameState {
             return Ok(kept);
         };
         let grade = u8::try_from((stone.vnum / 1000) % 10).unwrap_or(u8::MAX);
-        let Some((prob, by_product)) = self.dragon_soul_table.soul_extract(grade) else {
-            return Ok(self.extract_kept(vid, actor));
+        let (passed, by_product) = match self.dragon_soul_table.soul_extract(grade) {
+            Some((prob, by_product)) => (self.ds_pullout_draw(prob, bonus), by_product),
+            None => (true, 0),
         };
-        let bonus = self
-            .protos
-            .get(held.vnum)
-            .map_or(0, |proto| proto.values[0]);
-        let passed = self.ds_pullout_draw(prob, bonus);
-        let stone_id = stone.id;
-        let mut moved = self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
-            let extractor = world::character::use_source(items, at)?;
-            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
-            let proto = protos
-                .get(extractor.vnum)
-                .ok_or(MoveRefused::UnknownVnum(extractor.vnum))?;
-            world::character::use_checks(&extractor, proto, rules, gear.points)?;
+        let mut pre_done = MoveDone {
+            kind: MoveKind::Extracted,
+            records: Vec::new(),
+            changes: Vec::new(),
+        };
+        self.deactivate_stone(vid, stone_pos.cell, &mut pre_done);
+        let plan = PullOutPlan {
+            stone_pos,
+            landing,
+            extractor,
+            passed,
+            stone_id: stone.id,
+        };
+        let mut moved = self.pull_out_apply_step(vid, plan, actor)?;
+        if !pre_done.records.is_empty() || (passed && !pre_done.changes.is_empty()) {
+            let pre_moved = MovedItems::new(
+                moved.owner_id,
+                vid.raw(),
+                pre_done,
+                actor,
+                &self.protos,
+                &self.locale,
+            );
+            let mut records = pre_moved.records;
+            records.extend(moved.records);
+            moved.records = records;
             if passed {
-                let mut spent =
-                    world::character::spend_one(items, &extractor, proto).map(|mut done| {
-                        done.kind = MoveKind::Extracted;
-                        done
-                    })?;
-                items
-                    .move_item(dest, landing, &stone)
-                    .map_err(MoveRefused::Storage)?;
-                let moved = items.item(stone_id).ok_or(MoveRefused::Empty)?;
-                spent.records.push(world::character::MoveRecord::Item(
-                    world::character::ItemRecord::Set(world::item::gc_item_clear(dest)),
-                ));
-                spent.records.push(world::character::MoveRecord::Item(
-                    world::character::ItemRecord::Set(moved.gc_item_set(landing, 1)),
-                ));
-                spent.changes.push(world::character::ItemChange::Moved {
-                    id: stone_id,
-                    pos: landing,
-                });
-                spent.records.push(world::character::MoveRecord::Notice(
-                    world::character::PULLOUT_SUCCESS_NOTICE,
-                ));
-                Ok(spent)
-            } else {
-                world::character::spend_extract_pair(items, &stone, &extractor, proto)
+                let mut changes = pre_moved.changes;
+                changes.extend(moved.changes);
+                moved.changes = changes;
             }
-        })?;
+        }
         if !passed {
             if by_product != 0 {
                 self.give_by_product(vid, by_product, actor, &mut moved);
             } else {
-                self.tell(
-                    vid,
-                    actor,
-                    CHAT_TYPE_INFO,
-                    world::character::PULLOUT_FAIL_NOTICE.as_bytes(),
-                    &[],
-                );
+                moved.records.push(self.pullout_failed(actor));
             }
         }
         Ok(moved)
+    }
+
+    /// The storage step of [`Self::pull_out_stone`]: moves the worn stone to `landing` on a
+    /// hit or destroys it on a miss, spending `extractor` when present.
+    fn pull_out_apply_step(
+        &mut self,
+        vid: Vid,
+        plan: PullOutPlan,
+        actor: Mover,
+    ) -> Result<MovedItems, MoveItemRefused> {
+        self.run_item_step(vid, actor, |items, _ids, rules, gear, protos| {
+            let gear = gear.ok_or(MoveRefused::NotPorted(Unported::Equipment))?;
+            let fresh_stone = items
+                .item_at(plan.stone_pos)
+                .cloned()
+                .ok_or(MoveRefused::Empty)?;
+            if let Some(at) = plan.extractor {
+                let held = world::character::use_source(items, at)?;
+                let proto = protos
+                    .get(held.vnum)
+                    .ok_or(MoveRefused::UnknownVnum(held.vnum))?;
+                world::character::use_checks(&held, proto, rules, gear.points)?;
+                if plan.passed {
+                    let mut spent =
+                        world::character::spend_one(items, &held, proto).map(|mut done| {
+                            done.kind = MoveKind::Extracted;
+                            done
+                        })?;
+                    pull_out_move_stone(
+                        items,
+                        plan.stone_pos,
+                        plan.landing,
+                        &fresh_stone,
+                        plan.stone_id,
+                        &mut spent,
+                    )?;
+                    Ok(spent)
+                } else {
+                    world::character::spend_extract_pair(items, &fresh_stone, &held, proto)
+                }
+            } else {
+                if rules.secured {
+                    return Err(MoveRefused::Secured);
+                }
+                let proto = protos
+                    .get(fresh_stone.vnum)
+                    .ok_or(MoveRefused::UnknownVnum(fresh_stone.vnum))?;
+                world::character::use_checks(&fresh_stone, proto, rules, gear.points)?;
+                if plan.passed {
+                    let mut done = MoveDone {
+                        kind: MoveKind::Extracted,
+                        records: Vec::new(),
+                        changes: Vec::new(),
+                    };
+                    pull_out_move_stone(
+                        items,
+                        plan.stone_pos,
+                        plan.landing,
+                        &fresh_stone,
+                        plan.stone_id,
+                        &mut done,
+                    )?;
+                    Ok(done)
+                } else {
+                    world::character::spend_one(items, &fresh_stone, proto).map(|mut done| {
+                        done.kind = MoveKind::Extracted;
+                        done
+                    })
+                }
+            }
+        })
     }
 
     /// The extractor at `at`, with the use's own source checks (`use_source`) and item
@@ -2334,6 +2486,44 @@ mod tests {
         );
         let RowChange::Created(row) = &moved.changes[2] else {
             panic!("the by-product is made: {:?}", moved.changes);
+        };
+        assert_eq!(row.vnum, 30_270);
+    }
+
+    /// `case ITEM_DS` on a worn stone (`G/char_item.cpp:3059-3065`): runs `PullOut` with no
+    /// extractor (`bonus = 0`), deactivating an active stone first, moving it on a hit (seed 3),
+    /// or breaking it into its by-product 30270 on a miss (seed 0).
+    #[test]
+    fn a_worn_ds_use_pulls_out_with_no_extractor_hit_and_miss() {
+        let inventory = EWindows::Inventory as u8;
+        let soul = EWindows::DragonSoulInventory as u8;
+        let mut active = Item::new(7, 110_000);
+        let _ = active.set_socket(0, 86_400);
+        let _ = active.set_socket(2, 1);
+        let mut world = an_extract_world(&[(ItemPos::new(inventory, 244), active)], 42);
+        let vid = Vid::new(1);
+        let moved = world
+            .pull_out_worn_ds(vid, ItemPos::new(inventory, 244), mover())
+            .expect("worn DS hit pulls out");
+        assert_eq!(moved.kind, MoveKind::Extracted);
+        let held = world
+            .characters
+            .find_by_vid(vid)
+            .expect("player 1")
+            .items()
+            .item_at(ItemPos::new(soul, 0))
+            .expect("moved to box cell 0");
+        assert_eq!(held.vnum, 110_000);
+        assert_eq!(held.sockets[2], 0, "deactivated before move");
+
+        let mut miss_world =
+            an_extract_world(&[(ItemPos::new(inventory, 244), Item::new(9, 110_000))], 0);
+        let missed = miss_world
+            .pull_out_worn_ds(vid, ItemPos::new(inventory, 244), mover())
+            .expect("worn DS miss breaks");
+        assert!(matches!(missed.changes[0], RowChange::Destroyed { id: 9 }));
+        let RowChange::Created(row) = &missed.changes[1] else {
+            panic!("by-product 30270 created: {:?}", missed.changes);
         };
         assert_eq!(row.vnum, 30_270);
     }

@@ -539,7 +539,7 @@ impl GameState {
     /// unapplies its points. The wear timer stops first, keeping the partial minute it
     /// ran (`StopTimerBasedOnWearExpireEvent`, `G/item.cpp:2245-2255`). The skip flag is
     /// always true here, so no refresh runs.
-    fn deactivate_stone(&mut self, vid: Vid, cell: u16, done: &mut MoveDone) {
+    pub(super) fn deactivate_stone(&mut self, vid: Vid, cell: u16, done: &mut MoveDone) {
         let at =
             protocol::item_pos::ItemPos::new(common::item_slots::EWindows::Inventory as u8, cell);
         let Some(stone) = self

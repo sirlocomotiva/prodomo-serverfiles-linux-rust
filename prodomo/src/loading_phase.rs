@@ -150,6 +150,9 @@ pub const AFFECT_CON: u32 = 206;
 /// `AFFECT_INT` (`G/affect.h:30`): the intelligence potion's affect.
 pub const AFFECT_INT: u32 = 207;
 
+/// `AFFECT_FISH_MIND_PILL` (`G/affect.h:31`): 208, the eighth after `AFFECT_MOV_SPEED` (200).
+pub const AFFECT_FISH_MIND_PILL: u32 = 208;
+
 /// `AFFECT_CAST_SPEED` (`G/affect.h:42`): the casting-speed potion's affect.
 pub const AFFECT_CAST_SPEED: u32 = 217;
 
@@ -453,6 +456,9 @@ pub const AFF_MOV_SPEED_POTION: u32 = 13;
 
 /// `AFF_ATT_SPEED_POTION` (`G/affect.h:226`), numbered from 1.
 pub const AFF_ATT_SPEED_POTION: u32 = 14;
+
+/// `AFF_FISH_MIND` (`G/affect.h:228`), numbered from 1.
+pub const AFF_FISH_MIND: u32 = 14;
 
 /// `AFF_BITS_MAX` (`G/affect.h:275`): 43 plain bits, 3 top-player bits, 4 statue bits
 /// and the laser bit, all gated on (`G/prodomodefines.h:38`, `:43-50`, `:125`).

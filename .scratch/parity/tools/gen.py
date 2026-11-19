@@ -386,7 +386,7 @@ def case_arms(path, signature, keep):
         match = re.search(r'\bswitch\s*\((.*)\)', code)
         if match:
             pending = match.group(1).strip()
-        for token in re.finditer(r'\bcase\s+([^:]+?)\s*:(?!:)|\bdefault\s*:(?!:)|[{}]', code):
+        for token in re.finditer(r'\bcase\s+((?:[^:]|::)+?)\s*:(?!:)|\bdefault\s*:(?!:)|[{}]', code):
             text = token.group(0)
             if text == '{':
                 depth += 1

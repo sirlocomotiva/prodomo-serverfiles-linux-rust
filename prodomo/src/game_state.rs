@@ -4612,6 +4612,9 @@ impl GameState {
         if self.monarch_heal_at(vid, at) {
             return Some(self.use_monarch_heal(vid, at, actor));
         }
+        if self.worn_ds_at(vid, at) {
+            return Some(self.pull_out_worn_ds(vid, at, actor));
+        }
         None
     }
 
@@ -4783,6 +4786,8 @@ impl GameState {
         if kind == world::character::MoveKind::Caped {
             if used_vnum == world::character::UNIQUE_ITEM_WHITE_FLAG {
                 self.forget_my_attacker(vid);
+            } else if used_vnum == world::character::FISH_MIND_PILL_VNUM {
+                self.land_fish_mind_pill(vid);
             } else {
                 self.aggregate_monster(vid);
             }

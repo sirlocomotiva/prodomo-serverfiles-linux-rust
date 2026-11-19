@@ -1275,7 +1275,10 @@ fn use_special_kind(proto: &ItemProto) -> SeatedArms {
             false, false, false, false, false, false, true, false, false, false,
         );
     }
-    if CAPE_OF_COURAGE.contains(&proto.vnum) || proto.vnum == UNIQUE_ITEM_WHITE_FLAG {
+    if CAPE_OF_COURAGE.contains(&proto.vnum)
+        || proto.vnum == UNIQUE_ITEM_WHITE_FLAG
+        || (proto.vnum == FISH_MIND_PILL_VNUM && proto.sub_type == USE_SPECIAL)
+    {
         return (
             false, false, false, false, false, false, false, true, false, false,
         );
@@ -1325,6 +1328,10 @@ const CAPE_OF_COURAGE: [u32; 3] = [70_038, 70_057, 76_007];
 /// `UNIQUE_ITEM_WHITE_FLAG` (`G/unique_item.h:21`): its use spends one and runs
 /// `ForgetMyAttacker` (`G/char_item.cpp:3892-3895`). It shares the cape's consuming arm.
 pub const UNIQUE_ITEM_WHITE_FLAG: u32 = 70_008;
+
+/// `fishing::FISH_MIND_PILL_VNUM` (`G/fishing.h:16`, `G/char_item.cpp:4401-4404`): its use
+/// lands 20 minutes of `AFFECT_FISH_MIND_PILL` with `AFF_FISH_MIND` and spends one.
+pub const FISH_MIND_PILL_VNUM: u32 = 27_610;
 
 /// `UNIQUE_ITEM_TREASURE_BOX` (`G/unique_item.h:22`).
 const UNIQUE_ITEM_TREASURE_BOX: u32 = 70_009;

@@ -69405,3 +69405,213 @@ fn horse_skills_climb_forget_cast_only_when_riding_and_cap_escape_hits() {
     );
     drop(server);
 }
+
+/// `use.item_use.use_special.fishing_fish_mind_pill_vnum` (`G/char_item.cpp:4401-4404`):
+/// using vnum `27610` lands 20 minutes of `AFFECT_FISH_MIND_PILL` (`208`) on `POINT_NONE`
+/// (`0`) with `AFF_FISH_MIND` (`14`, bit 13) and spends one pill; a second use overrides the
+/// affect (`GC_AFFECT_REMOVE` then `GC_AFFECT_ADD`) and clears the last pill.
+#[test]
+fn a_fish_mind_pill_lands_its_affect_and_spends_one() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 80, id, 1, 0, 2, \
+         27610 FROM player WHERE name = 'Alpha'",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    let use_slot0 =
+        protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(1, 0)).encode();
+    alpha.send_record(&use_slot0);
+    let first = records_within(&mut alpha, Duration::from_millis(800));
+    let added = first
+        .iter()
+        .find(|record| record.first() == Some(&GC_AFFECT_ADD))
+        .expect("27610 sends GC_AFFECT_ADD");
+    let parsed = protocol::gc_nested::GcAffectAdd::decode(added).expect("valid GcAffectAdd");
+    assert_eq!(parsed.element.affect_type, 208, "AFFECT_FISH_MIND_PILL");
+    assert_eq!(parsed.element.apply_on, 0, "POINT_NONE");
+    assert_eq!(parsed.element.apply_value, 0);
+    assert_eq!(parsed.element.flag, 14, "AFF_FISH_MIND");
+    assert_eq!(parsed.element.duration, 1200, "20 minutes");
+    assert!(
+        first.iter().any(
+            |record| record.first() == Some(&ITEM_UPDATE) && update_fields(record) == (1, 0, 1)
+        ),
+        "first pill decrements count 2 -> 1: {first:02x?}"
+    );
+    assert!(
+        first.iter().any(|record| {
+            record.first() == Some(&GC_CHARACTER_UPDATE)
+                && protocol::gc_actors::GcCharacterUpdate::decode(record)
+                    .is_ok_and(|u| u.dw_affect_flag[0] & (1 << 13) != 0)
+        }),
+        "AFF_FISH_MIND bit 13 rides on GC_CHARACTER_UPDATE: {first:02x?}"
+    );
+    alpha.send_record(&use_slot0);
+    let second = records_within(&mut alpha, Duration::from_millis(800));
+    assert!(
+        second.iter().any(|record| {
+            record.first() == Some(&GC_AFFECT_REMOVE)
+                && record.get(1..5) == Some(&208_u32.to_le_bytes())
+        }),
+        "second use overrides prior affect (remove first): {second:02x?}"
+    );
+    assert!(
+        second
+            .iter()
+            .any(|record| record.first() == Some(&ITEM_SET) && set_fields(record) == (1, 0, 0, 0)),
+        "second pill clears slot 0: {second:02x?}"
+    );
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT count(*) = 0 FROM item WHERE id = 80) \
+         AND (SELECT count(*) = 1 FROM player_affect WHERE affect_type = 208 AND flag = 14)",
+    );
+    drop(server);
+}
+
+fn assert_pullout_outcome(
+    database: &ScratchDatabase,
+    landed: &[Vec<u8>],
+    stone_id: u32,
+    stone_vnum: u32,
+    box_cell: u16,
+    prior_misses: u16,
+) -> bool {
+    let chats: Vec<Vec<u8>> = landed
+        .iter()
+        .filter(|record| record.first() == Some(&GC_CHAT))
+        .map(|record| record[10..].to_vec())
+        .collect();
+    let succeeded = chats
+        .iter()
+        .any(|text| text == world::character::PULLOUT_SUCCESS_NOTICE.as_bytes());
+    let failed = chats
+        .iter()
+        .any(|text| text.ends_with(b" was obtained by failing to extract the Dragon Soul Stone."));
+    assert!(
+        succeeded != failed,
+        "pull-out answers exactly one outcome: {chats:02x?}"
+    );
+    if succeeded {
+        assert!(
+            landed.iter().any(|record| {
+                record.first() == Some(&ITEM_SET)
+                    && set_fields(record) == (5, box_cell, stone_vnum, 1)
+            }),
+            "pulled stone lands in DS cell {box_cell}: {landed:02x?}"
+        );
+        wait_for(
+            database,
+            &format!(
+                "(SELECT window_type = 5 AND pos = {box_cell} AND socket2 = 0 FROM item WHERE id \
+                 = {stone_id})"
+            ),
+        );
+    } else {
+        let next_count = prior_misses + 1;
+        if prior_misses == 0 {
+            assert!(
+                landed.iter().any(|record| {
+                    record.first() == Some(&ITEM_SET) && set_fields(record).2 == 30_270
+                }),
+                "first missed pull-out auto-gives by-product 30270: {landed:02x?}"
+            );
+        } else {
+            assert!(
+                landed.iter().any(|record| {
+                    record.first() == Some(&ITEM_UPDATE) && update_fields(record).2 == next_count
+                }),
+                "subsequent missed pull-out stacks by-product 30270 to {next_count}: {landed:02x?}"
+            );
+        }
+        wait_for(
+            database,
+            &format!(
+                "(SELECT count(*) = 0 FROM item WHERE id = {stone_id}) \
+                 AND (SELECT coalesce(sum(count), 0) = {next_count} FROM item WHERE vnum = 30270)"
+            ),
+        );
+    }
+    succeeded
+}
+
+/// `use.item_ds` (worn stone `CG_ITEM_USE`), `use.item_extract`, and
+/// `use.item_extract.extract_dragon_soul`: an unworn or non-soul target of `100100`
+/// (`EXTRACT_DRAGON_SOUL`) is silent and keeps the extractor; an active worn stone (`110000`
+/// on deck 0 cell 244) pulled out by direct `CG_ITEM_USE` deactivates and either moves to DS
+/// cell 0 (`socket2 = 0`) or breaks into `30270`; a worn stone (`120000` on cell 245) pulled
+/// out by `100100` spends one extractor and moves to DS cell 192 or breaks into `30270`.
+#[test]
+fn a_worn_dragon_soul_stone_pulls_out_by_use_or_extractor() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nping_event_second_cycle = 600",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO item (id, owner_id, window_type, pos, count, vnum, socket0) VALUES \
+         (40, (SELECT id FROM player WHERE name = 'Alpha'), 1, 244, 1, 110000, 3600), \
+         (41, (SELECT id FROM player WHERE name = 'Alpha'), 1, 245, 1, 120000, 3600), \
+         (42, (SELECT id FROM player WHERE name = 'Alpha'), 5, 31, 1, 110000, 3600), \
+         (43, (SELECT id FROM player WHERE name = 'Alpha'), 1, 0, 2, 100100, 0), \
+         (44, (SELECT id FROM player WHERE name = 'Alpha'), 1, 1, 1, 10, 0)",
+    );
+    let (mut alpha, _listed) = enter_world(&server, b"alice", 0);
+    // Unworn soul stone and non-soul item: silent, extractor count stays 2.
+    alpha.send_record(&client_use_to_item_pos(1, 0, 5, 31));
+    alpha.send_record(&client_use_to_item_pos(1, 0, 1, 1));
+    alpha.quiet("unworn and non-soul targets of EXTRACT_DRAGON_SOUL are silent");
+    // Activate deck 0 so stone 40 at cell 244 is active (`socket2 = 1`), then pull it out by
+    // direct `CG_ITEM_USE` (`case ITEM_DS`, no extractor).
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dragon_soul a 0"));
+    let _activated = records_within(&mut alpha, Duration::from_millis(800));
+    check(&database, "(SELECT socket2 = 1 FROM item WHERE id = 40)");
+    alpha.send_record(
+        &protocol::cg_item_use::CgItemUse::new(protocol::item_pos::ItemPos::new(2, 244)).encode(),
+    );
+    let direct = records_within(&mut alpha, Duration::from_millis(800));
+    let first_ok = assert_pullout_outcome(&database, &direct, 40, 110_000, 0, 0);
+    // Pull stone 41 (`120000`, Ruby, DS box base 192) out with extractor 43 (`100100`, count 2 -> 1).
+    alpha.send_record(&client_use_to_item_pos(1, 0, 2, 245));
+    let extracted = records_within(&mut alpha, Duration::from_millis(800));
+    assert!(
+        extracted.iter().any(
+            |record| record.first() == Some(&ITEM_UPDATE) && update_fields(record) == (1, 0, 1)
+        ),
+        "extractor 100100 decrements count 2 -> 1: {extracted:02x?}"
+    );
+    assert_pullout_outcome(
+        &database,
+        &extracted,
+        41,
+        120_000,
+        192,
+        u16::from(!first_ok),
+    );
+    wait_for(&database, "(SELECT count = 1 FROM item WHERE id = 43)");
+    drop(alpha);
+    server.wait_for("Character disconnected; wrote the row");
+    drop(server);
+}

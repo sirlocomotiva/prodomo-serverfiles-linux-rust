@@ -57974,3 +57974,54 @@ and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; 
 test failed on the first run.
 Parity: 1,723 `ported`, 85 `partial`, 519 `unused`, 4 `missing`, 0 `codec`, of 2,331 rows; 578
 scenarios. No ADR changed.
+
+## 728. The fish mind pill, dragon-soul pull-out and the closure of `item-use.md`
+
+Closes all remaining open rows of `.scratch/parity/item-use.md` (`item-use.md` is now 293/293
+closed: 229 `ported`, 64 `unused`, 0 `partial`, 0 `missing`): `use.item_use`,
+`use.item_use.use_special`, `use.item_use.use_special.fishing_fish_mind_pill_vnum`,
+`use.item_ds`, `use.item_special_ds`, `use.item_extract`, and
+`use.item_extract.extract_dragon_soul`.
+
+**Generator fix (`.scratch/parity/tools/gen.py`).** `case_arms` previously matched only
+`[A-Za-z0-9_]+` in `case` labels, silently dropping namespace-qualified `case
+fishing::FISH_MIND_PILL_VNUM:` (`G/char_item.cpp:4401`). Allowing `::` in `case` labels adds
+`use.item_use.use_special.fishing_fish_mind_pill_vnum` (`item-use.md` grows from 292 to 293 rows,
+total inventory from 2,331 to 2,332).
+
+**Fish mind pill (`27610`, `G/char_item.cpp:4401-4404`).** Added `FISH_MIND_PILL_VNUM = 27_610`
+(`world/src/character/equip.rs`), shared `AFFECT_FISH_MIND_PILL = 208` and `AFF_FISH_MIND = 14`
+(bit 13, `prodomo/src/loading_phase.rs`, reused by `fishing.rs`), and `land_fish_mind_pill`
+(`prodomo/src/game_state/pc_skill.rs`, dispatched from `prodomo/src/game_state.rs`). Using 27610
+applies 20 minutes (1200 s) of `AFFECT_FISH_MIND_PILL` on `POINT_NONE` (0) with `AFF_FISH_MIND`
+(refreshing on a repeat) and spends one pill.
+
+**Worn `ITEM_DS` pull-out (`G/char_item.cpp:3059-3063`) and `EXTRACT_DRAGON_SOUL` (`:7131-7135`).**
+Generalized `GameState::pull_out_step` (`prodomo/src/game_state/use_to_item.rs`, with
+`GameState::pull_out_worn_ds` and `GameState::deactivate_stone`) so both direct `CG_ITEM_USE` on
+a worn dragon-soul stone (`extractor = None`, `bonus = 0`) and `CG_ITEM_USE_TO_ITEM` with
+extractor `100100` (`EXTRACT_DRAGON_SOUL`) run `DSManager::PullOut` (`G/DragonSoul.cpp:491-589`):
+deactivating an active stone first, moving it to the first empty cell of its DS box on a hit
+(`socket2 = 0`), or destroying it and auto-giving by-product `30270` on a miss. Unworn or
+non-soul targets of `100100` remain silent and keep the extractor. Unit test
+`a_worn_ds_use_pulls_out_with_no_extractor_hit_and_miss` pins both deterministic outcomes.
+
+**`use.item_special_ds` (`unused`).** Zero rows in `legacy/gamedata/proto/item_proto.txt` carry
+`ITEM_TYPE = ITEM_SPECIAL_DS` (positive controls in the same scan: 180 `ITEM_DS` rows and 2
+`ITEM_EXTRACT` rows).
+
+**Scenarios.** Added two scenarios to `prodomo/tests/parity.rs` (running in shipped
+`test_server = false` mode): `a_fish_mind_pill_lands_its_affect_and_spends_one` (verified 8× in
+parallel) proves `GC_AFFECT_ADD` (208, `POINT_NONE`, flag 14, 1200 s), `GC_CHARACTER_UPDATE`
+(`AFF_FISH_MIND` bit 13), stack decrement, refresh on second use, and store persistence;
+`a_worn_dragon_soul_stone_pulls_out_by_use_or_extractor` (verified 16× in parallel, including
+consecutive misses stacking by-product `30270`) proves silent refusal of unworn/non-soul targets,
+active deck-0 deactivation + direct `CG_ITEM_USE` pull-out, and `100100` extractor pull-out.
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,725
+passed, 0 failed in 46 targets; with it 5,725 passed, 0 failed in 46 targets (486 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132. No
+test failed on the first run.
+Parity: 1,729 `ported`, 81 `partial`, 520 `unused`, 2 `missing`, 0 `codec`, of 2,332 rows; 580
+scenarios. No ADR changed.

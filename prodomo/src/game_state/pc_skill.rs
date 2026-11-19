@@ -1960,6 +1960,17 @@ impl GameState {
             true,
         );
     }
+    /// `case fishing::FISH_MIND_PILL_VNUM` (`G/char_item.cpp:4401-4404`): 20 minutes of
+    /// `AFFECT_FISH_MIND_PILL` (`208`) on `POINT_NONE` with `AFF_FISH_MIND` (`14`), `over` as
+    /// legacy passes `true`.
+    pub(super) fn land_fish_mind_pill(&mut self, vid: Vid) {
+        use crate::loading_phase::{AFFECT_FISH_MIND_PILL, AFF_FISH_MIND};
+        self.add_pc_affect(
+            vid,
+            super::affect::Affect::buff(AFFECT_FISH_MIND_PILL, 0, 0, AFF_FISH_MIND, 20 * 60, 0),
+            true,
+        );
+    }
     /// The mirror's cooldown (`G/char_item.cpp:5555-5572`): a 70026 use within ten
     /// minutes of the last one is refused with the wait line, the item kept; else
     /// the flag stamps now and the use goes on. Any other vnum passes, and a
