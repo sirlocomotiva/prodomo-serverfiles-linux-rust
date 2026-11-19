@@ -1058,7 +1058,7 @@ impl GameState {
     /// then refuse in `Damage`, but the tree's `strike_pc` needs live points, so the
     /// refusal short-circuits before the dice (a Divergence in draw count only — the
     /// record stream is identical).
-    fn melee_arm_pc(
+    pub(super) fn melee_arm_pc(
         &mut self,
         mob: u32,
         victim: Vid,
@@ -1113,7 +1113,7 @@ impl GameState {
 
     /// What the skill's hit on a player showed: `BeginFight` first (legacy runs it before
     /// `Damage`), then each effect around the player, then the hit.
-    fn show_skill_strike(&mut self, mob: u32, victim: Vid, strike: &PcStrike) {
+    pub(super) fn show_skill_strike(&mut self, mob: u32, victim: Vid, strike: &PcStrike) {
         // `CanBeginFight → BeginFight` (`G/char_skill.cpp:1637-1638`): legacy sends no record for a
         // player's `BeginFight` (it sets the pose and the victim only).
         let can_begin = self.bodies.get(&victim).is_some_and(|body| !body.fighting)

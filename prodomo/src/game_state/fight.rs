@@ -1974,14 +1974,21 @@ impl GameState {
                 .schedule(&mut combat.recovery_due, when, Due::Recovery(vid));
             return;
         }
+        let blue_params = self
+            .npc_by_vid(vid)
+            .and_then(|npc| self.blue_dragon_recovery_params(vid, npc));
         let Some(npc) = self.npc_mut(vid) else {
             return;
         };
         // `PointChange(POINT_HP)` changes nothing on a dead or stunned character
         // (`G/char.cpp:4250-4251`).
         let changed = !npc.dead && !npc.stunned;
-        let gain = i64::from(npc.max_hp) * i64::from(npc.fight.regen_percent) / 100;
-        let gain = gain.max(1);
+        let (gain, cycle) = if let Some((gain, cycle)) = blue_params {
+            (gain, cycle)
+        } else {
+            let gain = (i64::from(npc.max_hp) * i64::from(npc.fight.regen_percent) / 100).max(1);
+            (gain, recovery_pulses(npc))
+        };
         if changed {
             let room = i64::from(npc.max_hp) - i64::from(npc.hp);
             let amount = gain.min(room);
@@ -1989,7 +1996,6 @@ impl GameState {
         }
         let door = npc.char_type == CHAR_TYPE_DOOR;
         let full = npc.hp >= npc.max_hp;
-        let cycle = recovery_pulses(npc);
         if changed {
             self.broadcast_npc_target(vid);
         }

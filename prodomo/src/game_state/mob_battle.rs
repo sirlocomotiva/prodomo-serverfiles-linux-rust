@@ -986,6 +986,15 @@ impl GameState {
     fn battle_swing(&mut self, mob: u32, fighter: Fighter, victim: Vid, target: VictimState) {
         // `PM_ATTACKED_BY` (`:1106-1107`): each member that can begins on the held victim.
         self.party_attacked_by(mob);
+        // Blue Dragon special battle AI (`G/char_state.cpp:1109-1114`).
+        if self
+            .npc_by_vid(mob)
+            .is_some_and(|npc| npc.vnum == common::dragon::BLUE_DRAGON_VNUM)
+        {
+            let hold = self.blue_dragon_state_battle(mob);
+            self.set_duration(mob, hold);
+            return;
+        }
         let now = self.clock.now();
         let wait = calculate_duration(fighter.attack_speed, ATTACK_MS);
         if let Some(last) = self

@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 736 |
+| measure | value at ledger 737 |
 |---|---|
-| Parity inventory | 2,332 rows: 1,809 `ported`, 3 `partial`, 520 `unused`, 0 `missing`; **B1–B4, B7–B9 and 11 of 12 inventory files closed** (3 open rows left in `systems.md`, each note ending in `Left:`) |
-| Scenarios | 599 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,757 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 736 has the receipt) |
+| Parity inventory | 2,332 rows: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`; **Package B complete — all 12 inventory files closed** |
+| Scenarios | 602 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,763 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 737 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 47 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -26,8 +26,8 @@ the tail is closed.
 
 A client can do what the `ported` rows say: log in, choose and create characters, enter the
 world, move, chat, fight monsters and players, die and restart, use and trade items, shop, store,
-join parties and guilds, fight guild wars, run quests, and use the GM commands. What it cannot do
-yet is what the 62 rows left across B1–B8 still lack (next steps, package B).
+join parties and guilds, fight guild wars, run quests, and use the GM commands. Package B is
+closed (all 2,332 Parity rows are `ported` or `unused`); Package C (hardening, C1–C12) is next.
 
 ## Direction review, 2026-11-15
 
@@ -106,8 +106,8 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 | B2. Monsters, combat, drops (0) | Closed (ledger 734): `sys.combat.core`, `sys.mob.ai`, `sys.mob.proto`, `data.proto.mob`, `data.drop.mob`, `data.drop.common`, `data.drop.etc`, `data.drop.group`, `data.map.regen`, `sys.world.regen` |
 | B3. Skills (0) | Closed (ledgers 735–736): `sys.skill.core`, `sys.skill.extra`, `cg.game.add_fly_targeting`, `cg.game.fly_targeting`, `table.skill_proto`, `data.motion` |
 | B4. Character and world (0) | Closed (ledgers 735–736): `cg.game.on_click`, `sys.char.pk`, `sys.npc.safebox`, `sys.char.points`, `sys.char.save`, `sys.char.multi_language`, `sys.world.map`, `sys.world.move`, `sys.world.warp`, `sys.world.objects` |
-| B5. Guild and the cross-Channel paths (1) | `sys.guild.dungeon` (`sys.guild.core`, `sys.guild.war`, `sys.bus` closed in ledger 736) |
-| B6. Quests, dungeons, events (2) | `sys.quest.runtime`, `sys.dungeon.dragon_lair` (all 5 event rows closed in ledger 731; `data.regen.dungeon` and `sys.dungeon.ship_defense` closed in ledger 734; `questlib.questlib` and `sys.dungeon.core` closed in ledger 736) |
+| B5. Guild and the cross-Channel paths (0) | Closed (ledgers 736–737): `sys.guild.core`, `sys.guild.war`, `sys.bus`, `sys.guild.dungeon` |
+| B6. Quests, dungeons, events (0) | Closed (ledgers 731, 734, 736–737): all 5 event rows, `data.regen.dungeon`, `sys.dungeon.ship_defense`, `questlib.questlib`, `sys.dungeon.core`, `sys.quest.runtime`, `sys.dungeon.dragon_lair` |
 | B7. Life skills and custom systems (0) | Closed (ledger 730): `sys.life.fishing`, `sys.life.mining`, `sys.custom.dragon_soul`, `sys.custom.new_set_bonus` |
 | B8. Login, logs, data (0) | Closed (ledgers 732, 735–736): `sys.log`, `data.proto.item`, `data.locale.strings`, `sys.login.by_key`, `sys.login.enter`, `data.locale.names`, `data.map.index` |
 | B9. The arm tables (0) | Closed: `item-use.md` (0 open, ledger 728), `points.md` (0 open, ledger 729), `skill-arms.md` (0 open, ledger 727) |

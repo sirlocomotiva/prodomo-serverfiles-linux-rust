@@ -617,6 +617,10 @@ pub struct Settings {
     /// the libraries load. A missing table, row or number reads 0, as the binder's
     /// miss arms do (`G/BlueDragon_Binder.cpp:166-213`).
     pub dragon_stones: [common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS],
+    /// Full `BlueDragonSetting` snapshot (`hp_period`, `hp_damage`, `hp_regen`,
+    /// `Skill0..2`, and `DragonStone[1..4]`), read after the libraries load
+    /// (`G/BlueDragon_Binder.cpp:8-213`).
+    pub blue_dragon: common::dragon::BlueDragonSetting,
 }
 
 /// A quest the host numbered.
@@ -706,7 +710,9 @@ impl Host {
             run_file(&lua, &locale_dir.join(library))?;
         }
         if let Some(mut settings) = lua.app_data_mut::<Settings>() {
-            settings.dragon_stones = dragon_stones(&lua);
+            let blue_dragon = blue_dragon_setting(&lua);
+            settings.dragon_stones = blue_dragon.stones;
+            settings.blue_dragon = blue_dragon;
         }
         let quest_dir = locale_dir.join("quest");
         let order = sources::load_order(&quest_dir)
@@ -983,6 +989,128 @@ fn dragon_stones(lua: &Lua) -> [common::dragon::DragonStone; common::dragon::DRA
         }
     }
     stones
+}
+
+fn lua_i32(value: &Value) -> i32 {
+    match value {
+        Value::Integer(i) => i32::try_from(*i).unwrap_or(0),
+        Value::Number(f) => common::cfloat::f64_to_i32(*f),
+        _ => 0,
+    }
+}
+
+fn lua_u32(value: &Value) -> u32 {
+    match value {
+        Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
+        Value::Number(f) => common::cfloat::f64_to_u32(*f),
+        _ => 0,
+    }
+}
+
+fn lua_subtable(parent: &Table, key: &str) -> Option<Table> {
+    match parent.get::<Value>(key).unwrap_or(Value::Nil) {
+        Value::Table(t) => Some(t),
+        _ => None,
+    }
+}
+
+fn lua_min_max(parent: &Table, key: &str) -> common::dragon::MinMax {
+    let Some(t) = lua_subtable(parent, key) else {
+        return common::dragon::MinMax::default();
+    };
+    common::dragon::MinMax {
+        min: lua_i32(&t.get::<Value>("min").unwrap_or(Value::Nil)),
+        max: lua_i32(&t.get::<Value>("max").unwrap_or(Value::Nil)),
+    }
+}
+
+fn lua_ranges(setting: &Table, key: &str) -> Vec<common::dragon::RangeFactor> {
+    let Some(table) = lua_subtable(setting, key) else {
+        return Vec::new();
+    };
+    let len = table.raw_len();
+    let mut rows = Vec::with_capacity(len);
+    for idx in 1..=len {
+        let Value::Table(row) = table.raw_get::<Value>(idx).unwrap_or(Value::Nil) else {
+            break;
+        };
+        rows.push(common::dragon::RangeFactor {
+            min: lua_i32(&row.get::<Value>("min").unwrap_or(Value::Nil)),
+            max: lua_i32(&row.get::<Value>("max").unwrap_or(Value::Nil)),
+            pct: lua_u32(&row.get::<Value>("pct").unwrap_or(Value::Nil)),
+        });
+    }
+    rows
+}
+
+fn lua_jobs(parent: &Table, key: &str) -> [common::dragon::MinMax; 4] {
+    let Some(t) = lua_subtable(parent, key) else {
+        return [common::dragon::MinMax::default(); 4];
+    };
+    [
+        lua_min_max(&t, "musa"),
+        lua_min_max(&t, "assa"),
+        lua_min_max(&t, "sura"),
+        lua_min_max(&t, "muda"),
+    ]
+}
+
+fn lua_genders(parent: &Table, key: &str) -> [common::dragon::MinMax; 2] {
+    let Some(t) = lua_subtable(parent, key) else {
+        return [common::dragon::MinMax::default(); 2];
+    };
+    [lua_min_max(&t, "male"), lua_min_max(&t, "female")]
+}
+
+/// Read the full `BlueDragonSetting` table (`locale/europe/BlueDragon.lua`) using the
+/// exact fallback semantics of `BlueDragon_GetSkillFactor` / `BlueDragon_GetRangeFactor`
+/// / `BlueDragon_GetIndexFactor` (`G/BlueDragon_Binder.cpp:8-213`).
+fn blue_dragon_setting(lua: &Lua) -> common::dragon::BlueDragonSetting {
+    let mut out = common::dragon::BlueDragonSetting {
+        stones: dragon_stones(lua),
+        ..common::dragon::BlueDragonSetting::default()
+    };
+    let Value::Table(setting) = lua
+        .globals()
+        .get::<Value>("BlueDragonSetting")
+        .unwrap_or(Value::Nil)
+    else {
+        return out;
+    };
+    out.hp_period = lua_ranges(&setting, "hp_period");
+    out.hp_damage = lua_ranges(&setting, "hp_damage");
+    out.hp_regen = lua_ranges(&setting, "hp_regen");
+    if let Some(s0) = lua_subtable(&setting, "Skill0") {
+        out.skill0 = common::dragon::BreathSkill {
+            period: lua_min_max(&s0, "period"),
+            damage_area: lua_i32(&s0.get::<Value>("damage_area").unwrap_or(Value::Nil)),
+            default_damage: lua_min_max(&s0, "default_damage"),
+            job_damage: lua_jobs(&s0, "damage"),
+            gender_damage: lua_genders(&s0, "gender"),
+        };
+    }
+    if let Some(s1) = lua_subtable(&setting, "Skill1") {
+        out.skill1 = common::dragon::WeakBreathSkill {
+            period: lua_min_max(&s1, "period"),
+            damage_area: lua_i32(&s1.get::<Value>("damage_area").unwrap_or(Value::Nil)),
+            default_damage: lua_min_max(&s1, "default_damage"),
+        };
+    }
+    if let Some(s2) = lua_subtable(&setting, "Skill2") {
+        let stun_default = lua_subtable(&s2, "stun_time")
+            .map_or_else(common::dragon::MinMax::default, |t| {
+                lua_min_max(&t, "default")
+            });
+        out.skill2 = common::dragon::EarthQuakeSkill {
+            period: lua_min_max(&s2, "period"),
+            damage_area: lua_i32(&s2.get::<Value>("damage_area").unwrap_or(Value::Nil)),
+            default_damage: lua_min_max(&s2, "default_damage"),
+            stun_default,
+            job_stun: lua_jobs(&s2, "stun_time"),
+            gender_stun: lua_genders(&s2, "gender"),
+        };
+    }
+    out
 }
 
 fn new_state(locale_dir: &Path) -> Result<Lua, HostError> {
@@ -1605,6 +1733,31 @@ mod tests {
         // A non-table row and a missing row read zero.
         assert_eq!(stones[2], DragonStone::default());
         assert_eq!(stones[3], DragonStone::default());
+    }
+
+    #[test]
+    fn the_blue_dragon_setting_reads_the_owners_blue_dragon_lua() {
+        let locale_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../legacy/gamedata/locale/europe");
+        let host = Host::load(&locale_dir).expect("owner locale loads");
+        let bd = &host.settings().blue_dragon;
+        assert_eq!(bd.stones[0].vnum, 8031);
+        assert_eq!(bd.stones[3].vnum, 8034);
+        assert_eq!(bd.skill0.damage_area, 5000);
+        assert_eq!(bd.skill1.damage_area, 3500);
+        assert_eq!(bd.skill2.damage_area, 3000);
+        assert_eq!(
+            common::dragon::BlueDragonSetting::range_factor(&bd.hp_period, 50),
+            15
+        );
+        assert_eq!(
+            common::dragon::BlueDragonSetting::range_factor(&bd.hp_damage, 50),
+            10
+        );
+        assert_eq!(
+            common::dragon::BlueDragonSetting::range_factor(&bd.hp_regen, 80),
+            4
+        );
     }
 
     #[test]

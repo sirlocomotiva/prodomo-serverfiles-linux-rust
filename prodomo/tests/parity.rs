@@ -16449,8 +16449,6 @@ const DAMAGE_POISON: u8 = 1 << 1;
 
 /// The stray dog's `MAX_HP` (vnum 101).
 const DOG_HP: i32 = 126;
-/// The Blue Dragon's hit points (`mob_proto.txt` 2493).
-const DRAGON_HP: i32 = 5_000_000;
 /// The damage Alpha's bare fist deals the stray dog. `CalcMeleeDamage`'s only draw is the
 /// unarmed `number(0, 0)`, so the hit is exact: Alpha's attack grade is 344 and the dog's
 /// defence grade 10 (`G/char.cpp:2716-2767`, `:2850-2858`); the hit rating, 274/300 less the
@@ -64756,11 +64754,9 @@ const DRAGON_LINES: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t8031\n\
      m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t8032\n\
      m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t2493\n";
 
-/// The owner's mob proto with the dragon's damage flattened to 200, its defence
-/// to 0, its critical and penetrate enchants to 0 and its `SUMMON` (col 52, 2404)
-/// to 0: the punch rates past the `battle_damage_floor` draw, and the swing's only
-/// draws left feed nothing the head asserts (no 1-in-4 helper spawn in battle), so
-/// both numbers pin (the dice seed is random per boot).
+/// The owner's mob proto with the dragon's damage flattened to 200, its max HP to 5000 (so a
+/// single 129-damage punch drops it to 97% <= 98% and arms `BlueDragon_StateBattle`), its defence
+/// to 0, its critical and penetrate enchants to 0 and its `SUMMON` (col 52, 2404) to 0.
 fn dragon_proto(owner: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for line in owner.split_inclusive(|&byte| byte == b'\n') {
@@ -64773,6 +64769,7 @@ fn dragon_proto(owner: &[u8]) -> Vec<u8> {
             assert_eq!(cells.len(), 72, "the 2493 line keeps its columns");
             cells[18] = b"200";
             cells[19] = b"200";
+            cells[20] = b"5000";
             cells[26] = b"0";
             cells[38] = b"0";
             cells[39] = b"0";
@@ -64787,6 +64784,7 @@ fn dragon_proto(owner: &[u8]) -> Vec<u8> {
 }
 #[test]
 fn the_dragon_stones_scale_the_dragons_blows_both_ways() {
+    const SCALED_DRAGON_HP: i32 = 5_000;
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
@@ -64796,11 +64794,19 @@ fn the_dragon_stones_scale_the_dragons_blows_both_ways() {
     let proto = dragon_proto(
         &std::fs::read(root.join("proto/mob_proto.txt")).expect("the owner's mob proto"),
     );
+    let mut blue_lua = std::fs::read(root.join("locale/europe/BlueDragon.lua"))
+        .expect("the owner's BlueDragon.lua");
+    // Pin `Skill1.default_damage` to 1000..1000 so WeakBreath's +25% 8032 scale lands exact 1250.
+    blue_lua.extend_from_slice(
+        b"\nBlueDragonSetting.Skill1.default_damage.min = 1000\n\
+          BlueDragonSetting.Skill1.default_damage.max = 1000\n",
+    );
     let (server, _data) = Server::start_with_files(
         binary(),
         database.url(),
         &[
             ("proto/mob_proto.txt", &proto),
+            ("locale/europe/BlueDragon.lua", &blue_lua),
             (
                 "locale/europe/map/metin2_map_a1/npc.txt",
                 DRAGON_LINES.as_bytes(),
@@ -64827,7 +64833,7 @@ fn the_dragon_stones_scale_the_dragons_blows_both_ways() {
     alice.send_record(&client_target(dragon));
     assert_eq!(
         alice.read_game(),
-        target_of(dragon, 100, DRAGON_HP, DRAGON_HP, 1),
+        target_of(dragon, 100, SCALED_DRAGON_HP, SCALED_DRAGON_HP, 1),
         "the dragon targets whole"
     );
     alice.send_record(&client_attack(dragon));
@@ -64845,7 +64851,7 @@ fn the_dragon_stones_scale_the_dragons_blows_both_ways() {
     );
     assert_eq!(
         alice.read_fight(),
-        target_of(dragon, 99, DRAGON_HP - 129, DRAGON_HP, 0),
+        target_of(dragon, 97, SCALED_DRAGON_HP - 129, SCALED_DRAGON_HP, 0),
         "the broadcast carries no element"
     );
     assert_eq!(
@@ -64853,17 +64859,53 @@ fn the_dragon_stones_scale_the_dragons_blows_both_ways() {
         ownership_of(listed.id, dragon),
         "the punch claims the dragon"
     );
-    // Then: the dragon's first swing, with the attack stone live: 1244 rated,
-    // plus a quarter for the one live 8032: 1244 + 311 = 1555.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let (damage, flag, effects) = read_swing_head(&mut alice, dragon, listed.id, deadline);
+    // Then: at 97% HP (<= 98%, > 76%), `BlueDragon_StateBattle` (`G/char_state.cpp:1109-1114`)
+    // casts WeakBreath (skill 1, pinned 1000), grown a quarter by the live 8032 stone: 1000 + 250 = 1250.
+    let (saw_skill, landed) = read_dragon_skill_hit(&mut alice, dragon, listed.id, 1);
+    assert!(
+        saw_skill,
+        "the dragon cast WeakBreath (FUNC_MOB_SKILL arg 1)"
+    );
     assert_eq!(
-        (damage, flag, effects),
-        (1555, DAMAGE_NORMAL, Vec::new()),
-        "the swing grows a quarter"
+        landed,
+        Some((1250, DAMAGE_NORMAL)),
+        "WeakBreath grows a quarter (1000 + 250 = 1250) from the live 8032 stone"
     );
     let _ = defence;
     drop(alice);
+}
+
+/// Reads raw wire records up to 15 s for `dragon` casting `FUNC_MOB_SKILL` `want_arg` and landing
+/// `GC_DAMAGE_INFO` on `victim`.
+fn read_dragon_skill_hit(
+    alice: &mut Keyed,
+    dragon: u32,
+    victim: u32,
+    want_arg: u8,
+) -> (bool, Option<(i32, u8)>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut saw_skill = false;
+    let mut landed = None;
+    while std::time::Instant::now() < deadline && !(saw_skill && landed.is_some()) {
+        let Some(rec) = alice.read_wire_until(deadline) else {
+            break;
+        };
+        if rec[0] == GC_DAMAGE_INFO
+            && rec.len() >= 10
+            && u32::from_le_bytes(rec[1..5].try_into().expect("vid")) == victim
+        {
+            landed = Some((
+                i32::from_le_bytes(rec[6..10].try_into().expect("damage")),
+                rec[5],
+            ));
+        }
+        if let Ok(mv) = protocol::gc_actors::GcCharacterMove::decode(&rec) {
+            if mv.dw_vid == dragon && mv.b_func == 4 && mv.b_arg == want_arg {
+                saw_skill = true;
+            }
+        }
+    }
+    (saw_skill, landed)
 }
 
 /// Ledger 568: Delta the sura learns 63 (`Tais Vrajit`), casts it naked, and the next affect
@@ -71461,5 +71503,440 @@ fn entering_a_war_or_wedding_map_outside_test_server_warps_home() {
                 "(SELECT x FROM player WHERE name = 'Beta') = 469300"
             },
         );
+    }
+}
+
+/// Ledger 737 (`sys.dungeon.dragon_lair`): Blue Dragon (`2493`) stood on map 1 drops below
+/// 98% HP via GM `/weak`, enters `BlueDragon_StateBattle` (`G/char_state.cpp:1109-1114`),
+/// and casts its skill (`FUNC_MOB_SKILL` + `GC_DAMAGE_INFO`) on the wire.
+#[test]
+fn blue_dragon_casts_its_battle_skills_and_damages_on_the_wire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let server = Server::start_with_npcs_configured(
+        binary(),
+        database.url(),
+        "metin2_map_a1",
+        "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t2493\n",
+        "test_server = false\n",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 99, ht = 100, hp = 4700 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) \
+         SELECT id, 'Alpha', 'IMPLEMENTOR' FROM account WHERE login = 'alice'",
+    );
+    let (mut alice, _, _) = load_character(&server, b"alice", 0);
+    let entered = enter_game_shown(&mut alice);
+    let dragon = vid_shown_at(
+        entered.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let _ = drain_all_game(&mut alice, 300);
+
+    // Drop Blue Dragon to 1 HP (< 98%) with `/weak` and cancel revive-invisible with one swing,
+    // then wait for `BlueDragon_StateBattle` to cast a skill (`FUNC_MOB_SKILL` + `GC_DAMAGE_INFO`).
+    alice.send_record(&client_chat(CHAT_TALKING, b"/weaken"));
+    let _ = drain_all_game(&mut alice, 250);
+    alice.send_record(&client_move(
+        FUNC_ATTACK,
+        0,
+        0,
+        ALPHA_ENTERS_AT.0,
+        ALPHA_ENTERS_AT.1,
+        0,
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_skill = false;
+    let mut saw_damage = false;
+    while std::time::Instant::now() < deadline && !(saw_skill && saw_damage) {
+        let Some(rec) = alice.read_wire_until(deadline) else {
+            break;
+        };
+        if rec[0] == GC_DAMAGE_INFO {
+            saw_damage = true;
+        }
+        if let Ok(mv) = protocol::gc_actors::GcCharacterMove::decode(&rec) {
+            if mv.dw_vid == dragon && mv.b_func == 4 {
+                saw_skill = true;
+            }
+        }
+    }
+    assert!(saw_skill, "Blue Dragon cast FUNC_MOB_SKILL on the wire");
+    assert!(
+        saw_damage,
+        "Blue Dragon skill landed GC_DAMAGE_INFO on the wire"
+    );
+}
+
+/// Ledger 737 (`sys.quest.runtime`): in a live party, a member's kill fires `party_kill` on
+/// the party leader's quest PC (`CQuestManager::Kill`, `G/questmanager.cpp:574-611`), never
+/// the killer's.
+#[test]
+fn a_party_kill_runs_party_kill_on_the_leaders_pc_on_the_wire() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let probe: &[u8] = b"quest party_kill_probe begin\n\
+        state start begin\n\
+            when 101.party_kill begin\n\
+                pc.setqf(\"pk_hits\", pc.getqf(\"pk_hits\") + 1)\n\
+            end\n\
+        end\n\
+    end\n";
+    let npc_file = format!("//header\n{DOG_AT_ALPHA}");
+    let (mut server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[
+            ("locale/europe/quest/zz_probe/party_kill_probe.lua", probe),
+            (
+                "locale/europe/map/metin2_map_a1/npc.txt",
+                npc_file.as_bytes(),
+            ),
+        ],
+        &default_channels(),
+        "test_server = false\nno_wander = true\n",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "UPDATE account SET empire = 1 WHERE login = 'bob'",
+    );
+    sql(
+        &database,
+        "UPDATE player SET level = 154 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, level, x, y) \
+         SELECT id, 0, 'Yankee', 0, 154, 470100, 950000 FROM account WHERE login = 'bob'",
+    );
+    let (mut alice, alpha_listed, entered) = load_character(&server, b"alice", 0);
+    let _ = entered;
+    let shown = enter_game_shown(&mut alice);
+    let dog = vid_shown_at(
+        shown.shown.monsters.iter().map(Vec::as_slice),
+        ALPHA_ENTERS_AT,
+    );
+    let _ = drain_all_game(&mut alice, 250);
+    let (mut yankee, yankee_listed, _) = load_character(&server, b"bob", 0);
+    let _ = enter_game_shown(&mut yankee);
+    let _ = drain_all_game(&mut yankee, 250);
+    let _ = drain_all_game(&mut alice, 250);
+
+    let _ = form_party(&mut alice, &mut yankee, yankee_listed.id, alpha_listed.id);
+    let _ = drain_all_game(&mut alice, 250);
+    let _ = drain_all_game(&mut yankee, 250);
+
+    // Yankee (the non-leader member) kills the stray dog.
+    for _ in 0..8 {
+        yankee.send_record(&client_attack(dog));
+        let burst = drain_all_game(&mut yankee, 250);
+        if burst.iter().any(|r| r[0] == GC_DEAD) {
+            break;
+        }
+    }
+    let _ = drain_all_game(&mut alice, 250);
+    drop(yankee);
+    drop(alice);
+    server.wait_for("Character disconnected; wrote the row");
+    server.wait_for_next("Character disconnected; wrote the row");
+    wait_for(
+        &database,
+        "(SELECT value FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = 'Alpha') \
+          AND name = 'party_kill_probe.pk_hits'::bytea) = 1",
+    );
+    wait_for(
+        &database,
+        "(SELECT COUNT(*) FROM quest_flag WHERE player_id = (SELECT id FROM player WHERE name = 'Yankee') \
+          AND name = 'party_kill_probe.pk_hits'::bytea) = 0",
+    );
+}
+
+/// Scratch `mob_proto.txt` for the end-to-end Meley fight scenario: keeps the owner's proto
+/// verbatim, lowers stone `20422` HP to 10 so one punch breaks it, and appends minimal rows
+/// for the six Meley vnums absent from the owner's proto (`6118` statues + `6112/6113/6115/6116/6117`).
+fn meley_mob_proto_overlay() -> Vec<u8> {
+    let raw = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../legacy/gamedata/proto/mob_proto.txt"),
+    )
+    .expect("owner mob_proto.txt");
+    let mut out = Vec::with_capacity(raw.len() + 2048);
+    for line in raw.split_inclusive(|&b| b == b'\n') {
+        if line.starts_with(b"20422\t") {
+            let mut cols: Vec<Vec<u8>> = line.split(|&b| b == b'\t').map(<[u8]>::to_vec).collect();
+            if cols.len() > 26 {
+                cols[5] = b"1".to_vec();
+                cols[20] = b"1".to_vec();
+                cols[26] = b"0".to_vec();
+            }
+            out.extend_from_slice(&cols.join(&b'\t'));
+        } else {
+            out.extend_from_slice(line);
+        }
+    }
+    if !out.ends_with(b"\n") {
+        out.extend_from_slice(b"\r\n");
+    }
+    for (vnum, hp) in [
+        (6118_u32, 100_u32),
+        (6112, 10),
+        (6113, 10),
+        (6115, 10),
+        (6116, 10),
+        (6117, 10),
+    ] {
+        let row = format!(
+            "{vnum}\tMeleyMob\tPAWN\tMONSTER\tMELEE\t1\t\tNOMOVE\t0\t\t\t0\t\t0\t3\t6\t5\t2\t1\t2\t{hp}\t6\t7\t1\t1\t15\t4\t100\t100\t0\t2000\t175\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t\r\n"
+        );
+        out.extend_from_slice(row.as_bytes());
+    }
+    out
+}
+
+/// Drain every raw wire record (including monster/stone `GC_CHARACTER_ADD` and NPC moves) for `ms`.
+fn drain_all_wire(client: &mut Keyed, ms: u64) -> Vec<Vec<u8>> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+    let mut out = Vec::new();
+    while let Some(r) = client.read_wire_until(deadline) {
+        out.push(r);
+    }
+    out
+}
+
+/// Move Alpha on Meley's private map (base 307200, 1510400) to map-unit `(cx, cy)` and wait
+/// for all nearby NPCs to appear in view, returning every `(vid, vnum)` shown on the wire.
+fn meley_collect_adds<R: AsRef<[u8]>>(records: &[R]) -> Vec<(u32, u32, (i32, i32))> {
+    records
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|r| r.first() == Some(&GC_CHARACTER_ADD) && r.len() >= 24)
+        .map(|r| {
+            let vid = u32::from_le_bytes(r[1..5].try_into().expect("vid"));
+            let x = i32::from_le_bytes(r[9..13].try_into().expect("x"));
+            let y = i32::from_le_bytes(r[13..17].try_into().expect("y"));
+            let vnum = u16::from_le_bytes(r[22..24].try_into().expect("vnum"));
+            (
+                vid,
+                u32::from(vnum),
+                ((x - 307_200) / 100, (y - 1_510_400) / 100),
+            )
+        })
+        .collect()
+}
+
+/// Drive one statue-damage wave on Meley's run: warp beside each of the four statues and swing
+/// until `meley_statue_damage` locks all four at the step's threshold.
+fn meley_lock_statues(alice: &mut Keyed, statues: &[(u32, (i32, i32))], swings: usize) {
+    for &(vid, (cx, cy)) in statues {
+        let cmd = format!("/goto {cx} {cy}");
+        alice.send_record(&client_chat(CHAT_TALKING, cmd.as_bytes()));
+        let _ = drain_all_wire(alice, 150);
+        for _ in 0..swings {
+            alice.send_record(&client_attack(vid));
+            let _ = drain_all_wire(alice, 220);
+        }
+    }
+}
+/// Ledger 737 (`sys.guild.dungeon`): full Meley's Lair fight over TCP — register, enter, click
+/// the Dragon Gate to start step 1, damage all four statues through steps 1–3 while clearing
+/// the spawned stones (`20422`) and step-3 bosses (`6116`), seal all four statues at step 4
+/// with `30341` (`__DESTROY_INFINITE_STATUES_GM__`), wait for the 10 s chest timer, and claim
+/// reward chest `50270` via `MeleyLair.CanGetReward()` / `MeleyLair.Reward(1)`.
+#[test]
+fn a_meley_fight_starts_seals_all_four_statues_and_grants_the_reward_chest() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    seed_meley_guild(&database);
+    sql(
+        &database,
+        "UPDATE player SET level = 99, st = 100, ht = 100 WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) \
+         SELECT id, 'Alpha', 'IMPLEMENTOR' FROM account WHERE login = 'alice'",
+    );
+    // Four Meley seals (`30341`) in cells 0..4 to break all four statues at step 4.
+    for slot in 0..4_u16 {
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) \
+                 SELECT {}, id, 1, {slot}, 1, 30341 FROM player WHERE name = 'Alpha'",
+                9001 + u32::from(slot),
+            ),
+        );
+    }
+    let proto_overlay = meley_mob_proto_overlay();
+    let (server, _data) = Server::start_with_files_channels(
+        binary(),
+        database.url(),
+        &[
+            (
+                "locale/europe/quest/zz_probe/meley_fight_probe.lua",
+                MELEY_FIGHT_PROBE,
+            ),
+            ("proto/mob_proto.txt", &proto_overlay),
+        ],
+        &meley_channels(),
+        "test_server = false\nno_wander = true\n",
+    );
+
+    // Register and enter Meley's private run `2120000`.
+    let (mut alice, _, _) = load_character(&server, b"alice", 0);
+    let entered = enter_game_guilded(&mut alice, 1, None);
+    let sub_npc = shown_vid(&entered, 20_419, "sub map shows 20419");
+    let _ = drain_all_game(&mut alice, 300);
+    alice.send_record(&client_click(sub_npc));
+    let _ = drain_all_game(&mut alice, 200);
+    alice.send_record(&client_script_answer(3));
+    let _ = drain_all_game(&mut alice, 250);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/pkmode 4"));
+    let _ = drain_all_game(&mut alice, 200);
+    alice.send_record(&client_click(sub_npc));
+    let _ = drain_all_game(&mut alice, 200);
+    alice.send_record(&client_script_answer(4));
+    let _ = drain_all_game(&mut alice, 300);
+    wait_for(
+        &database,
+        "(SELECT map_index FROM player WHERE name = 'Alpha') = 2120000",
+    );
+    drop(alice);
+
+    meley_run_all_four_steps_and_take_reward(&server);
+}
+
+/// Second half of `a_meley_fight_starts_seals_all_four_statues_and_grants_the_reward_chest`.
+fn meley_run_all_four_steps_and_take_reward(server: &Server) {
+    let (mut alice, _, _) = load_character(server, b"alice", 0);
+    let entered = enter_game_guilded(&mut alice, 1, None);
+    let gate = shown_vid(&entered, 20_388, "run shows Dragon Gate");
+    let shelter = shown_vid(&entered, 20_419, "run shows shelter NPC");
+    let mut adds = meley_collect_adds(&entered.shown.monsters);
+    adds.extend(meley_collect_adds(&entered.shown.inserts()));
+    let _ = drain_all_game(&mut alice, 300);
+
+    // Click Dragon Gate: starts step 1 (real fight, not failed-start).
+    alice.send_record(&client_click(gate));
+    let start_burst = drain_all_game(&mut alice, 400);
+    assert!(
+        start_burst
+            .iter()
+            .any(|r| r.windows(b"just start.".len()).any(|w| w == b"just start.")),
+        "gate click started the real Meley fight; burst={:?}",
+        start_burst
+            .iter()
+            .map(|r| (r[0], String::from_utf8_lossy(r).into_owned()))
+            .collect::<Vec<_>>()
+    );
+
+    // Step across the sectree boundary `(128, 128)` to `(125, 125)` so `Show` runs
+    // `update_sectree` and brings all four statues (`6118`) into view.
+    alice.send_record(&client_chat(CHAT_TALKING, b"/goto 125 125"));
+    let goto_burst = drain_all_wire(&mut alice, 300);
+    adds.extend(meley_collect_adds(&goto_burst));
+    let mut statues: Vec<(u32, (i32, i32))> = adds
+        .iter()
+        .filter(|&&(_, v, _)| v == 6118)
+        .map(|&(vid, _, cell)| (vid, cell))
+        .collect();
+    statues.sort_unstable_by_key(|&(vid, _)| vid);
+    statues.dedup_by_key(|&mut (vid, _)| vid);
+    assert_eq!(statues.len(), 4, "all four Meley statues stand in view");
+
+    // Step 1 -> 2: lock all four statues at 75% HP.
+    meley_lock_statues(&mut alice, &statues, 3);
+    // Wait 12 s for step 2 effect (5s + 5s) + stone spawn (1s), then kill all 4 stones (`20422`).
+    let step2_adds = meley_collect_adds(&drain_all_wire(&mut alice, 12_000));
+    meley_kill_vnum(&mut alice, &step2_adds, 20_422);
+
+    // Step 2 -> 3: lock all four statues at 50% HP.
+    meley_lock_statues(&mut alice, &statues, 3);
+    // Wait 12 s for step 3 effect (5s + 5s) + stones & bosses spawn (1s).
+    let step3_adds = meley_collect_adds(&drain_all_wire(&mut alice, 12_000));
+    meley_kill_vnum(&mut alice, &step3_adds, 20_422);
+    meley_kill_vnum(&mut alice, &step3_adds, 6116);
+
+    // Step 3 -> 4: lock all four statues at 1% HP (`AFF_STATUE3`), entering step 4.
+    meley_lock_statues(&mut alice, &statues, 3);
+
+    // Seal all four statues with `30341` in cells 0..4; the 4th seal wins and spawns chest `20420`.
+    let mut win_burst = Vec::new();
+    for (slot, &(vid, (cx, cy))) in statues.iter().enumerate() {
+        let cmd = format!("/goto {cx} {cy}");
+        alice.send_record(&client_chat(CHAT_TALKING, cmd.as_bytes()));
+        let _ = drain_all_wire(&mut alice, 100);
+        alice.send_record(&client_give(vid, u16::try_from(slot).expect("slot")));
+        win_burst.extend(drain_all_wire(&mut alice, 250));
+    }
+    assert!(
+        meley_collect_adds(&win_burst)
+            .iter()
+            .any(|&(_, v, _)| v == 20_420),
+        "sealing all four statues spawned reward chest 20420"
+    );
+
+    // Wait 10.5 s for `reward_at = now + 10`, warp back to shelter NPC `20419`, and take chest 1.
+    let _ = drain_all_wire(&mut alice, 10_500);
+    alice.send_record(&client_chat(CHAT_TALKING, b"/goto 135 179"));
+    let _ = drain_all_wire(&mut alice, 250);
+    alice.send_record(&client_click(shelter));
+    let _ = drain_all_wire(&mut alice, 250);
+    alice.send_record(&client_script_answer(3));
+    let reward_burst = drain_all_wire(&mut alice, 400);
+    assert!(
+        reward_burst
+            .iter()
+            .any(|r| r.windows(b"may true".len()).any(|w| w == b"may true")),
+        "MeleyLair.CanGetReward() answered true after winning"
+    );
+    assert!(
+        reward_burst.iter().any(|r| {
+            r.first() == Some(&ITEM_SET)
+                && r.len() >= 8
+                && u32::from_le_bytes(r[4..8].try_into().expect("vnum")) == 50_270
+        }),
+        "MeleyLair.Reward(1) granted chest 50270 on the wire"
+    );
+}
+
+/// Kill every newly-spawned NPC of `want_vnum` on Meley's run by hopping to each spot and swinging.
+fn meley_kill_vnum(alice: &mut Keyed, adds: &[(u32, u32, (i32, i32))], want_vnum: u32) {
+    let mut targets: Vec<(u32, (i32, i32))> = adds
+        .iter()
+        .filter(|&&(_, v, _)| v == want_vnum)
+        .map(|&(vid, _, cell)| (vid, cell))
+        .collect();
+    targets.sort_unstable_by_key(|&(vid, _)| vid);
+    targets.dedup_by_key(|&mut (vid, _)| vid);
+    assert_eq!(targets.len(), 4, "expected 4 spawns of vnum {want_vnum}");
+    for (vid, (cx, cy)) in targets {
+        let cmd = format!("/goto {cx} {cy}");
+        alice.send_record(&client_chat(CHAT_TALKING, cmd.as_bytes()));
+        let _ = drain_all_wire(alice, 150);
+        let mut killed = false;
+        for _ in 0..6 {
+            alice.send_record(&client_attack(vid));
+            let burst = drain_all_wire(alice, 220);
+            if burst.iter().any(|r| r[0] == GC_DEAD) {
+                killed = true;
+                break;
+            }
+        }
+        assert!(killed, "killed Meley spawn vid={vid} vnum={want_vnum}");
     }
 }

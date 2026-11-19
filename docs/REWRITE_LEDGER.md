@@ -58402,3 +58402,61 @@ Run 1 failed `a_premium_cast_sees_the_biting_fish_before_the_take` (rod trained 
 `sockets[2] != 0` and format `({level}/10)`, 8× parallel clean).
 Run 2 passed 5,757/0. Parity: 1,809 `ported`, 3 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
 of 2,332 rows; 599 scenarios. No ADR changed.
+
+## 737. Blue Dragon battle AI, `party_kill` wire, Meley's Lair fight, and Package B closure
+
+Closes the final three Parity rows (`sys.dungeon.dragon_lair`, `sys.quest.runtime`,
+`sys.guild.dungeon`) — finishing Packages B5 and B6 and closing **all 12 Parity inventory files**
+(`0 partial`, `0 missing`, `0 codec` of 2,332 rows):
+
+- **Blue Dragon battle AI, skills, and stone-scaled recovery (`sys.dungeon.dragon_lair`):**
+  - `common/src/dragon.rs`: added `DRAGON_STONE_REGEN_PCT`, `DRAGON_STONE_REGEN_TIME`,
+    `SE_PERCENT_DAMAGE1..3`, `RangeFactor`, `MinMax`, `BreathSkill`, `WeakBreathSkill`,
+    `EarthQuakeSkill`, and `BlueDragonSetting` (`hp_period`, `hp_damage`, `hp_regen`, `skill0..2`,
+    `stones`).
+  - `quest/src/host.rs`: snapshots the full `BlueDragonSetting` table from `BlueDragon.lua` at load
+    (matching `G/BlueDragon_Binder.cpp` fallback semantics; unit test
+    `the_blue_dragon_setting_reads_the_owners_blue_dragon_lua`).
+  - `prodomo/src/game_state/blue_dragon.rs`: ports `BlueDragon_StateBattle`
+    (`G/BlueDragon.cpp:80-155`, wired from `mob_battle.rs` `battle_swing` per
+    `G/char_state.cpp:1109-1114`), `UseBlueDragonSkill` (`G/BlueDragon.cpp:19-81`: Breath,
+    WeakBreath, EarthQuake with `BlueDragon_Binder.cpp` range/skill/index factors,
+    `SE_PERCENT_DAMAGE1..3` effects, stun, and EarthQuake knockback), and stone-scaled HP recovery
+    (`G/char.cpp:3195-3241`, wired from `fight.rs` `mob_recovery_event`; unit tests
+    `blue_dragon_state_battle_fires_priority_skills_breath_weak_breath_and_earthquake` and
+    `blue_dragon_recovery_scales_regen_percent_and_cycle_from_stones`).
+  - `CDragonLairManager::Start` (`G/DragonLair.cpp`) is called only by `dragonlair.start`
+    (`unused`, zero owner quest callers).
+- **`party_kill` quest event wire and `sys.quest.runtime` closure:**
+  - Proved `party_kill` leader-PC dispatch over TCP (`a_party_kill_runs_party_kill_on_the_leaders_pc_on_the_wire`,
+    verifying `quest_flag` `party_kill_probe.pk_hits = 1` on leader Alpha and `0` on killer Yankee).
+  - Positive-controlled sweep of all 51 owner quest scripts confirmed zero `out`, `pick`, `timer`,
+    or `unmount` `when` clauses (positive controls: `login`=27, `kill`=6, `server_timer`=2,
+    `party_kill`=1).
+- **Meley's Lair full fight wire (`sys.guild.dungeon`):**
+  - End-to-end TCP scenario `a_meley_fight_starts_seals_all_four_statues_and_grants_the_reward_chest`
+    drives guild register, enter `2120000`, Dragon Gate click fight start, all four statue-lock
+    steps (`AFF_STATUE1`–`AFF_STATUE4`) with stone (`20422`) and step-3 boss (`6116`) clears,
+    step-4 seal breaking (`30341`), reward chest (`20420`) spawn, 10 s reward clock, and
+    `MeleyLair.CanGetReward()` / `MeleyLair.Reward(1)` granting chest `50270` on the wire.
+- **Updated `the_dragon_stones_scale_the_dragons_blows_both_ways`:**
+  - Now that `BlueDragon_StateBattle` (`G/char_state.cpp:1109-1114`) replaces normal melee for
+    vnum `2493`, updated the scenario to drop `2493` to 97% HP (5,000 max HP) and pin
+    `Skill1.default_damage` to `1000..1000` so `WeakBreath` asserts exact `+25%` `8032`
+    attack-stone scaling (`1250`, `FUNC_MOB_SKILL` arg 1) alongside the `-25%` `8031` defense-stone
+    punch (`129`).
+- **Scenarios (all 8× parallel clean, `test_server = false` per ADR-0007):**
+  `blue_dragon_casts_its_battle_skills_and_damages_on_the_wire`,
+  `a_party_kill_runs_party_kill_on_the_leaders_pc_on_the_wire`,
+  `a_meley_fight_starts_seals_all_four_statues_and_grants_the_reward_chest` (plus updated
+  `the_dragon_stones_scale_the_dragons_blows_both_ways`).
+
+Gates (2026-11-19), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,763
+passed, 0 failed in 46 targets; with it 5,763 passed, 0 failed in 46 targets (490 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+Run 1 failed `the_dragon_stones_scale_the_dragons_blows_both_ways` (ledger 561 tested the
+pre-`BlueDragon_StateBattle` normal melee fallback on 2493; updated to test `+25%` `8032` scaling
+through `WeakBreath`, 8× parallel clean).
+Run 2 passed 5,763/0. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
+of 2,332 rows (100% closed); 602 scenarios. No ADR changed.

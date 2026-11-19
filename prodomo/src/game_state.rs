@@ -71,6 +71,7 @@ mod battle_arena;
 mod battle_pass;
 mod biologist;
 mod blend;
+mod blue_dragon;
 mod build_lines;
 mod cards;
 mod castle_lines;
@@ -978,6 +979,12 @@ pub struct GameState {
     forked_maps: Arc<gamedata::forked::ForkedMaps>,
     /// The Blue Dragon's stone rows, which the damage hook reads per hit.
     dragon_stones: Arc<[common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS]>,
+    /// Full `BlueDragonSetting` snapshot (`hp_period`, `hp_damage`, `hp_regen`, `Skill0..2`,
+    /// and `DragonStone[1..4]`), read by `blue_dragon.rs`.
+    blue_dragon: Arc<common::dragon::BlueDragonSetting>,
+    /// Cooldown timestamps (`get_dword_time()`) for Blue Dragon skills 0..2
+    /// (`static time_t timeSkillCanUseTime[3]`, `G/BlueDragon.cpp:90`).
+    blue_dragon_skill_due: [Option<u32>; 3],
     /// The blend table (`CBlendItem::blend_`), which the blend use and the
     /// creation roll read.
     blend_table: Arc<gamedata::blend::BlendTable>,
@@ -1343,6 +1350,14 @@ impl GameState {
         stones: Arc<[common::dragon::DragonStone; common::dragon::DRAGON_STONE_ROWS]>,
     ) -> Self {
         self.dragon_stones = stones;
+        self
+    }
+
+    /// Share the full `BlueDragonSetting` snapshot (updating `dragon_stones` to match).
+    #[must_use]
+    pub fn with_blue_dragon(mut self, setting: Arc<common::dragon::BlueDragonSetting>) -> Self {
+        self.dragon_stones = Arc::new(setting.stones);
+        self.blue_dragon = setting;
         self
     }
 
