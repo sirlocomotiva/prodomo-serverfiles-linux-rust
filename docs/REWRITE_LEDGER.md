@@ -58773,3 +58773,29 @@ First-run failure before fix: `a_bite_left_on_the_line_gets_away_and_a_take_afte
 (caught stale `UnportedDrop::Unique` refusal on `70049`); fixed in `world/src/character/drop_item.rs`
 and re-verified clean (5,795/0). Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`,
 0 `codec`, of 2,332 rows (100% closed); 607 scenarios. No ADR changed.
+
+## 744. Package D (the play-test kit completion) and summoning scenario fix
+
+Closes **Package D** from `docs/STATUS.md` (everything reachable on this Podman host before the
+owner's Reference-client play test in Package E):
+
+- **Structured logging for unknown, malformed, and refused client frames (`prodomo/src/client_live.rs`, `prodomo/src/main.rs`):**
+  - Exposed `LiveClientSession::buffered_bytes(&self) -> &[u8]` (forwarding `VariableClientFrameDecoder::buffered_bytes`) and added `bytes: Vec<u8>` to `LiveUnsupported::RetainedHeader`.
+  - Refactored `analyze`, `main_step`, and `report_step` in `prodomo/src/main.rs` to borrow `&LiveStep` / `&ClientFrame` (zero copy on the happy path), wrapped in `analyze_step` so every frame that closes a session (unknown header, framing error, wrong phase, or malformed payload across all handlers) logs `phase`, hex `header`, byte length, and up to 64 hex wire bytes (`log_frame_error`, `log_closed_frame`, `report_step`).
+  - Added `is_secret_frame_header` / `format_frame_bytes` / `format_buffered_bytes`: credential-bearing headers (`HEADER_CG_LOGIN` `0x01`, `HEADER_CG_CHARACTER_DELETE` `0x05`, `HEADER_CG_LOGIN2` `0x6d`, `HEADER_CG_LOGIN3` `0x6f`, `HEADER_CG_INVENTORY_PROTECTED` `0x90`) always redact their payloads as `<redacted payload, N bytes>`, upholding `AGENTS.md` ("Never log or print a secret").
+  - Added unit test `tests::frame_byte_formatter_dumps_hex_caps_at_64_and_redacts_secrets` and parity scenario `unknown_and_refused_client_frames_log_phase_header_and_bytes_without_leaking_passwords` (8/8 in parallel).
+- **Client `serverinfo.py` guide and first-session play-test script (`README.md`, `docs/PLAYTEST.md`):**
+  - Added `### Pointing the Reference client (\`serverinfo.py\`)` to `README.md` with the exact `[network].public_ip` and port table (`30001` auth, `30003`/`30005` Channel 1, `30003` `MARKADDR`, `30019` Shared Channel via `GC_WARP`).
+  - Wrote `docs/PLAYTEST.md` covering server startup and test-account creation, priority Reference-client checks starting with owner questions 7 (`GC_WARP` port reconnect, `CG_WARP` observation, return to origin Channel) and 27 (Shared Channel OX/guild-war/kingdom-war routes and `event_panel`), full first-session walkthrough (auth through clean shutdown), and reading the new refused-frame log lines.
+  - Native Docker daemon verification remains open for a Docker host (only Podman 5.4.2 with its Docker CLI shim is installed on this machine).
+- **Scenario defect fix (`prodomo/tests/parity.rs`):**
+  - First-run failure diagnosis on `a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle` showed `MOVE refused: cannot move vid=Vid(1)`: Alpha previously stood at distance 0 inside all six `991` summoners' 175-unit melee range for 1.5 s while punching them and could be stunned before moving east. Starting Alpha 250 units east (inside player melee reach 350, outside `NOMOVE` `991`'s 175-unit reach) prevents stuns/deaths; verified 16/16 in parallel.
+
+Gates (2026-11-20), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,797
+passed, 0 failed in 46 targets; with it 5,797 passed, 0 failed in 46 targets (490 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+First-run failure before scenario fix: `a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle`
+(stunned at distance 0 before moving east); fixed in `prodomo/tests/parity.rs` and re-verified
+clean (5,797/0). Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of
+2,332 rows (100% closed); 608 scenarios. No ADR changed.

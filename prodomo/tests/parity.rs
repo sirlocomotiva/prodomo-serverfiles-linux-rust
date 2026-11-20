@@ -71035,10 +71035,12 @@ fn a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    // Six `991`s (`AGGR,NOMOVE`, `SUMMON = 992`) stand at Alpha's spot. Alpha wakes all six
-    // into Battle with one punch each, then steps 300 units east (past their 175-unit melee
-    // reach, inside the 4000-unit drop bound) so they stay in Battle without hitting Alpha
-    // and draw 1-in-4 roughly twice per second each (~120 draws in 10 s, `(3/4)^120 < 1e-15`).
+    // Six `991`s (`AGGR,NOMOVE`, `SUMMON = 992`, `ATTACK_RANGE = 175`) stand at
+    // `ALPHA_ENTERS_AT`. Alpha starts 250 units east: inside a player's 350-unit melee reach
+    // against a melee mob (`battle_melee_attack`), outside `991`'s 175-unit reach (so the
+    // `NOMOVE` bosses can never hit, stun, or kill Alpha), and inside the 4000-unit drop bound.
+    // Each boss stays in Battle and draws 1-in-4 roughly twice per second (~120 draws in 10 s,
+    // `(3/4)^120 < 1e-15`).
     let npc_txt = b"m\t605\t540\t0\t0\t0\t1\t60s\t100\t6\t991\n";
     let (server, _data) = Server::start_with_files_configured(
         binary(),
@@ -71053,7 +71055,11 @@ fn a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle() {
     add_characters(&database);
     sql(
         &database,
-        "UPDATE player SET level = 39, ht = 90, hp = 4000 WHERE name = 'Alpha'",
+        &format!(
+            "UPDATE player SET x = {}, y = {}, level = 39, ht = 90, hp = 4000 WHERE name = 'Alpha'",
+            ALPHA_ENTERS_AT.0 + 250,
+            ALPHA_ENTERS_AT.1
+        ),
     );
     let (mut alpha, _listed, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alpha);
@@ -71068,16 +71074,7 @@ fn a_summoning_monster_spawns_helpers_up_to_the_cap_in_battle() {
     assert_eq!(bosses.len(), 6, "six 991 summoners shown");
     for &boss in &bosses {
         alpha.send_record(&client_attack(boss));
-        std::thread::sleep(Duration::from_millis(250));
     }
-    alpha.send_record(&client_move(
-        FUNC_WAIT,
-        0,
-        0,
-        ALPHA_ENTERS_AT.0 + 300,
-        ALPHA_ENTERS_AT.1,
-        0,
-    ));
     let mut helpers = std::collections::BTreeSet::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(12);
     while std::time::Instant::now() < deadline && helpers.len() < 3 {
@@ -72403,4 +72400,52 @@ fn an_oversized_frame_before_login_closes_the_connection_immediately() {
         "oversized frame in non-mark Login must close"
     );
     server.wait_for("exceeds limit 257");
+}
+
+/// Package D: an unknown wire header, a registered frame in the wrong phase, and a
+/// secret-bearing login frame in the wrong phase each close the connection and log the
+/// descriptor's phase, header, length, and hex bytes without ever leaking a password.
+#[test]
+fn unknown_and_refused_client_frames_log_phase_header_and_bytes_without_leaking_passwords() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start(binary(), database.url());
+
+    // 1) Unknown header 0xfa in Handshake: framing fails and logs phase, header, and bytes.
+    let (mut unknown, _token) = accepted(server.channel(1));
+    unknown.send(&[0xfa, 0x11, 0x22, 0x33]);
+    let (_b, q) = unknown.drain(Duration::from_secs(2));
+    assert_eq!(q, Quiet::Closed, "unknown header must close");
+    server.wait_for("phase=Handshake header=0xfa buffered=4 bytes=fa 11 22 33");
+
+    // 2) Registered CG_QUICKSLOT_ADD (0x10, 4 bytes) in Login: refused and logged with bytes.
+    let (mut wrong_phase, first) = accepted(server.channel(1));
+    assert_eq!(shake(&mut wrong_phase, first), [GC_PHASE, PHASE_LOGIN]);
+    let quickslot_wire = [0x10, 0x02, 0x01, 0x07];
+    wrong_phase.send(&sealed(&quickslot_wire));
+    let (_b, q) = wrong_phase.drain(Duration::from_secs(2));
+    assert_eq!(q, Quiet::Closed, "CG_QUICKSLOT_ADD in Login must close");
+    server.wait_for("phase=Login header=0x10 len=4 bytes=10 02 01 07");
+
+    // 3) Secret-bearing CG_LOGIN3 (0x6f, 66 bytes) in Login: refused, logged redacted, no leak.
+    let (mut wrong_login, first) = accepted(server.channel(1));
+    assert_eq!(shake(&mut wrong_login, first), [GC_PHASE, PHASE_LOGIN]);
+    let mut login3 = [0_u8; 66];
+    login3[0] = 0x6f;
+    login3[1..6].copy_from_slice(b"alice");
+    login3[32..48].copy_from_slice(b"PlayTestSecret99");
+    wrong_login.send(&sealed(&login3));
+    let (_b, q) = wrong_login.drain(Duration::from_secs(2));
+    assert_eq!(q, Quiet::Closed, "CG_LOGIN3 in Login must close");
+    server.wait_for("phase=Login header=0x6f len=66 bytes=6f <redacted payload, 65 bytes>");
+    server.drain_log();
+    assert!(
+        !server.logged("PlayTestSecret99"),
+        "plaintext password must never appear in server log"
+    );
+    assert!(
+        !server.logged("50 6c 61 79"),
+        "hex-encoded password must never appear in server log"
+    );
 }

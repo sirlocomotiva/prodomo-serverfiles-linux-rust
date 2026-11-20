@@ -43,6 +43,7 @@ The reasons are in [`docs/adr/`](docs/adr/).
 | [`CONTEXT.md`](CONTEXT.md) | The glossary: Parity, Quirk, Defect, Divergence, Channel, Warp, Pulse, and the rest. |
 | [`docs/adr/`](docs/adr/) | The architecture decisions and why they were made. |
 | [`AGENTS.md`](AGENTS.md) | Rules for anyone changing the code: build gates, verification method, compatibility and security rules. |
+| [`docs/PLAYTEST.md`](docs/PLAYTEST.md) | First-session play-test script for the Reference client (starting with owner questions 7 and 27) and how to read refused-frame logs. |
 | [`docs/PROTOCOL_NOTES.md`](docs/PROTOCOL_NOTES.md) | Per-record findings for the client wire codecs and the legacy defects behind the rules. |
 | [`docs/REWRITE_LEDGER.md`](docs/REWRITE_LEDGER.md) | Append-only record of every change and gate receipt. |
 
@@ -94,6 +95,24 @@ published ports are the legacy ones the client's `serverinfo` names: 30001 (auth
 30005 (Channel 1) and 30019 (the Shared Channel). `podman compose stop` or `podman compose down`
 stops the server with SIGTERM, and it saves every character before it exits. Do not use
 `podman compose restart`: in the test of ledger 680 it ended the server without the SIGTERM.
+
+### Pointing the Reference client (`serverinfo.py`)
+
+Point the Prodomo 5.4 client's `serverinfo.py` at the `[network].public_ip` configured in
+`prodomo.toml` (for example `127.0.0.1` on the same machine, or the host/VM LAN IP) using the
+default ports from `config/prodomo.toml.example` and `compose.yaml`:
+
+| `serverinfo.py` entry | address | port | notes |
+|---|---|---|---|
+| `AUTH` (`STATE_NONE` / auth server) | `<public_ip>` | `30001` | Login / authentication listener (`[auth].port`). |
+| `CH1` (`CHANNEL_DICT[1]`) | `<public_ip>` | `30003` | Channel 1 primary port (`30005` also serves all Channel 1 maps). |
+| `MARKADDR` (guild mark / symbol server) | `<public_ip>` | `30003` | Served on Channel 1's first port. |
+| Shared Channel (channel 99) | `<public_ip>` | `30019` | Not listed in `CHANNEL_DICT`; reached automatically via `GC_WARP`. |
+
+Channels 2–4 are disabled by default (commented out in `config/prodomo.toml.example`). Keep the
+client's `CHECK_VERSION` / locale on `europe`. Follow [`docs/PLAYTEST.md`](docs/PLAYTEST.md) for
+the first-session verification script and how to inspect refused-frame logs if the client
+disconnects.
 
 ### From the source tree
 

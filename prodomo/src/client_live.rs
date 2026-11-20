@@ -197,6 +197,8 @@ pub enum LiveUnsupported {
         phase: ClientPhase,
         /// The one-byte client header.
         header: u8,
+        /// The full wire bytes of the refused frame (`[header, ..payload]`).
+        bytes: Vec<u8>,
     },
 }
 
@@ -209,7 +211,7 @@ impl fmt::Display for LiveUnsupported {
                     "variable client header {header:#04x} is not modelled"
                 )
             }
-            Self::RetainedHeader { phase, header } => write!(
+            Self::RetainedHeader { phase, header, .. } => write!(
                 formatter,
                 "client header {header:#04x} is retained but not decoded in {phase:?}"
             ),
@@ -483,6 +485,12 @@ where
         self.decoder.buffered_len()
     }
 
+    /// Borrow the plaintext bytes still buffered by the frame decoder.
+    #[must_use]
+    pub fn buffered_bytes(&self) -> &[u8] {
+        self.decoder.buffered_bytes()
+    }
+
     /// Recover the owned stream.
     #[must_use]
     pub fn into_inner(self) -> S {
@@ -654,9 +662,13 @@ where
         // pong in any other phase is a retained header, not a no-op.
         if frame.header == HEADER_CG_PONG.value() {
             if !phase.accepts_pong() {
+                let mut bytes = Vec::with_capacity(1 + frame.payload.len());
+                bytes.push(frame.header);
+                bytes.extend_from_slice(&frame.payload);
                 return LiveStep::Unsupported(LiveUnsupported::RetainedHeader {
                     phase,
                     header: frame.header,
+                    bytes,
                 });
             }
             return match self.lifecycle.on_pong() {

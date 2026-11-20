@@ -66,6 +66,7 @@ use prodomo::chat::{
 use prodomo::chat_line::Recipient;
 use prodomo::client_live::{
     handshake_token, BootLiveClock, LiveClientSession, LiveClock, LiveError, LiveOutcome, LiveStep,
+    LiveUnsupported,
 };
 use prodomo::client_registry::{ChannelClients, ClientEntry, ClientOrder, Lease};
 use prodomo::client_session::ClientPhase;
@@ -902,15 +903,14 @@ async fn pump_descriptor<S>(
                     handle,
                     number: channel_number,
                 });
-                let open = Box::pin(analyze(session, addr, context, seat, step, held)).await;
-                if !open || session.phase() == ClientPhase::Close {
+                if !Box::pin(analyze_step(session, addr, context, seat, &step, held)).await {
                     break;
                 }
                 continue;
             }
             Ok(None) => {}
             Err(error) => {
-                warn!(%addr, %error, "Client session stopped");
+                log_frame_error(addr, session, &error);
                 break;
             }
         }
@@ -5719,6 +5719,27 @@ async fn sync_positions(
     }
 }
 
+/// Apply `analyze` to one step, logging the phase, header, length, and redacted hex bytes
+/// when the frame closes the connection.
+async fn analyze_step<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    context: &ConnectionContext,
+    seat: Option<ChannelSeat<'_>>,
+    step: &LiveStep,
+    held: &mut Held,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let open = analyze(session, addr, context, seat, step, held).await;
+    if !open {
+        log_closed_frame(addr, step);
+        return false;
+    }
+    session.phase() != ClientPhase::Close
+}
+
 /// Apply the analyzer of the descriptor's phase to one step; `false` when the connection must
 /// close. `seat` is `None` on the auth port.
 async fn analyze<S>(
@@ -5726,7 +5747,7 @@ async fn analyze<S>(
     addr: SocketAddr,
     context: &ConnectionContext,
     seat: Option<ChannelSeat<'_>>,
-    step: LiveStep,
+    step: &LiveStep,
     held: &mut Held,
 ) -> bool
 where
@@ -5735,7 +5756,7 @@ where
     match step {
         // `CInputHandshake::Analyze` (`G/input.cpp:227-234`).
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Handshake
+            if *phase == ClientPhase::Handshake
                 && frame.header == HEADER_CG_STATE_CHECKER.value() =>
         {
             send_channel_status(session, addr, context).await
@@ -5746,15 +5767,15 @@ where
         // them; the frame must still be whole, so a short login closes as a
         // malformed record does.
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Handshake && frame.header == HEADER_CG_MARK_LOGIN.value() =>
+            if *phase == ClientPhase::Handshake && frame.header == HEADER_CG_MARK_LOGIN.value() =>
         {
-            mark_login_handshake(session, addr, context, &frame).await
+            mark_login_handshake(session, addr, context, frame).await
         }
         // `CInputAuth::Analyze` (`G/input_auth.cpp:209-217`).
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Auth && frame.header == HEADER_CG_LOGIN3.value() =>
+            if *phase == ClientPhase::Auth && frame.header == HEADER_CG_LOGIN3.value() =>
         {
-            auth_login(session, addr, context, &frame, &mut held.claim).await
+            auth_login(session, addr, context, frame, &mut held.claim).await
         }
         // The mark arms of `CInputLogin::Analyze` (`G/input_login.cpp:1207-1236`,
         // `ENABLE_HEADER_100_FIX` defined): the mark login is consumed, the CRC list,
@@ -5766,8 +5787,8 @@ where
             ) && is_mark_record(frame.header) =>
         {
             match seat {
-                Some(seat) => mark_step(session, addr, context, &seat, &frame).await,
-                None => report_step(addr, LiveStep::Record { phase, frame }),
+                Some(seat) => mark_step(session, addr, context, &seat, frame).await,
+                None => report_step(addr, step),
             }
         }
         // `CInputLogin::Analyze` (`G/input_login.cpp:1177-1182`), which serves the
@@ -5779,8 +5800,8 @@ where
             ) && frame.header == HEADER_CG_LOGIN.value() =>
         {
             match seat {
-                Some(seat) => channel_password_login(session, addr, context, &seat, &frame).await,
-                None => report_step(addr, LiveStep::Record { phase, frame }),
+                Some(seat) => channel_password_login(session, addr, context, &seat, frame).await,
+                None => report_step(addr, step),
             }
         }
         LiveStep::Record { phase, frame }
@@ -5790,8 +5811,8 @@ where
             ) && frame.header == HEADER_CG_LOGIN2.value() =>
         {
             match seat {
-                Some(seat) => channel_login(session, addr, context, &seat, &frame, held).await,
-                None => report_step(addr, LiveStep::Record { phase, frame }),
+                Some(seat) => channel_login(session, addr, context, &seat, frame, held).await,
+                None => report_step(addr, step),
             }
         }
         // The select-screen records of `CInputLogin::Analyze` (`G/input_login.cpp:1185-1244`).
@@ -5803,9 +5824,9 @@ where
         {
             match seat {
                 Some(seat) => {
-                    select_screen(session, addr, context, &seat, &frame, &mut held.account).await
+                    select_screen(session, addr, context, &seat, frame, &mut held.account).await
                 }
-                None => report_step(addr, LiveStep::Record { phase, frame }),
+                None => report_step(addr, step),
             }
         }
         // `CG_CHARACTER_SELECT` (6) in the select phase: `CInputLogin::CharacterSelect`
@@ -5816,18 +5837,18 @@ where
                 && frame.header == HEADER_CG_CHARACTER_SELECT.value() =>
         {
             match seat {
-                Some(seat) => select_character(session, addr, context, &seat, &frame, held).await,
-                None => report_step(addr, LiveStep::Record { phase, frame }),
+                Some(seat) => select_character(session, addr, context, &seat, frame, held).await,
+                None => report_step(addr, step),
             }
         }
         // `CG_ENTER_GAME` (10) in the loading phase: `CInputLogin::Entergame`
         // (`G/input_login.cpp:562-606`).
         LiveStep::Record { phase, frame }
-            if phase == ClientPhase::Loading && frame.header == HEADER_CG_ENTERGAME.value() =>
+            if *phase == ClientPhase::Loading && frame.header == HEADER_CG_ENTERGAME.value() =>
         {
             match seat {
-                Some(seat) => enter_game(session, addr, context, &seat, &frame, held).await,
-                None => report_step(addr, LiveStep::Record { phase, frame }),
+                Some(seat) => enter_game(session, addr, context, &seat, frame, held).await,
+                None => report_step(addr, step),
             }
         }
         // The two client-version records in the login, select and loading phases
@@ -5838,17 +5859,17 @@ where
                 ClientPhase::Login | ClientPhase::Select | ClientPhase::Loading
             ) && is_version_record(frame.header) =>
         {
-            version_step(addr, held, &frame)
+            version_step(addr, held, frame)
         }
         // The records a phase's analyzer consumes with nothing done, see [`is_consumed`].
-        LiveStep::Record { phase, frame } if is_consumed(phase, frame.header) => {
+        LiveStep::Record { phase, frame } if is_consumed(*phase, frame.header) => {
             debug!(%addr, ?phase, header = frame.header, "consumed with nothing done");
             true
         }
         // The main input and the dead phase's refusal, see [`main_record`].
         LiveStep::Record { phase, frame } => {
             let locations = seat.map(|seat| seat.locations);
-            main_step(session, addr, context, locations, held, phase, frame).await
+            main_step(session, addr, context, locations, held, *phase, frame).await
         }
         step => report_step(addr, step),
     }
@@ -5862,7 +5883,7 @@ async fn main_step<S>(
     locations: Option<&MapLocations>,
     held: &mut Held,
     phase: ClientPhase,
-    frame: ClientFrame,
+    frame: &ClientFrame,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -5877,33 +5898,33 @@ where
             true
         }
         Some(MainRecord::Chat) => {
-            Box::pin(chat_line(session, addr, context, locations, held, &frame)).await
+            Box::pin(chat_line(session, addr, context, locations, held, frame)).await
         }
-        Some(MainRecord::Whisper) => whisper_line(addr, context, held, &frame).await,
-        Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, &frame).await,
-        Some(MainRecord::Belongings) => belongings_step(session, addr, context, held, &frame).await,
-        Some(MainRecord::World) => world_step(addr, context, held, &frame).await,
-        Some(MainRecord::Npc) => npc_step(session, addr, context, held, &frame).await,
-        Some(MainRecord::Messenger) => messenger_step(addr, context, held, &frame).await,
+        Some(MainRecord::Whisper) => whisper_line(addr, context, held, frame).await,
+        Some(MainRecord::ItemMove) => move_an_item(session, addr, context, held, frame).await,
+        Some(MainRecord::Belongings) => belongings_step(session, addr, context, held, frame).await,
+        Some(MainRecord::World) => world_step(addr, context, held, frame).await,
+        Some(MainRecord::Npc) => npc_step(session, addr, context, held, frame).await,
+        Some(MainRecord::Messenger) => messenger_step(addr, context, held, frame).await,
         Some(MainRecord::Guild) => {
             if frame.header == HEADER_CG_GUILD.value() {
-                cg_guild_step(session, addr, context, held, &frame).await
+                cg_guild_step(session, addr, context, held, frame).await
             } else {
-                answer_make_guild_step(session, addr, context, held, &frame).await
+                answer_make_guild_step(session, addr, context, held, frame).await
             }
         }
         Some(MainRecord::Transaction) => {
-            transaction_record(session, addr, context, held, &frame).await
+            transaction_record(session, addr, context, held, frame).await
         }
-        Some(MainRecord::Warp) => warp_end(addr, &frame),
+        Some(MainRecord::Warp) => warp_end(addr, frame),
         Some(MainRecord::Language) => {
-            change_language_step(session, addr, context, held, &frame).await
+            change_language_step(session, addr, context, held, frame).await
         }
         Some(MainRecord::WhisperDetails) => {
-            whisper_details_step(session, addr, context, &frame).await
+            whisper_details_step(session, addr, context, frame).await
         }
-        Some(MainRecord::Version) => version_step(addr, held, &frame),
-        None => report_step(addr, LiveStep::Record { phase, frame }),
+        Some(MainRecord::Version) => version_step(addr, held, frame),
+        None => report_unhandled_record(addr, phase, frame),
     }
 }
 
@@ -10230,8 +10251,97 @@ async fn authenticate(
     Ok(Ok((key, new_claim)))
 }
 
+/// Maximum number of client wire bytes printed in one refusal or framing-error log line.
+const MAX_FRAME_LOG_BYTES: usize = 64;
+
+/// Headers whose wire payload carries a password, delete code, or client-key material that
+/// must never enter console or file logs (`AGENTS.md`, "SECURITY AND TRUST BOUNDARIES").
+const fn is_secret_frame_header(header: u8) -> bool {
+    header == HEADER_CG_LOGIN.value()
+        || header == HEADER_CG_LOGIN2.value()
+        || header == HEADER_CG_LOGIN3.value()
+        || header == HEADER_CG_CHARACTER_DELETE.value()
+        || header == HEADER_CG_INVENTORY_PROTECTED.value()
+}
+
+/// Format up to [`MAX_FRAME_LOG_BYTES`] of `[header, ..payload]` as space-separated hex,
+/// redacting the payload whenever `header` carries credentials.
+fn format_frame_bytes(header: u8, payload: &[u8]) -> String {
+    if is_secret_frame_header(header) {
+        return format!("{header:02x} <redacted payload, {} bytes>", payload.len());
+    }
+    let total = 1 + payload.len();
+    let shown = payload.len().min(MAX_FRAME_LOG_BYTES - 1);
+    let mut out = String::with_capacity(2 + shown * 3 + 16);
+    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{header:02x}"));
+    for byte in &payload[..shown] {
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!(" {byte:02x}"));
+    }
+    if total > MAX_FRAME_LOG_BYTES {
+        let rest = total - MAX_FRAME_LOG_BYTES;
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!(" ... (+{rest} more)"));
+    }
+    out
+}
+
+/// Format buffered plaintext bytes from a failed decode, redacting secret-bearing headers.
+fn format_buffered_bytes(raw: &[u8]) -> String {
+    let Some((&header, payload)) = raw.split_first() else {
+        return "<empty>".to_string();
+    };
+    format_frame_bytes(header, payload)
+}
+
+/// Log a frame that closed the connection in `analyze` (malformed payload, wrong phase, or
+/// refused login/select/mark record) with its phase, header, length, and redacted hex bytes.
+fn log_closed_frame(addr: SocketAddr, step: &LiveStep) {
+    if let LiveStep::Record { phase, frame } = step {
+        warn!(
+            %addr,
+            ?phase,
+            header = %format_args!("{:#04x}", frame.header),
+            len = 1 + frame.payload.len(),
+            bytes = %format_frame_bytes(frame.header, &frame.payload),
+            "Closing session on refused client frame"
+        );
+    }
+}
+
+/// Log a framing, handshake, cipher, or I/O error from `next_buffered` together with the
+/// descriptor's phase, peeked header, and buffered plaintext bytes.
+fn log_frame_error<S>(addr: SocketAddr, session: &LiveClientSession<S>, error: &LiveError)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let phase = session.phase();
+    let raw = session.buffered_bytes();
+    let header = raw
+        .first()
+        .map_or_else(|| "none".to_string(), |byte| format!("{byte:#04x}"));
+    warn!(
+        %addr,
+        ?phase,
+        %header,
+        buffered = raw.len(),
+        bytes = %format_buffered_bytes(raw),
+        %error,
+        "Client session stopped on frame error"
+    );
+}
+
+fn report_unhandled_record(addr: SocketAddr, phase: ClientPhase, frame: &ClientFrame) -> bool {
+    warn!(
+        %addr,
+        ?phase,
+        header = %format_args!("{:#04x}", frame.header),
+        len = 1 + frame.payload.len(),
+        "Client sent a header no analyzer handles; closing"
+    );
+    false
+}
+
 /// Log one handled step; `false` when the connection must close.
-fn report_step(addr: SocketAddr, step: LiveStep) -> bool {
+fn report_step(addr: SocketAddr, step: &LiveStep) -> bool {
     match step {
         LiveStep::Handled(LiveOutcome::KeepAlive { .. }) => {
             info!(%addr, "Received client keepalive");
@@ -10246,18 +10356,34 @@ fn report_step(addr: SocketAddr, step: LiveStep) -> bool {
             true
         }
         LiveStep::Pending { .. } => true,
-        LiveStep::Record { phase, frame } => {
-            warn!(
-                %addr,
-                ?phase,
-                header = frame.header,
-                "Client sent a header no analyzer handles; closing"
-            );
-            false
-        }
+        LiveStep::Record { phase, frame } => report_unhandled_record(addr, *phase, frame),
         LiveStep::PeerClosed { .. } => false,
         LiveStep::Unsupported(unsupported) => {
-            warn!(%addr, %unsupported, "Client sent a header no analyzer handles; closing");
+            match unsupported {
+                LiveUnsupported::RetainedHeader {
+                    phase,
+                    header,
+                    bytes,
+                } => {
+                    warn!(
+                        %addr,
+                        ?phase,
+                        header = %format_args!("{header:#04x}"),
+                        len = bytes.len(),
+                        bytes = %format_buffered_bytes(bytes),
+                        %unsupported,
+                        "Client sent a header no analyzer handles; closing"
+                    );
+                }
+                LiveUnsupported::VariableAnalyze { header } => {
+                    warn!(
+                        %addr,
+                        header = %format_args!("{header:#04x}"),
+                        %unsupported,
+                        "Client sent a header no analyzer handles; closing"
+                    );
+                }
+            }
             false
         }
         LiveStep::Failed(error) => {
@@ -18182,5 +18308,29 @@ maps = [1]
         .expect("a name");
         assert_eq!(answer.name[..24], [b'A'; 24]);
         assert_eq!(answer.name[24], 0);
+    }
+
+    #[test]
+    fn frame_byte_formatter_dumps_hex_caps_at_64_and_redacts_secrets() {
+        assert_eq!(format_buffered_bytes(&[]), "<empty>");
+        assert_eq!(format_frame_bytes(0x07, &[0x01, 0x02, 0xab]), "07 01 02 ab");
+        let long = vec![0x5a_u8; 70];
+        let formatted = format_frame_bytes(0xfa, &long);
+        assert!(formatted.starts_with("fa 5a 5a"), "{formatted}");
+        assert!(formatted.ends_with(" ... (+7 more)"), "{formatted}");
+        for secret in [
+            HEADER_CG_LOGIN.value(),
+            HEADER_CG_LOGIN2.value(),
+            HEADER_CG_LOGIN3.value(),
+            HEADER_CG_CHARACTER_DELETE.value(),
+            HEADER_CG_INVENTORY_PROTECTED.value(),
+        ] {
+            let text = format_frame_bytes(secret, b"TopSecretPassword123");
+            assert!(
+                !text.contains("54 6f 70") && !text.contains("TopSecret"),
+                "header {secret:#04x} leaked payload: {text}"
+            );
+            assert!(text.contains("<redacted payload, 20 bytes>"), "{text}");
+        }
     }
 }

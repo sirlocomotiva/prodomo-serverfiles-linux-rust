@@ -6,19 +6,18 @@ This page records where the Rewrite stands, what is left, and what is next. Rule
 next steps, and the Divergence and Defect registers here, and writes its story in the ledger. What
 this page said section by section until ledger 678 is in `docs/STATUS_HISTORY.md`.
 
-Last reviewed: 2026-11-15, the direction review (ledger 679); the numbers are ledger 685's.
+Last reviewed: 2026-11-15, the direction review (ledger 679); numbers updated at ledger 744.
 
 ## Where the Rewrite stands
 
-Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's play test with
-the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
-the tail is closed.
+Steps 1 to 4 are done (Packages A–D complete). Step 5 (Package E: the owner's play test with the
+Reference client) is ready to begin (`docs/PLAYTEST.md`).
 
-| measure | value at ledger 743 |
+| measure | value at ledger 744 |
 |---|---|
 | Parity inventory | 2,332 rows: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`; **Package B complete — all 12 inventory files closed** |
-| Scenarios | 607 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,795 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 743 has the receipt) |
+| Scenarios | 608 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,797 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 744 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 126 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 48 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -26,8 +25,9 @@ the tail is closed.
 
 A client can do what the `ported` rows say: log in, choose and create characters, enter the
 world, move, chat, fight monsters and players, die and restart, use and trade items, shop, store,
-join parties and guilds, fight guild wars, run quests, and use the GM commands. Packages B and C
-are closed (all 2,332 Parity rows are `ported` or `unused`, and all twelve hardening items C1–C12 are done); Package D (play-test kit) is next.
+join parties and guilds, fight guild wars, run quests, and use the GM commands. Packages A–D are
+closed (all 2,332 Parity rows are `ported` or `unused`, all twelve hardening items C1–C12 are done,
+and the play-test kit is complete); Package E (the owner's play test) is next.
 
 ## Direction review, 2026-11-15
 
@@ -183,18 +183,21 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 
 ### D. The play-test kit (opens step 5; the play test itself is out of scope for now)
 
-Done in ledger 680: `compose.yaml` and `Dockerfile` for PostgreSQL 18 and `prodomo`, the
-README's Compose section, and the README and the example agreeing on the store's address. The
-image builds (101 MB), the stack starts with Podman, the four ports answer with the handshake
-phase, `account create` and `gm grant` run through `compose run`, and `compose stop` ends the
-server with exit 0 after its shutdown sequence. `compose restart` through Podman's
-Docker-compatible API ended it without the SIGTERM; the kit says to stop and start instead.
-Left, for when the owner opens the play test: what to change in the client's `serverinfo`; an
-unknown or refused client frame logged with its phase, header and bytes, so a session the
-Reference client loses can be read from the log; a written play-test script: the first
-session's checks, starting with owner questions 7 and 27; and the same start under Docker,
-which was not run. *Exit:* a second machine follows the README and a scenario client logs in
-to it.
+**Done in ledgers 680 and 744.**
+- Ledger 680: `compose.yaml` and `Dockerfile` for PostgreSQL 18 and `prodomo`, the README's Compose
+  section, and the README and the example agreeing on the store's address. The image builds
+  (101 MB), the stack starts with Podman, the four ports answer with the handshake phase,
+  `account create` and `gm grant` run through `compose run`, and `compose stop` ends the server
+  with exit 0 after its shutdown sequence (`compose restart` through Podman's Docker-compatible API
+  ended it without SIGTERM; the kit says to stop and start instead).
+- Ledger 744: client `serverinfo.py` table in `README.md`; structured `phase`, hex `header`, byte
+  length, and redacted hex `bytes` logging on every unknown, malformed, or refused client frame
+  (`prodomo/src/client_live.rs`, `prodomo/src/main.rs`, proven by
+  `unknown_and_refused_client_frames_log_phase_header_and_bytes_without_leaking_passwords`); and
+  the written first-session play-test script `docs/PLAYTEST.md` starting with owner questions 7
+  and 27.
+- Only native Docker daemon verification remains for a second machine running Docker (this host
+  has Podman 5.4.2 only).
 
 ### E. The play test (the owner)
 
@@ -261,8 +264,8 @@ route the target to its own file. Porting the sites is `sys.log` (package B8).
 | 1. Restructure | One `prodomo` binary, TOML configuration, the PostgreSQL store, the Operator commands. | Done (ledger 177-179). |
 | 2. Parity inventory | Every legacy system and handler in `.scratch/parity/`, and the scripted client. | Done (181). |
 | 3. Vertical slice | Handshake to logout with save, with a Warp between maps. | Done (228). |
-| 4. Game systems | Items, NPCs and Transfers, quests, monsters and combat, skills, party and guild, dungeons and events, the Prodomo custom systems, GM commands. | In its tail: 52 `partial` rows (packages B1–B6, B8 and C above). |
-| 5. Game data and play test | The play-test kit, then the owner's play test with the Reference client. | Not started (packages D and E). |
+| 4. Game systems | Items, NPCs and Transfers, quests, monsters and combat, skills, party and guild, dungeons and events, the Prodomo custom systems, GM commands. | Done (Packages B1–B9 and C1–C12 closed, ledgers 686–743). |
+| 5. Game data and play test | The play-test kit, then the owner's play test with the Reference client. | Play-test kit done (Package D, ledgers 680 & 744); ready for owner's play test (Package E). |
 
 ### Acceptance
 
@@ -277,9 +280,9 @@ several clients.
 
 ### Play test setup
 
-The owner runs the play test on a Linux machine or VM with the Reference client, after the tail is
-closed (owner, 2026-11-15). The kit is package D above; none of it exists yet beyond the README's
-account and GM commands (179). Ports default to the legacy ones.
+The owner runs the play test on a Linux machine or VM with the Reference client (`README.md` and
+`docs/PLAYTEST.md`). Ports default to the legacy ones (30001 auth, 30003/30005 Channel 1, 30019
+Shared Channel).
 
 ## Topology
 
