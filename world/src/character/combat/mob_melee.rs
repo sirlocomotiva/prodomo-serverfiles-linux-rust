@@ -953,6 +953,9 @@ pub fn mob_calc_attack(
         victim_dexterity: victim.map_or(mob.fight.point(point::POINT_DX), |victim| {
             poly_dexterity.unwrap_or_else(|| victim.get_point(point::POINT_DX))
         }),
+        victim_level: victim.map_or(i32::from(mob.fight.level), |victim| {
+            i32::from(victim.level())
+        }),
         ignore_target_rating,
     });
     let rolled = number(
@@ -1007,6 +1010,7 @@ pub fn mob_calc_attack_npc(
         attacker_dexterity: mob.fight.point(point::POINT_DX),
         attacker_level: i32::from(mob.fight.level),
         victim_dexterity: victim.fight.point(point::POINT_DX),
+        victim_level: i32::from(victim.fight.level),
         ignore_target_rating,
     });
     let rolled = number(
@@ -1570,6 +1574,7 @@ fn monster_melee_damage(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: &N
         attacker_dexterity: mob.fight.point(point::POINT_DX),
         attacker_level: i32::from(mob.fight.level),
         victim_dexterity: victim.fight.point(point::POINT_DX),
+        victim_level: i32::from(victim.fight.level),
         ignore_target_rating: false,
     });
     let rolled = number(
@@ -1744,6 +1749,7 @@ fn guard_melee_damage(dice: &mut dyn Dice, striker: MobStriker<'_>, victim: &Npc
         attacker_dexterity: mob.fight.point(point::POINT_DX),
         attacker_level: i32::from(mob.fight.level),
         victim_dexterity: victim.fight.point(point::POINT_DX),
+        victim_level: i32::from(victim.fight.level),
         ignore_target_rating: false,
     });
     let rolled = number(
@@ -2184,7 +2190,7 @@ mod tests {
         let points = alpha();
         assert_eq!(points.get_point(point::POINT_DEF_GRADE), 168);
         // `number(59, 110)`: the raw draw maps modulo 52.
-        for (draw, damage) in [(0, 25), (51, 92), (25, 58)] {
+        for (draw, damage) in [(0, 3), (51, 58), (25, 30)] {
             let mut dice = Script::new(&[draw]);
             let strike = hit(&mut dice, &mob, &points, false);
             assert!(dice.0.is_empty());
@@ -2239,18 +2245,12 @@ mod tests {
             },
             100,
         );
-        // Roll 59: calm `(int)(193 * 1.0) - 168 = 25`; berserk `(int)(193 * 2.0) - 168`.
-        assert_eq!(
-            calm.end,
-            PcHitEnd::Landed {
-                damage: 25,
-                flag: 1
-            }
-        );
+        // Roll 59: calm `(int)(171 * 1.0) - 168 = 3`; berserk `(int)(171 * 2.0) - 168`.
+        assert_eq!(calm.end, PcHitEnd::Landed { damage: 3, flag: 1 });
         assert_eq!(
             berserk.end,
             PcHitEnd::Landed {
-                damage: 193 * 2 - 168,
+                damage: 171 * 2 - 168,
                 flag: 1
             }
         );
@@ -2276,13 +2276,13 @@ mod tests {
         let mut winded = alpha();
         winded.set_point(point::POINT_RESIST_WIND, 10);
         winded.set_point(point::POINT_RESIST_WIND_PCT, 20);
-        // Roll 84: 226 before the arm; `q = (226 * 30 * 10) * 1.2 / 10000 = 8`.
+        // Roll 84: 198 before the arm; `q = (198 * 30 * 10) * 1.2 / 10000 = 7`.
         let mut dice = Script::new(&[25]);
         let plain = hit(&mut dice, &monster(&proto, 1 << 3, 0), &winded, false);
         assert_eq!(
             plain.end,
             PcHitEnd::Landed {
-                damage: 58,
+                damage: 30,
                 flag: 1
             }
         );
@@ -2296,7 +2296,7 @@ mod tests {
         assert_eq!(
             struck.end,
             PcHitEnd::Landed {
-                damage: 49,
+                damage: 22,
                 flag: 1
             }
         );
@@ -2310,11 +2310,11 @@ mod tests {
             &elec,
             false,
         );
-        // `q = (226 * 30 * 10) * 1.0 / 10000 = 6`.
+        // `q = (198 * 30 * 10) * 1.0 / 10000 = 5`.
         assert_eq!(
             first.end,
             PcHitEnd::Landed {
-                damage: 51,
+                damage: 24,
                 flag: 1
             }
         );
@@ -2322,8 +2322,9 @@ mod tests {
     }
 
     /// The victim's morph in the rating (`G/battle.cpp:281`): the 406's swing on
-    /// Alpha rates the plain DX 19 at source 24, but the morphed DX 65 at source 55,
-    /// so the evasion climbs and the draw-0 attack falls from 193 to 175.
+    /// Alpha (level 154, Defect B5 fixed) rates the plain DX 19 at source 64 (attack 171),
+    /// and the morphed DX 65 at source 90 (capped), so the evasion climbs and the draw-0
+    /// attack falls from 171 to 162.
     #[test]
     fn a_morphed_victims_dexterity_dulls_the_swings_rating() {
         let proto = wind_proto();
@@ -2332,12 +2333,12 @@ mod tests {
         let mut dice = Script::new(&[0]);
         assert_eq!(
             mob_calc_attack(&mut dice, &mob, Some(&points), None, false, false, 100),
-            193
+            171
         );
         let mut dice = Script::new(&[0]);
         assert_eq!(
             mob_calc_attack(&mut dice, &mob, Some(&points), Some(65), false, false, 100),
-            175
+            162
         );
     }
 
@@ -2423,7 +2424,7 @@ mod tests {
         let mob = monster(&proto, 1 << 3, AIFLAG_DEATHBLOW);
         // Alpha is a shaman: race 3 maps to job 3.
         let points = alpha();
-        // Roll 59 gives 25; the death blow's `number(1, 100)` hits and `number(0, 3)`
+        // Roll 59 gives 3; the death blow's `number(1, 100)` hits and `number(0, 3)`
         // rolls 3.
         let mut dice = Script::new(&[0, 10, 3]);
         let strike = hit(&mut dice, &mob, &points, false);
@@ -2431,7 +2432,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 100,
+                damage: 12,
                 flag: 1
             }
         );
@@ -2439,13 +2440,7 @@ mod tests {
         let mut dice = Script::new(&[0, 10, 1]);
         let strike = hit(&mut dice, &mob, &points, false);
         assert!(dice.0.is_empty());
-        assert_eq!(
-            strike.end,
-            PcHitEnd::Landed {
-                damage: 25,
-                flag: 1
-            }
-        );
+        assert_eq!(strike.end, PcHitEnd::Landed { damage: 3, flag: 1 });
     }
 
     #[test]
@@ -2453,7 +2448,7 @@ mod tests {
         let proto = boar_proto();
         let mob = monster(&proto, 1 << 0, 0);
         let points = alpha();
-        // Roll 70: `(int)(201 * 2.0) - 168 = 234`. The stun draw misses; the critical
+        // Roll 70: `(int)(174 * 2.0) - 168 = 180`. The stun draw misses; the critical
         // draw (`<= 5`) and the penetrate draw (`<= 20`) hit.
         let mut dice = Script::new(&[18, 50, 2, 10]);
         let strike = hit(&mut dice, &mob, &points, false);
@@ -2462,7 +2457,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 234 * 2 + 168,
+                damage: 180 * 2 + 168,
                 flag: DAMAGE_NORMAL | DAMAGE_CRITICAL | DAMAGE_PENETRATE,
             }
         );
@@ -2480,13 +2475,7 @@ mod tests {
         let mut dice = Script::new(&[0]);
         let strike = hit(&mut dice, &stone, &points, false);
         assert!(dice.0.is_empty());
-        assert_eq!(
-            strike.end,
-            PcHitEnd::Landed {
-                damage: 25,
-                flag: 1
-            }
-        );
+        assert_eq!(strike.end, PcHitEnd::Landed { damage: 3, flag: 1 });
     }
 
     #[test]
@@ -2501,13 +2490,7 @@ mod tests {
         let mut dice = Script::new(&[0, 0, 50]);
         let strike = hit(&mut dice, &mob, &points, false);
         assert!(dice.0.is_empty());
-        assert_eq!(
-            strike.end,
-            PcHitEnd::Landed {
-                damage: 25,
-                flag: 1
-            }
-        );
+        assert_eq!(strike.end, PcHitEnd::Landed { damage: 3, flag: 1 });
     }
 
     #[test]
@@ -2535,7 +2518,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 25 - 12,
+                damage: 3 - 1,
                 flag: 1
             }
         );
@@ -2579,7 +2562,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 25 * 90 / 100,
+                damage: 3 * 90 / 100,
                 flag: 1
             }
         );
@@ -2589,15 +2572,9 @@ mod tests {
         assert!(pc_hp_pct(&points) < 90);
         let mut dice = Script::new(&[0]);
         let strike = hit(&mut dice, &mob, &points, false);
-        assert_eq!(
-            strike.end,
-            PcHitEnd::Landed {
-                damage: 25,
-                flag: 1
-            }
-        );
-        // The mall defence never takes more than 200: roll 200 on 191 gives 574, and
-        // half of it would be 287.
+        assert_eq!(strike.end, PcHitEnd::Landed { damage: 3, flag: 1 });
+        // The mall defence never takes more than 200: roll 200 on 191 gives 454, and
+        // half of it would be 227.
         let mut proto = boar_proto();
         proto.damage_range = [200, 200];
         proto.enchants = [0; 6];
@@ -2609,7 +2586,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 574 - 200,
+                damage: 454 - 200,
                 flag: 1
             }
         );
@@ -2645,22 +2622,16 @@ mod tests {
         points.set_point(point::POINT_MALL_DEFBONUS, -50);
         let mut dice = Script::new(&[0]);
         let strike = hit(&mut dice, &mob, &points, false);
-        assert_eq!(
-            strike.end,
-            PcHitEnd::Landed {
-                damage: 25,
-                flag: 1
-            }
-        );
+        assert_eq!(strike.end, PcHitEnd::Landed { damage: 3, flag: 1 });
         // The defend bonus caps at 99.
         let mut points = alpha();
         points.set_point(point::POINT_NORMAL_HIT_DEFEND_BONUS, 150);
         let mut dice = Script::new(&[0]);
         let strike = hit(&mut dice, &mob, &points, false);
         assert_eq!(strike.end, PcHitEnd::Landed { damage: 0, flag: 1 });
-        // A pre-floor damage of exactly 3 draws no floor: roll 42 on 406 gives 3.
+        // A pre-floor damage of exactly 3 draws no floor: roll 59 on 406 gives 3.
         let mut proto = wind_proto();
-        proto.damage_range = [42, 42];
+        proto.damage_range = [59, 59];
         let mob = monster(&proto, 1 << 3, 0);
         let points = alpha();
         let mut dice = Script::new(&[0]);
@@ -2709,7 +2680,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 25 * 40 / 100,
+                damage: 3 * 40 / 100,
                 flag: 1
             }
         );
@@ -2744,7 +2715,7 @@ mod tests {
         assert!(dice.0.is_empty());
         assert!(matches!(strike.end, PcHitEnd::Landed { flag: 1, .. }));
         // The attacker's `ATTBONUS_HUMAN` and job share add up: roll 59 on 406 gives
-        // 193 before the bonus, 212 with 10 % human on a shaman victim whose own
+        // 171 before the bonus, 188 with 10 % human on a shaman victim whose own
         // warrior share stays out.
         let proto = wind_proto();
         let mut mob = monster(&proto, 1 << 3, 0);
@@ -2755,7 +2726,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 193 + 19 - 168,
+                damage: 171 + 17 - 168,
                 flag: 1
             }
         );
@@ -2767,7 +2738,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 193 + 20 - 168,
+                damage: 171 + 20 - 168,
                 flag: 1
             }
         );
@@ -2775,7 +2746,7 @@ mod tests {
 
     #[test]
     fn penetrate_adds_defence_before_the_bonuses_scale_it() {
-        // Roll 70 on 191 gives 234; the penetrate hit adds Alpha's 168 before the
+        // Roll 70 on 191 gives 180; the penetrate hit adds Alpha's 168 before the
         // defend bonus halves the sum, not the bare roll.
         let proto = boar_proto();
         let mob = monster(&proto, 1 << 0, 0);
@@ -2788,7 +2759,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: (234 + 168) * 50 / 100,
+                damage: (180 + 168) * 50 / 100,
                 flag: DAMAGE_NORMAL | DAMAGE_PENETRATE,
             }
         );
@@ -2807,7 +2778,7 @@ mod tests {
 
     #[test]
     fn a_range_shot_dodges_draws_and_resists_the_bow() {
-        // Roll 59 on 406 gives 25 past Alpha's 168 defence. A 20 % bow resist leaves 20,
+        // Roll 59 on 406 gives 3 past Alpha's 168 defence. A 20 % bow resist leaves 2,
         // and the dodge draw comes after the roll with no block draw.
         let proto = wind_proto();
         let mob = monster(&proto, 1 << 3, 0);
@@ -2824,7 +2795,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 25 * 80 / 100,
+                damage: 3 * 80 / 100,
                 flag: 1
             }
         );
@@ -2832,8 +2803,8 @@ mod tests {
 
     #[test]
     fn a_magic_shot_scales_resists_and_halves_its_chances() {
-        // Roll 59 on 406 gives 25 past Alpha's 168 defence. A 10 % magic percent scales
-        // to 28 (`+0.5` on 27.5), the 20 % magic resist leaves 22, and the 10 % critical
+        // Roll 59 on 406 gives 3 past Alpha's 168 defence. A 10 % magic percent scales
+        // to 3 (`+0.5` on 3.3), the 20 % magic resist leaves 2, and the 10 % critical
         // chance halves to 5: roll 5 lands doubled, roll 6 lands plain.
         let proto = wind_proto();
         let mut mob = monster(&proto, 1 << 3, 0);
@@ -2847,7 +2818,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: 22 * 2,
+                damage: 2 * 2,
                 flag: DAMAGE_NORMAL | DAMAGE_CRITICAL,
             }
         );
@@ -2855,18 +2826,12 @@ mod tests {
         let mut dice = Script::new(&[0, 5]);
         let strike = shot(&mut dice, &mob, &points, false, true);
         assert!(dice.0.is_empty());
-        assert_eq!(
-            strike.end,
-            PcHitEnd::Landed {
-                damage: 22,
-                flag: 1
-            }
-        );
+        assert_eq!(strike.end, PcHitEnd::Landed { damage: 2, flag: 1 });
     }
 
     #[test]
     fn a_magic_shot_takes_the_skill_bonuses_not_the_hit_ones() {
-        // Roll 59 on 406 gives 25 past Alpha's 168 defence. The skill damage bonus
+        // Roll 59 on 406 gives 3 past Alpha's 168 defence. The skill damage bonus
         // scales it, the skill defend bonus halves it, and the hit bonuses sit untouched.
         let proto = wind_proto();
         let mut mob = monster(&proto, 1 << 3, 0);
@@ -2881,7 +2846,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: (25 * 110 / 100) * 50 / 100,
+                damage: (3 * 110 / 100) * 50 / 100,
                 flag: 1
             }
         );
@@ -2889,8 +2854,8 @@ mod tests {
 
     #[test]
     fn a_monsters_hit_bonus_scales_before_the_defend_bonus() {
-        // Roll 59 on 406 gives 193, less Alpha's 168 defence; a 10 % hit bonus scales
-        // the 25 first, then the defend bonus halves the scaled sum.
+        // Roll 59 on 406 gives 171, less Alpha's 168 defence; a 10 % hit bonus scales
+        // the 3 first, then the defend bonus halves the scaled sum.
         let proto = wind_proto();
         let mut mob = monster(&proto, 1 << 3, 0);
         mob.fight.add(point::POINT_NORMAL_HIT_DAMAGE_BONUS, 10);
@@ -2901,7 +2866,7 @@ mod tests {
         assert_eq!(
             strike.end,
             PcHitEnd::Landed {
-                damage: (193 - 168) * 110 / 100 * 50 / 100,
+                damage: (171 - 168) * 110 / 100 * 50 / 100,
                 flag: 1
             }
         );
@@ -3253,20 +3218,14 @@ mod tests {
         let mob = monster(&proto, 1 << 3, 0);
         let points = alpha();
         // Draw 0: `number(59, 110)` rolls 59, doubled to 118; the grade 140 less
-        // the doubled level 70 is 188; the rating 0.6563... takes it to 193; no
+        // the doubled level 70 is 188; the rating 0.5357... takes it to 171; no
         // party, percent, HUMAN, job or element share moves it; less the defence
-        // 168 is 25, and `attMul` rounds it to 25.
+        // 168 is 3, and `attMul` rounds it to 3.
         let mut dice = Script::new(&[0]);
         let strike = hit(&mut dice, &mob, &points, false);
         assert!(dice.0.is_empty());
-        assert_eq!(strike.reflected_base, Some(25));
-        assert_eq!(
-            strike.end,
-            PcHitEnd::Landed {
-                damage: 25,
-                flag: 1
-            }
-        );
+        assert_eq!(strike.reflected_base, Some(3));
+        assert_eq!(strike.end, PcHitEnd::Landed { damage: 3, flag: 1 });
     }
 
     #[test]
@@ -3277,9 +3236,9 @@ mod tests {
         let mut dice = Script::new(&[0]);
         let strike = hit_with(&mut dice, &mob, &points, false, 200);
         assert!(dice.0.is_empty());
-        // The rate multiplies the attack 193 to 386 before the defence: 386 - 168
-        // is 218, and `attMul` rounds it to 218.
-        assert_eq!(strike.reflected_base, Some(218));
+        // The rate multiplies the attack 171 to 342 before the defence: 342 - 168
+        // is 174, and `attMul` rounds it to 174.
+        assert_eq!(strike.reflected_base, Some(174));
     }
 
     #[test]
@@ -3293,13 +3252,13 @@ mod tests {
         let strike = hit(&mut dice, &mob, &points, false);
         assert!(dice.0.is_empty());
         assert_eq!(strike.end, PcHitEnd::Blocked);
-        assert_eq!(strike.reflected_base, Some(25));
+        assert_eq!(strike.reflected_base, Some(3));
         let points = alpha();
         let mut dice = Script::new(&[0]);
         let strike = hit(&mut dice, &mob, &points, true);
         assert!(dice.0.is_empty());
         assert_eq!(strike.end, PcHitEnd::Down);
-        assert_eq!(strike.reflected_base, Some(25));
+        assert_eq!(strike.reflected_base, Some(3));
     }
 
     #[test]

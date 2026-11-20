@@ -58563,3 +58563,78 @@ passed, 0 failed in 46 targets; with it 5,775 passed, 0 failed in 46 targets (49
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
 No test failed on the first run. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`,
 0 `codec`, of 2,332 rows (100% closed); 607 scenarios. No ADR changed.
+
+## 740. Package C10 (all seven reproduced legacy Defects fixed under ADR-0008, and register cleanup)
+
+Closes **Package C10** from `docs/STATUS.md`: fixes all seven legacy mistakes that were previously
+reproduced, adds regression tests for each, updates `docs/STATUS.md` so no register row says
+"reproduced" or "provisional", and records the ADR-0004 quest-source edit in `legacy/README.md`.
+
+- **D1 — weighted group-group draw (`G/mob_manager.cpp:287-293`, `G/mob_manager.h:58-83`):**
+  - `gamedata/src/mob_group.rs`: `LoadGroupGroup` now preserves each member's parsed `prob` weight
+    (default `1`, non-positive weights skipped, matching `CMobGroupGroup::AddMember`) in
+    `MobGroups::group_group(vnum) -> Option<&[(u32, u32)]>`.
+  - `world/src/npc.rs`: `Spawner::spawn_group_group` draws `number(1, total_weight)` and selects the
+    first member whose cumulative weight covers the draw. Updated `a_group_group_picks_by_cumulative_weight`.
+- **D4 — group and group-group regen entries at a single point (`G/regen.cpp:346-353`):**
+  - Owner regen-file audit: across all `regen.txt`, `npc.txt`, `boss.txt`, and `stone.txt` files
+    under `legacy/gamedata/locale/europe/map` and `data/dungeon`, **0** `g`/`ga` (`REGEN_TYPE_GROUP`)
+    entries have `sx == 0 && sy == 0`, and **113** `r` (`REGEN_TYPE_GROUP_GROUP`) entries have
+    `sx == 0 && sy == 0`, all in `metin2_map_t1/npc.txt` (an unhosted arena map, vnums `2595` (91)
+    and `1093` (22), both mob vnums in `mob_proto` rather than group-group vnums).
+  - `world/src/npc.rs`: `spawn_map_regen` routes `RegenKind::Group` and `RegenKind::GroupGroup` to
+    `spawn_group` / `spawn_group_group` even when `sx == ex && sy == ey` instead of calling
+    `spawn_mob` with the group vnum. Updated `a_group_at_a_point_spawns_its_group`.
+- **D5 — clear `AFF_SPAWN` after the first show (`G/char.cpp:1886-1887`, `:7701`):**
+  - `prodomo/src/game_state.rs`, `prodomo/src/game_state/regen.rs`, and
+    `prodomo/src/game_state/polymorph.rs`: `stand_npcs` clears `spawn_motion` on boot-spawned NPCs,
+    `stand_runtime` clears `spawn_motion` on runtime-spawned monsters/stones immediately after their
+    initial `Show` broadcast, and `reencode_with_spawn` clears `AFF_SPAWN` immediately after the
+    first polymorph re-show broadcast so late viewers never see a stale spawn motion.
+  - Added `prodomo::game_state::regen::tests::runtime_stone_clears_aff_spawn_after_its_first_show`,
+    updated `prodomo::game_state::polymorph::tests::a_late_viewer_sees_the_race_without_the_spawn_affect`
+    and `a_map_shows_its_monsters_and_stones_in_view`.
+- **Worn-piece attribute GM commands (`/attr_full_set`, `/change_attr`, `/add_attr`, `/change_rare_attr`, `/add_rare_attr`):**
+  - `prodomo/src/game_state/full_set.rs` and `prodomo/src/game_state/gm_lines.rs`: `attr_full_set`
+    and `roll_weapon_attributes` now call `unequip_points` before writing new attributes onto a
+    worn item and `equip_points` afterwards, emitting the recomputed `GC_POINT_CHANGE` and
+    `GC_CHARACTER_UPDATE` records so stats apply immediately and unequipping leaves no drift.
+  - Added `prodomo::game_state::full_set::tests::attr_full_set_recomputes_worn_points_and_unequip_restores_them`
+    and updated `a_full_set_kits_forces_and_masters_over_the_wire`.
+- **Revive herb spent only when reviving the giver's own dead horse (`G/char_item.cpp:9483-9499`):**
+  - `prodomo/src/game_state/horse_summon.rs`: `horse_gift` checks that `target` is a dead horse
+    owned by the giver (`rider == Some(vid) && dead_due.is_some()`) before reviving or spending the
+    herb; offering a revive herb to a live horse or another player's horse refuses with `[LS;452]`
+    and spends nothing. Verified in `a_horse_is_summoned_dies_revives_and_goes`.
+- **`guild_war_bet.lua:39` format-string fix (ADR-0004):**
+  - `legacy/gamedata/locale/europe/quest/_basic/guild/guild_war_bet.lua` line 39 changed from
+    `say(string.format(gameforge.guild_war_bet._80_say, name1.." "..name2.." "..g[s][4]))` to
+    `say(string.format(gameforge.guild_war_bet._80_say, name1, name2, g[s][4]))` (2,635 bytes SHA-256
+    `e8630164031d54502d4758991ff468d9f408dbe93dec97e668f02c1f2ada8861` -> 2,597 bytes SHA-256
+    `11086839bcd4a915006449afcc1141fb0dfc311fd0c706d9c8bb4bcbf276e1e2`; recorded in `legacy/README.md`).
+  - Renamed `a_bet_quest_lists_the_reserved_war_and_errors_where_legacy_errors` to
+    `a_bet_quest_lists_the_reserved_war_and_places_a_bet` (and updated `.scratch/parity/quest-api.md`),
+    verifying the full bet dialog completes and inserts `guild_war_bet` (`gold = 30000`, `guild = 2`,
+    `bet_to = 30000`).
+- **B5 — victim evasion uses victim level (`G/battle.cpp:282`):**
+  - `world/src/character/combat.rs`, `world/src/character/combat/{melee,mob_melee}.rs`, and
+    `prodomo/src/game_state/{fight,mob_skill,pc_skill}.rs`: added `victim_level` to `AttackRatingInput`
+    (and `level` to `PlayerVictim` / `MeleeVictim`), computing victim evasion from `victim_level`
+    rather than `attacker_level`.
+  - Added `world/tests/combat.rs::attack_rating_uses_the_victims_level_not_the_attackers`, updated
+    the affected unit expectations in `world/src/character/combat/{melee,mob_melee}.rs`, and updated
+    `PUNCH_ON_THE_DOG` (`322` -> `329`) and `a_morphed_attacker_adds_its_morphs_range_to_the_swing`
+    (`228..=229` -> `234 | 236`).
+- **Register cleanup (`docs/STATUS.md`):** recorded all seven C10 fixes in the Defect and
+  Divergence registers, marked D1 and B5 as landed in ledger 740 in the owner-review table, and
+  removed the word `provisional` from all settled register rows.
+
+Gates (2026-11-20), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,778
+passed, 0 failed in 46 targets; with it 5,778 passed, 0 failed in 46 targets (492 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+First-run failure: 1 scenario failed on the first full run
+(`a_morphed_attacker_adds_its_morphs_range_to_the_swing`, still pinned to B5-buggy 228..=229 instead
+of B5-fixed 234|236); updated and verified 8/8 in parallel, then Run 2 passed 5,778/0. Parity:
+1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows (100% closed);
+607 scenarios. No ADR changed.

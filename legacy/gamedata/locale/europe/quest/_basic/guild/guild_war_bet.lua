@@ -36,7 +36,7 @@ quest guild_war_bet begin
 						local name2 = guild.get_name(g[s][3])
 
 						say_title(gameforge.guild_war_bet._40_sayTitle)
-						say(string.format(gameforge.guild_war_bet._80_say, name1.." "..name2..gameforge.guild_war_bet._45_say..g[s][4]))
+						say(string.format(gameforge.guild_war_bet._80_say, name1, name2, g[s][4]))
 						local guild_s =  select(name1, name1)
 
 						if guild_s != 3 then

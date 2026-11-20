@@ -411,6 +411,7 @@ fn calc_arrow_core(
         attacker_dexterity,
         attacker_level: i32::from(attacker.level()),
         victim_dexterity: victim.fight.point(point::POINT_DX),
+        victim_level: i32::from(victim.fight.level),
         ignore_target_rating: false,
     });
     let rolled = number(dice, bow.values[3], bow.values[4])
@@ -483,6 +484,7 @@ fn calc_melee_core<V: MeleeVictim + ?Sized>(
         attacker_dexterity,
         attacker_level: level,
         victim_dexterity: victim.dexterity(),
+        victim_level: victim.level(),
         ignore_target_rating,
     });
     // `Item_GetDamage`: the weapon's values 3 and 4; an unarmed player rolls 0 to 0. A
@@ -568,6 +570,8 @@ fn melee_attack(input: &MeleeAttack) -> i32 {
 pub trait MeleeVictim {
     /// `GetPolymorphPoint(POINT_DX)`: the target rating's share.
     fn dexterity(&self) -> i32;
+    /// `GetLevel()`: the target evasion's level share (Defect B5 fixed).
+    fn level(&self) -> i32;
     /// `GetPoint(POINT_DEF_GRADE) * (100 + GetPoint(POINT_DEF_BONUS)) / 100`.
     fn defence(&self) -> i32;
     /// `CalcAttBonus` for a player attacker.
@@ -582,6 +586,8 @@ pub struct PlayerVictim {
     /// morphed without keeping its stats, else `GetPoint(POINT_DX)`. The caller,
     /// which owns the mob table and the power, read it.
     pub dexterity: i32,
+    /// `GetLevel()` of the victim (Defect B5 fixed).
+    pub level: i32,
     /// `GetPoint(POINT_DEF_GRADE)`.
     pub def_grade: i32,
     /// `GetPoint(POINT_DEF_BONUS)`.
@@ -625,6 +631,9 @@ impl MeleeVictim for Npc {
         self.fight.point(point::POINT_DX)
     }
 
+    fn level(&self) -> i32 {
+        i32::from(self.fight.level)
+    }
     fn defence(&self) -> i32 {
         self.fight
             .point(point::POINT_DEF_GRADE)
@@ -642,6 +651,9 @@ impl MeleeVictim for PlayerVictim {
         self.dexterity
     }
 
+    fn level(&self) -> i32 {
+        self.level
+    }
     fn defence(&self) -> i32 {
         self.def_grade
             .wrapping_mul(100_i32.wrapping_add(self.def_bonus))
@@ -1599,6 +1611,7 @@ mod tests {
         let mut dice = Script::new(&[1; 40]);
         let victim = |defence: i32, resists: [i32; 4], dexterity: i32| PlayerVictim {
             dexterity,
+            level: i32::from(attacker.level()),
             def_grade: defence,
             def_bonus: 0,
             resists,
@@ -1750,22 +1763,22 @@ mod tests {
     }
 
     #[test]
-    fn alpha_punches_the_dog_for_322_with_one_draw() {
+    fn alpha_punches_the_dog_for_329_with_one_draw() {
         let points = alpha();
         assert_eq!(points.get_point(point::POINT_ATT_GRADE), 344);
         let mut dice = Script::new(&[12_345]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &dog(), None),
-            322
+            329
         );
         assert_eq!(dice.left(), 0);
     }
 
     /// The morphed attacker's arms (`G/battle.cpp:527-541`, `G/char.cpp:3698-3699`): at
     /// power 41 the dog's dexterity 6 adds 2 to the attacker's 19, so the rating reads
-    /// source 65, and the dog's range 20..=24 adds 8..=9 to the unarmed 0..=0. The
-    /// draw 0 rolls the 8 (333), the draw 1 the 9 (335); the grade is the plain 344,
-    /// as no recompute runs here.
+    /// source 65 (with the dog's own level 1, Defect B5 fixed), and the dog's range
+    /// 20..=24 adds 8..=9 to the unarmed 0..=0. The draw 0 rolls the 8 (343), the draw 1
+    /// the 9 (345); the grade is the plain 344, as no recompute runs here.
     #[test]
     fn a_morphed_punch_adds_the_rows_scaled_range_and_dexterity() {
         let points = alpha();
@@ -1776,13 +1789,13 @@ mod tests {
         let mut dice = Script::new(&[0]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &dog(), Some(poly)),
-            333
+            343
         );
         assert_eq!(dice.left(), 0);
         let mut dice = Script::new(&[1]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &dog(), Some(poly)),
-            335
+            345
         );
         assert_eq!(dice.left(), 0);
     }
@@ -1790,7 +1803,7 @@ mod tests {
     /// The morph skips the weapon gate but keeps the weapon's own roll and refine
     /// (`G/battle.cpp:494`, `:530`): a worn rod neither refuses nor reads its kind,
     /// so the dog's 8..=9 rides the rod's 0..=0 with no refine, and the draw 0 lands
-    /// the same 333.
+    /// the same 343.
     #[test]
     fn a_morphed_rod_swings_past_the_weapon_gate() {
         let points = alpha();
@@ -1802,16 +1815,16 @@ mod tests {
         let mut dice = Script::new(&[0]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, Some(&rod), &dog(), Some(poly)),
-            333
+            343
         );
         assert_eq!(dice.left(), 0);
     }
 
     /// An unknown morph vnum skips the range but still bypasses the gate and reads
     /// the plain dexterity (`pMob` missing, `:533-541`, `G/char.cpp:3683-3698`): the
-    /// unarmed roll is 0..=0 at the plain rating, the punch's own 322.
+    /// unarmed roll is 0..=0 at the plain rating, the punch's own 329.
     #[test]
-    fn an_unknown_morph_vnum_punches_the_plain_322() {
+    fn an_unknown_morph_vnum_punches_the_plain_329() {
         let points = alpha();
         let poly = PolyAttack {
             power: 41,
@@ -1820,7 +1833,7 @@ mod tests {
         let mut dice = Script::new(&[12_345]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &dog(), Some(poly)),
-            322
+            329
         );
         assert_eq!(dice.left(), 0);
     }
@@ -1837,7 +1850,7 @@ mod tests {
             hit.events,
             [
                 HitEvent::DamageInfo {
-                    damage: 322,
+                    damage: 329,
                     flag: DAMAGE_NORMAL
                 },
                 HitEvent::VictimHp
@@ -1852,22 +1865,22 @@ mod tests {
         let points = alpha();
         let mut victim = dog();
         victim.fight.add(point::POINT_DEF_GRADE, 330);
-        // 332 - 340 is below 0, so 0, then the low roll: 4 % 5 + 1.
+        // 339 - 340 is below 0, so 0, then the low roll: 4 % 5 + 1.
         let mut dice = Script::new(&[0, 4]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &victim, None),
             5
         );
         assert_eq!(dice.left(), 0);
-        // 332 - 329 = 3 is not below 3.
-        victim.fight.add(point::POINT_DEF_GRADE, -11);
+        // 339 - 336 = 3 is not below 3.
+        victim.fight.add(point::POINT_DEF_GRADE, -4);
         let mut dice = Script::new(&[0]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &victim, None),
             3
         );
         assert_eq!(dice.left(), 0);
-        // 332 - 330 = 2 is.
+        // 339 - 337 = 2 is.
         victim.fight.add(point::POINT_DEF_GRADE, 1);
         let mut dice = Script::new(&[0, 0]);
         assert_eq!(
@@ -1927,12 +1940,12 @@ mod tests {
             WEAPON_MOUNT_SPEAR,
         ] {
             // A roll of 10 + 7 % 11 = 17 doubled; 344 + 34 - 308 = 70, times 274/300 less the
-            // evasion is 47, plus 308 and twice the refine of 3 is 361, less 10.
+            // evasion (dog lv 1, B5 fixed) is 61, plus 308 and twice the refine of 3 is 375, less 10.
             let sword = weapon(ITEM_WEAPON, sub_type, [0, 0, 0, 10, 20, 3]);
             let mut dice = Script::new(&[7]);
             assert_eq!(
                 calc_melee_damage(&mut dice, &points, Some(&sword), &dog(), None),
-                351,
+                365,
                 "{sub_type}"
             );
         }
@@ -1995,8 +2008,8 @@ mod tests {
     }
 
     /// `CalcAttBonus` runs on the attack before the defence comes off (`G/battle.cpp:580-595`):
-    /// 10 % more against a monster makes Alpha's 332 into 365, and less the dog's 10 that is
-    /// 355. The bonus on the 322 the defence leaves would make 354.
+    /// 10 % more against a monster makes Alpha's 339 into 372, and less the dog's 10 that is
+    /// 362. The bonus on the 329 the defence leaves would make 361.
     #[test]
     fn the_attack_bonus_comes_before_the_defence() {
         let mut points = alpha();
@@ -2004,7 +2017,7 @@ mod tests {
         let mut dice = Script::new(&[0]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &dog(), None),
-            355
+            362
         );
         assert_eq!(dice.left(), 0);
     }
@@ -2149,17 +2162,17 @@ mod tests {
             premium: (0, 0),
             shop_unlocked: 0,
         });
-        // Map 373 asks for 15 strength; 10 halves the 322.
+        // Map 373 asks for 15 strength; 10 halves the 329.
         let mut dice = Script::new(&[0]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &dog(), None),
-            161
+            164
         );
         points.set_point(point::POINT_SUNGMA_STR, 15);
         let mut dice = Script::new(&[0]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &dog(), None),
-            322
+            329
         );
     }
 
@@ -2201,11 +2214,11 @@ mod tests {
         assert_eq!(hit.events[9], HitEvent::Fly(FLY_SP_SMALL));
         assert!(matches!(&hit.events[10], HitEvent::Attacker(r) if r[0].kind == 7));
         assert_eq!(hit.events[11], HitEvent::Chat(11));
-        // 322 doubled, plus the defence of 10; the steal took 12 of 126 first.
+        // 329 doubled, plus the defence of 10; the steal took 12 of 126 first.
         assert_eq!(
             hit.events[12],
             HitEvent::DamageInfo {
-                damage: 654,
+                damage: 668,
                 flag: DAMAGE_NORMAL | DAMAGE_CRITICAL | DAMAGE_PENETRATE
             }
         );
@@ -2245,7 +2258,7 @@ mod tests {
             hit.events,
             [
                 HitEvent::DamageInfo {
-                    damage: 322,
+                    damage: 329,
                     flag: DAMAGE_NORMAL
                 },
                 HitEvent::VictimHp
@@ -2310,7 +2323,7 @@ mod tests {
         let mut dice = Script::new(&[0, 2]);
         let damage = calc_melee_damage(&mut dice, &points, None, &dog(), None);
         let landed = normal_attack_affect(&mut dice, &points, &dog());
-        assert_eq!((damage, dice.left()), (322, 0));
+        assert_eq!((damage, dice.left()), (329, 0));
         assert!(landed.poisoned);
         // The gate reads the whole point, so a chance whose low byte is 0 still draws.
         points.set_point(point::POINT_POISON_PCT, 256);
@@ -2335,38 +2348,38 @@ mod tests {
         victim.fight.add(point::POINT_RESIST_COMBAT, 20);
         victim.hp = 113;
         victim.max_hp = 126;
-        // 113 of 126 is 89 %: only the defend bonus, 322 * 90 / 100.
+        // 113 of 126 is 89 %: only the defend bonus, 329 * 90 / 100.
         let hit = strike(&mut Script::new(&[0, 1]), &mut points, &mut victim);
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 289,
+                damage: 296,
                 flag: 1
             }
         );
         victim.hp = 114;
-        // 90 %: 322 * 70 / 100.
+        // 90 %: 329 * 70 / 100.
         let hit = strike(&mut Script::new(&[0, 1]), &mut points, &mut victim);
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 225,
+                damage: 230,
                 flag: 1
             }
         );
         victim.fight.add(point::POINT_NORMAL_HIT_DEFEND_BONUS, 200);
         victim.hp = 126;
-        // Each is held to 99: 322 * (100 - 99 - 20) / 100 is -61, and -61 + 0.5 truncates to
-        // -60. The hit points take a negative damage as a gain, held to the maximum.
+        // Each is held to 99: 329 * (100 - 99 - 20) / 100 is -62, and -62 + 0.5 truncates to
+        // -61. The hit points take a negative damage as a gain, held to the maximum.
         let hit = strike(&mut Script::new(&[0, 1]), &mut points, &mut victim);
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: -60,
+                damage: -61,
                 flag: 1
             }
         );
-        assert_eq!(hit.struck, Struck::Landed { damage: -60 });
+        assert_eq!(hit.struck, Struck::Landed { damage: -61 });
         assert_eq!(victim.hp, 126);
         // At 120 of 126 the gain is held to the 6 missing; below 90 % the resist is not taken.
         victim.hp = 120;
@@ -2388,7 +2401,7 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 483,
+                damage: 493,
                 flag: 1
             }
         );
@@ -2399,7 +2412,7 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 386,
+                damage: 394,
                 flag: 1
             }
         );
@@ -2409,17 +2422,17 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 290,
+                damage: 297,
                 flag: 1
             }
         );
         victim.fight.add(point::POINT_MALL_DEFBONUS, 90);
-        // 322 off would be all of it; at most 200 comes off.
+        // 329 off would be all of it; at most 200 comes off.
         let hit = strike(&mut Script::new(&[0, 1]), &mut points, &mut victim);
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 122,
+                damage: 129,
                 flag: 1
             }
         );
@@ -2429,7 +2442,7 @@ mod tests {
     fn a_foreign_empires_map_takes_a_tenth() {
         let mut points = alpha();
         let mut victim = dog();
-        for (empire, map, damage) in [(1, 21, 289), (2, 21, 322), (1, 1, 322), (0, 21, 322)] {
+        for (empire, map, damage) in [(1, 21, 296), (2, 21, 329), (1, 1, 329), (0, 21, 329)] {
             victim.hp = 1000;
             victim.max_hp = 1000;
             let mut striker = Striker {
@@ -2468,7 +2481,7 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 322,
+                damage: 329,
                 flag: 1
             }
         );
@@ -2500,7 +2513,7 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 322,
+                damage: 329,
                 flag: 1
             }
         );
@@ -2509,7 +2522,7 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 161,
+                damage: 164,
                 flag: 1
             }
         );
@@ -2519,7 +2532,7 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 322,
+                damage: 329,
                 flag: 1
             }
         );
@@ -2530,7 +2543,7 @@ mod tests {
         assert_eq!(
             hit.events[0],
             HitEvent::DamageInfo {
-                damage: 322,
+                damage: 329,
                 flag: 1
             }
         );
@@ -2838,14 +2851,14 @@ mod tests {
                 common::dragon::DRAGON_STONE_ROWS],
             dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
         };
-        // 322 doubles to 644; the dog has 126.
+        // 329 doubles to 658; the dog has 126.
         let hit = strike_npc(&mut dice, &mut striker, &mut victim, false);
         assert_eq!(dice.left(), 0);
         assert_eq!(
             hit.events,
             [
                 HitEvent::DamageInfo {
-                    damage: 644,
+                    damage: 658,
                     flag: DAMAGE_NORMAL
                 },
                 HitEvent::VictimHp
@@ -2972,13 +2985,13 @@ mod tests {
         let mut dice = Script::new(&[12_345]);
         assert_eq!(
             calc_melee_damage(&mut dice, &points, None, &victim, None),
-            322
+            329
         );
         assert_eq!(dice.left(), 0);
         let mut dice = Script::new(&[12_345]);
         assert_eq!(
             calc_melee_skill_atk(&mut dice, &points, None, &victim, None),
-            332
+            339
         );
         assert_eq!(dice.left(), 0);
     }
@@ -3053,25 +3066,25 @@ mod tests {
         // Bow values 3/4 pin the roll (10 * 2), the arrow's value 3 adds 5.
         let bow = weapon(ITEM_WEAPON, WEAPON_BOW, [0, 0, 0, 10, 10, 0]);
         let arrow = weapon(ITEM_WEAPON, WEAPON_ARROW, [0, 0, 0, 5, 0, 0]);
-        // Point blank: 344 grade + 25 roll through the 0.683 rating, less the
-        // dog's 10 defence: 339.
+        // Point blank: 344 grade + 25 roll through the 0.8739 rating (B5 fixed), less the
+        // dog's 10 defence: 351.
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
             calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 0, None),
-            339
+            351
         );
         assert_eq!(dice.left(), 0);
-        // At 700: the gap is 2, the percent 90, so 305.
+        // At 700: the gap is 2, the percent 90, so 315.
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
             calc_arrow_damage(&mut dice, &points, &bow, &arrow, &victim, 700, None),
-            305
+            315
         );
-        // The skill variant ignores the defence: 349.
+        // The skill variant ignores the defence: 361.
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
             calc_arrow_skill_atk(&mut dice, &points, &bow, &arrow, &victim, 0, None),
-            349
+            361
         );
         // A sword is no bow: the shot reads 0 before any draw.
         let sword = weapon(ITEM_WEAPON, WEAPON_SWORD, [0, 0, 0, 10, 10, 0]);
@@ -3081,21 +3094,21 @@ mod tests {
             0
         );
         // The defence carries the *attacker's* DEF_BONUS, not the dog's: +100
-        // doubles the subtracted 10 to 20 (329), while a +100 on the dog's own
-        // fight changes nothing (339).
+        // doubles the subtracted 10 to 20 (341), while a +100 on the dog's own
+        // fight changes nothing (351).
         let mut boosted = alpha();
         boosted.set_point(point::POINT_DEF_BONUS, 100);
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
             calc_arrow_damage(&mut dice, &boosted, &bow, &arrow, &victim, 0, None),
-            329
+            341
         );
         let mut hard = dog();
         hard.fight.add(point::POINT_DEF_BONUS, 100);
         let mut dice = Script::new(&[9_999]);
         assert_eq!(
             calc_arrow_damage(&mut dice, &points, &bow, &arrow, &hard, 0, None),
-            339
+            351
         );
     }
 

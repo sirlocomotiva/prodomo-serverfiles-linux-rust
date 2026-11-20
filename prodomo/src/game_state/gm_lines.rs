@@ -38,7 +38,8 @@ use protocol::gc_vid::GcSpecialEffect;
 use protocol::item_pos::ItemPos;
 use world::character::{
     add_rare_attribute, add_rolled_attribute, change_attribute, change_rare_attribute,
-    force_worn_attribute, set_item_socket, ItemChange, MoveDone, MoveKind,
+    equip_points, force_worn_attribute, recompute_points, set_item_socket, unequip_points, Gear,
+    ItemChange, MoveDone, MoveKind,
 };
 use world::item::{ItemId, ATTRIBUTES, SOCKETS};
 
@@ -808,8 +809,9 @@ impl GameState {
     /// `AddAttribute()`), `do_change_rare_attr` (`:3942-3947`, `ChangeRareAttribute()`) and
     /// `do_add_rare_attr` (`:3949-3954`, `AddRareAttribute()`). Each clear is silent; each
     /// write after it updates the client's cell, and a normal change of an item that had
-    /// attributes then counts itself in socket 3. The points the weapon gives are not
-    /// recomputed, as legacy does not, like `/attr_full_set`.
+    /// attributes then counts itself in socket 3. Package C10 (ADR-0008): the weapon's points are
+    /// taken off before the attribute write and put back + recomputed after, so no stat stays
+    /// behind or goes negative when the weapon is later taken off.
     fn roll_weapon_attributes(&mut self, vid: Vid, line: GmLine) -> Option<GmRows> {
         let character = self.characters.find_by_vid(vid).ok()?;
         let weapon = character
@@ -877,15 +879,30 @@ impl GameState {
     /// `SetAttribute` update per write, and the socket count, then answers the rows.
     fn replay_worn_writes(&mut self, vid: Vid, line: WornWrites) -> Option<GmRows> {
         let mover = self.own_mover(vid)?;
+        let wear = common::enums::EWearPositions::Weapon as u16;
         let character = self.characters.find_by_vid_mut(vid).ok()?;
         let pid = character.player_id();
-        let items = character.items_mut();
         let id = line.id;
+        let (items, points) = character.items_and_points_mut();
+        let before_item = items.item(id).cloned();
         let mut done = MoveDone {
             kind: MoveKind::Attributed,
             records: Vec::new(),
             changes: Vec::new(),
         };
+        let mut gear = points.map(|points| Gear {
+            points,
+            protos: &self.protos,
+            groups: &self.item_groups,
+            dice: &mut self.dice,
+            recently_fought: false,
+            first_use_now: Some(Self::global_time()),
+        });
+        if let (Some(gear), Some(before_item)) = (gear.as_mut(), before_item.as_ref()) {
+            if let Ok(off) = unequip_points(gear, items, wear, before_item) {
+                done.records.extend(off);
+            }
+        }
         for index in line.cleared {
             let _ = items.set_attribute(id, index, ItemAttribute::default());
         }
@@ -908,6 +925,14 @@ impl GameState {
             done.records.extend(written.records);
             done.changes.extend(written.changes);
         }
+        if let (Some(gear), Some(after_item)) = (gear.as_mut(), items.item(id).cloned()) {
+            if let Ok(on) = equip_points(gear, items, wear, &after_item) {
+                done.records.extend(on);
+            }
+            done.records
+                .extend(recompute_points(gear, items, after_item.vnum));
+        }
+        let updated_points = character.points().cloned();
         let rolled = MovedItems::new(pid, vid.raw(), done, mover, &self.protos, &self.locale);
         for record in rolled.records {
             let _sent = self.write_to_client(vid, record);
@@ -918,7 +943,7 @@ impl GameState {
             cleared_skills: Vec::new(),
             gold: 0,
             monarch: None,
-            points: None,
+            points: updated_points,
             quickslots: None,
             buildings: Vec::new(),
             account: None,

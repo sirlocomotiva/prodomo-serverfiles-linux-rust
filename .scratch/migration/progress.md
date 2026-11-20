@@ -6,14 +6,14 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Where it stands
 
-- The last section is **ledger 739**, closing **Package C1** (Pulse budget timing, overrun log, p99 summary, and 8-client Channel 1 load run), **Package C2** (1M-instruction Lua hook limit in `quest`), and **Package C3** (`max_client_outbox`, `login_deadline_seconds`, and per-phase pre-login frame caps). Package B
+- The last section is **ledger 740**, closing **Package C10** (all seven reproduced legacy Defects fixed under ADR-0008: D1, D4, D5, worn-piece GM attr recompute, revive herb guard, `guild_war_bet.lua:39`, and B5 `victim_level`; all `reproduced` and `provisional` markers cleared from `docs/STATUS.md` registers). Package B
   so far: 687 (sibling vnums, the gold bar cap), 688 (the ability potions), 689 (the apply types),
   690 (the arena's potion gate), 691 (the ward and aid climb gate, and the refused `/setskill`
   sending byte 76), 692 (each skill type's point on a climb and a forget), 693 (each skill's hit cap on one victim), 694 (the master arms of a climb by point), 695 (each automatic potion's kind of row), 696 (the basic books and two book-read bugs), 697 (the passive books' ladder), 698 (the sibling capes and peach), 699 (the white flag and the treasure box), 700 (the zen bean), 701 (the no-op item types), 702 (the seasonal boxes), 703 (a unique worn by its use), 704 (the ramadan candy and the marriage ring), 705 (a fish's use), 706 (the wearable types worn by their use), 707 (a use refused by its limits), 708 (the craft, mining and horse books), 709 (the shaman unlock line), 710 (a use with no arm), 711 (the bonus change and the order of a scroll's records), 712 (the fifth bonus, the rare change and the belt jewel), 713 (the pet and mount reinforcements), 714 (the giftbox with no group and the element change), 715 (the stone scroll and the shaman unlock), 716 (the tuning and detachment scrolls), 717 (the metin stone failure and wear checks), 718 (the recipe refusal), 719 (the plain blend), 720 (the guild skills as personal skills), 721 (the unworn dragon-soul stone), 722 (the capped bonuses and immunities), 723 (the item-use quest and special checks), 724 (the 508xx potions and potion-nodelay), 725 (the detectors and the portal payment), 726 (the clock-fix scenarios), 727 (the horse skills and `skill-arms.md` closure), 728 (the fish mind pill, dragon-soul pull-out and `item-use.md` closure). Before them: 686 (the tail made countable: three generated arm tables and every `partial` and `missing` note ending in `Left:`), 685 (the scenario timing), 684 (Rust 1.100.0), 683 (the test hygiene), 682 (the cleanup), 681 (ADR-0008), 680 (the owner's answers) and 679 (the direction review).
 - Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows.
   **0 open rows left** (all 12 inventory files and B1–B9 are closed).
-- Tests: 5,775 pass in 46 targets with `DATABASE_URL`; 607 are scenarios.
-- **What is next is in `docs/STATUS.md`, "Next steps"**: package C (hardening, C4, C7, C9–C12; C1–C3, C5, C6, C8 done).
+- Tests: 5,778 pass in 46 targets with `DATABASE_URL`; 607 are scenarios.
+- **What is next is in `docs/STATUS.md`, "Next steps"**: package C (hardening, C4, C7, C9, C11, C12; C1–C3, C5, C6, C8, C10 done).
 
 ## Where things are
 
@@ -63,4 +63,4 @@ file is rewritten after every section and goes into the section's commit.
 
 ## Left running or uncommitted
 
-Nothing is left running. Ledger 739 is committed and pushed.
+Nothing is left running. Ledger 740 is committed and pushed.

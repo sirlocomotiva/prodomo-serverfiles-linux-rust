@@ -1478,7 +1478,7 @@ impl GameState {
     /// Stands one map's NPCs up on one Channel: each enters the map's view where a sectree
     /// holds it, and the warp and goto NPCs among them start their event. The NPCs a map held
     /// before leave it.
-    fn stand_npcs(&mut self, channel: u8, region: &MapRegion, npcs: MapNpcs) {
+    fn stand_npcs(&mut self, channel: u8, region: &MapRegion, mut npcs: MapNpcs) {
         let warps = warp_npc::warp_npcs(&npcs.npcs, region);
         let key = (channel, region.index);
         let index = self.maps.entry(key).or_insert_with(|| {
@@ -1495,7 +1495,8 @@ impl GameState {
             }
         }
         let now = self.clock.now();
-        for (at, npc) in npcs.npcs.iter().enumerate() {
+        let spawn_mask = !(1_u32 << (world::npc::AFF_SPAWN - 1));
+        for (at, npc) in npcs.npcs.iter_mut().enumerate() {
             // `SpawnMob` places an NPC only where a sectree stands (`world/src/npc.rs:367`).
             let _shown = index.show(
                 view::EntityKey::Npc(npc.vid),
@@ -1503,6 +1504,9 @@ impl GameState {
                 self.view_radius,
                 &mut effects,
             );
+            // Package C10 (Defect D5 fixed under ADR-0008): `AFF_SPAWN` is cleared after the
+            // first show so later viewers of a boxed stone or monster do not replay spawn motion.
+            npc.affect_flags[0] &= spawn_mask;
             self.npc_of.insert(npc.vid, (channel, region.index, at));
             // `Show` seeds the fight before any `or_default()` can run.
             self.npc_combat

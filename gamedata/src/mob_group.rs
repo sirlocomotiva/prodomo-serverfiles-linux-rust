@@ -13,10 +13,10 @@
 //!   `std::out_of_range` and ends the process. A member whose vnum is 0 is kept. A vnum written
 //!   twice keeps its first group (`std::map::insert`).
 //! - **`LoadGroupGroup`** (`:248-307`) reads `Vnum` the same way and its members from the
-//!   **first** value of the keys `1` up. The second value, a probability, is parsed and dropped:
-//!   `AddMember(dwMobVnum)` takes the default probability of 1 (`G/mob_manager.h:58-68`), so
-//!   `GetMember` (`:71-83`) picks uniformly (Defect D1, reproduced). A member whose vnum is 0 is
-//!   left out. A vnum written twice keeps its first group-group.
+//!   **first** value of the keys `1` up, with the **second** value as the member's weight
+//!   (default 1; non-positive weights skipped, matching `CMobGroupGroup::AddMember`, fixing
+//!   legacy Defect D1 under ADR-0008 where `LoadGroupGroup` parsed `prob` and dropped it). A
+//!   member whose vnum is 0 is left out. A vnum written twice keeps its first group-group.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -60,7 +60,7 @@ pub struct SkippedGroup {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MobGroups {
     groups: BTreeMap<u32, MobGroup>,
-    group_groups: BTreeMap<u32, Vec<u32>>,
+    group_groups: BTreeMap<u32, Vec<(u32, u32)>>,
     skipped: Vec<SkippedGroup>,
     duplicates: Vec<(&'static str, u32)>,
 }
@@ -116,9 +116,10 @@ impl MobGroups {
         self.groups.get(&vnum)
     }
 
-    /// The members of the group-group of `vnum`, the groups `GetMember` picks from.
+    /// The weighted members `(group_vnum, prob)` of the group-group of `vnum`, which
+    /// `GetMember` draws from by cumulative probability (fixing Defect D1).
     #[must_use]
-    pub fn group_group(&self, vnum: u32) -> Option<&[u32]> {
+    pub fn group_group(&self, vnum: u32) -> Option<&[(u32, u32)]> {
         self.group_groups.get(&vnum).map(Vec::as_slice)
     }
 
@@ -207,8 +208,13 @@ impl MobGroups {
             // `GetTokenVector` never answers an empty vector: a key with no value ends its group
             // in the text reader, so the first value is there.
             let member = values.first().map_or(0, |value| strtoul(value));
-            if member != 0 {
-                members.push(member);
+            // `G/mob_manager.cpp:287-293` + `G/mob_manager.h:58-68` (D1 fixed under ADR-0008):
+            // keep the parsed probability (default 1) and skip zero/negative weights.
+            let prob = values.get(1).map_or(1, |value| strtol(value));
+            if member != 0 && prob > 0 {
+                if let Ok(weight) = u32::try_from(prob) {
+                    members.push((member, weight));
+                }
             }
         }
         match self.group_groups.entry(vnum) {
@@ -278,9 +284,6 @@ mod tests {
         \t1\tshark_monster1\t4301\r\n\t2\tshark_monster2\t4302\r\n\t2\tshark_monster3\t4303\r\n\
         \t4\tskipped\t4304\r\n}\r\n";
 
-    const GROUP_GROUPS: &[u8] = b"Group\ta1_02\n{\n\tVnum\t102\n\t1\t101\t1\n\t2\t0\t5\n\
-        \t3\t103\t20\n}\n";
-
     #[test]
     fn a_group_is_its_leader_then_its_members_up_to_the_first_missing_key() {
         let groups = MobGroups::parse(GROUPS, b"").expect("loads");
@@ -307,16 +310,22 @@ mod tests {
         gg.extend(b"}\n");
         let groups = MobGroups::parse(&file, &gg).expect("loads");
         let members: Vec<u32> = (1001..=1255).collect();
+        let weighted: Vec<(u32, u32)> = members.iter().map(|&v| (v, 1)).collect();
         let group = groups.group(5).expect("5");
         assert_eq!(group.members[0], 1);
         assert_eq!(group.members[1..], members[..]);
-        assert_eq!(groups.group_group(6), Some(&members[..]));
+        assert_eq!(groups.group_group(6), Some(&weighted[..]));
     }
 
     #[test]
-    fn a_group_group_keeps_its_first_values_and_drops_zero_and_the_probability() {
-        let groups = MobGroups::parse(b"", GROUP_GROUPS).expect("loads");
-        assert_eq!(groups.group_group(102), Some(&[101, 103][..]));
+    fn a_group_group_keeps_its_weights_and_drops_zero_vnum_or_zero_prob() {
+        let gg = b"Group\ta1_02\n{\n\tVnum\t102\n\t1\t101\t1\n\t2\t0\t5\n\
+            \t3\t103\t20\n\t4\t104\t0\n\t5\t105\n}\n";
+        let groups = MobGroups::parse(b"", gg).expect("loads");
+        assert_eq!(
+            groups.group_group(102),
+            Some(&[(101, 1), (103, 20), (105, 1)][..])
+        );
         assert_eq!(groups.group(102), None, "a group-group is not a group");
     }
 
@@ -337,7 +346,7 @@ mod tests {
         let gg = b"Group a\n{\n\tVnum\t5\n\t1\t10\n}\nGroup b\n{\n\tVnum\t5\n\t1\t11\n}\n";
         let groups = MobGroups::parse(file, gg).expect("loads");
         assert_eq!(groups.group(5).map(|g| g.members.clone()), Some(vec![1]));
-        assert_eq!(groups.group_group(5), Some(&[10][..]));
+        assert_eq!(groups.group_group(5), Some(&[(10, 1)][..]));
         assert_eq!(
             groups.duplicates(),
             [(GROUP_FILE, 5), (GROUP_GROUP_FILE, 5)]
@@ -392,6 +401,6 @@ mod tests {
             groups.group(6233).map(|g| g.members.clone()),
             Some(vec![4301, 4301, 4301])
         );
-        assert_eq!(groups.group_group(101), Some(&[101, 171][..]));
+        assert_eq!(groups.group_group(101), Some(&[(101, 1), (171, 1)][..]));
     }
 }

@@ -336,17 +336,19 @@ impl GameState {
     }
 
     /// `CHARACTER::ReviveHorse`: a dead horse refills, and a summoned one stands again.
-    pub(super) fn revive_horse(&mut self, vid: Vid) {
+    /// Returns `true` iff a dead horse was revived.
+    pub(super) fn revive_horse(&mut self, vid: Vid) -> bool {
         let now = Self::global_time();
         let Some(points) = self.pc_points_mut(vid.raw()) else {
-            return;
+            return false;
         };
         if !points.horse_mut().revive(now) {
-            return;
+            return false;
         }
         self.horse_unsummon(vid, false);
         self.horse_summon(vid, false, 0);
         self.settle_horse(vid);
+        true
     }
 
     /// `do_user_horse_back`: the summoned horse goes near, or the caller hears why not.
@@ -456,7 +458,9 @@ impl GameState {
                     self.horse_summon(vid, from_far, vnum);
                 }
                 HorseOp::Unsummon => self.horse_unsummon(vid, false),
-                HorseOp::Revive => self.revive_horse(vid),
+                HorseOp::Revive => {
+                    let _ = self.revive_horse(vid);
+                }
                 HorseOp::Ride => {
                     let map = self.place_of(vid.raw()).map_or(0, |(_, map)| map);
                     if !self.riding_mount(vid) && map != OX_MAP && !self.is_arena_map(map) {
@@ -476,9 +480,10 @@ impl GameState {
         }
     }
 
-    /// The horse arm of `ReceiveItem` (`G/char_item.cpp:9483-9509`): a revive herb revives the
-    /// giver's horse, spends one and says so; a feed feeds it, says so, spends one and shows
-    /// the red effect on the horse given to.
+    /// The horse arm of `ReceiveItem` (`G/char_item.cpp:9483-9509`, with Package C10 fix under
+    /// ADR-0008): a revive herb revives, spends one, and says `[LS;452]` ONLY when given to the
+    /// giver's own dead horse; a feed feeds it, says so, spends one and shows the red effect on
+    /// the horse given to.
     pub(super) fn horse_gift(
         &mut self,
         vid: Vid,
@@ -487,27 +492,32 @@ impl GameState {
         (actor, moved): (Mover, &mut MovedItems),
     ) {
         if revive {
-            self.revive_horse(vid);
-        } else {
-            let now = Self::global_time();
-            if let Some(points) = self.pc_points_mut(vid.raw()) {
-                let _fed = points.horse_mut().feed(now);
+            let own_horse = self
+                .horse_npcs
+                .get(&horse_vid)
+                .and_then(|standing| standing.rider)
+                == Some(vid);
+            if !own_horse || !self.revive_horse(vid) {
+                return;
             }
-            self.settle_horse(vid);
-            moved.records.push(self.give_line(actor, FED_LINE));
-        }
-        self.spend_gift(vid, item_id, actor, moved);
-        if revive {
+            self.spend_gift(vid, item_id, actor, moved);
             moved.records.push(self.give_line(actor, REVIVED_LINE));
-        } else {
-            let mut record = Vec::new();
-            GcSpecialEffect {
-                effect_type: world::character::SE_HPUP_RED,
-                vid: horse_vid,
-            }
-            .encode_into(&mut record);
-            self.packet_around(EntityKey::Npc(horse_vid), &record, None);
+            return;
         }
+        let now = Self::global_time();
+        if let Some(points) = self.pc_points_mut(vid.raw()) {
+            let _fed = points.horse_mut().feed(now);
+        }
+        self.settle_horse(vid);
+        moved.records.push(self.give_line(actor, FED_LINE));
+        self.spend_gift(vid, item_id, actor, moved);
+        let mut record = Vec::new();
+        GcSpecialEffect {
+            effect_type: world::character::SE_HPUP_RED,
+            vid: horse_vid,
+        }
+        .encode_into(&mut record);
+        self.packet_around(EntityKey::Npc(horse_vid), &record, None);
     }
 
     /// `item->SetCount(item->GetCount() - 1)` of the gift `item_id`, into `moved`.

@@ -26,25 +26,28 @@ pub use pvp::{
     PvVictim,
 };
 
-/// Inputs used by the legacy `CalcAttackRating` formula.
+/// Inputs used by `CalcAttackRating` (`G/battle.cpp:272-297`, with Defect B5 fixed under
+/// ADR-0008 so victim evasion reads `victim_level`, not `attacker_level`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttackRatingInput {
     /// Attacker dexterity after polymorph stat selection.
     pub attacker_dexterity: i32,
-    /// Attacker level, used for both source ratings by the legacy code.
+    /// Attacker level.
     pub attacker_level: i32,
     /// Victim dexterity after polymorph stat selection.
     pub victim_dexterity: i32,
+    /// Victim level (fixes legacy Defect B5: `G/battle.cpp:282` read `pkAttacker->GetLevel()`).
+    pub victim_level: i32,
     /// Whether the target evasion term is omitted.
     pub ignore_target_rating: bool,
 }
 
-/// Computes the legacy attack rating with C++ `int` and `float` operation order.
+/// Computes the attack rating with C++ `int` and `float` operation order and Defect B5 fixed.
 #[allow(clippy::cast_precision_loss)]
 #[must_use]
 pub fn attack_rating(input: AttackRatingInput) -> f32 {
     let attacker_source = source_rating(input.attacker_dexterity, input.attacker_level);
-    let victim_source = source_rating(input.victim_dexterity, input.attacker_level);
+    let victim_source = source_rating(input.victim_dexterity, input.victim_level);
     let attack = (attacker_source as f32 + 210.0_f32) / 300.0_f32;
 
     if input.ignore_target_rating {

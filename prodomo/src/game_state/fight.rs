@@ -981,6 +981,7 @@ impl GameState {
             let points = self.pc_points_mut(victim.raw())?;
             PlayerVictim {
                 dexterity: victim_dexterity,
+                level: i32::from(points.level()),
                 def_grade: points.get_point(point::POINT_DEF_GRADE),
                 def_bonus: points.get_point(point::POINT_DEF_BONUS),
                 resists: [

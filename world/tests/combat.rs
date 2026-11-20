@@ -12,6 +12,7 @@ fn combat_attack_rating_preserves_equal_stat_cpp_arithmetic() {
         attacker_dexterity: 10,
         attacker_level: 10,
         victim_dexterity: 10,
+        victim_level: 10,
         ignore_target_rating: false,
     });
 
@@ -21,12 +22,14 @@ fn combat_attack_rating_preserves_equal_stat_cpp_arithmetic() {
         attacker_dexterity: 0,
         attacker_level: 0,
         victim_dexterity: 0,
+        victim_level: 0,
         ignore_target_rating: true,
     });
     let high = attack_rating(AttackRatingInput {
         attacker_dexterity: 1_000,
         attacker_level: 1_000,
         victim_dexterity: 1_000,
+        victim_level: 1_000,
         ignore_target_rating: true,
     });
     assert_eq!(low.to_bits(), 0x3f33_3333);
@@ -84,6 +87,7 @@ fn combat_manual_parity_scenario_rating_state_and_pk() {
         attacker_dexterity: 10,
         attacker_level: 10,
         victim_dexterity: 10,
+        victim_level: 10,
         ignore_target_rating: false,
     });
     assert_eq!(rating.to_bits(), 0x3f29_7297);
@@ -124,4 +128,28 @@ fn pk_actor(id: u32, mode: PkMode) -> PkActor {
         guild_id: None,
         consensual_fight: false,
     }
+}
+
+#[test]
+fn attack_rating_uses_the_victims_level_not_the_attackers() {
+    // Defect B5 fixed: victim evasion uses `victim_level`, so a level-1 victim evades less than a
+    // level-154 victim with the same dexterity against the same level-154 attacker.
+    let low_victim = attack_rating(AttackRatingInput {
+        attacker_dexterity: 19,
+        attacker_level: 154,
+        victim_dexterity: 6,
+        victim_level: 1,
+        ignore_target_rating: false,
+    });
+    let high_victim = attack_rating(AttackRatingInput {
+        attacker_dexterity: 19,
+        attacker_level: 154,
+        victim_dexterity: 6,
+        victim_level: 154,
+        ignore_target_rating: false,
+    });
+    assert!(
+        low_victim > high_victim,
+        "lv 1 victim must yield higher attack rating ({low_victim}) than lv 154 ({high_victim})"
+    );
 }

@@ -485,6 +485,7 @@ impl GameState {
                 attacker_dexterity: npc.fight.point(point::POINT_DX),
                 attacker_level: i32::from(npc.fight.level),
                 victim_dexterity: npc.fight.point(point::POINT_DX),
+                victim_level: i32::from(npc.fight.level),
                 ignore_target_rating: false,
             })),
         );
@@ -763,6 +764,7 @@ impl GameState {
                 attacker_dexterity: npc.fight.point(point::POINT_DX),
                 attacker_level: i32::from(npc.fight.level),
                 victim_dexterity: target_dx,
+                victim_level: i32::from(target_points.level()),
                 ignore_target_rating: ignore_rating,
             })),
         );
@@ -858,6 +860,7 @@ impl GameState {
                 attacker_dexterity: npc.fight.point(point::POINT_DX),
                 attacker_level: i32::from(npc.fight.level),
                 victim_dexterity: target_dx,
+                victim_level: i32::from(target.fight.level),
                 ignore_target_rating: ignore_rating,
             })),
         );

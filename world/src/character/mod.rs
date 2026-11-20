@@ -79,11 +79,11 @@ pub use drop_item::{
     DropAsk, DropMade, DropRefused, Gauss, UnportedDrop, ITEM_FLAG_MAKECOUNT,
 };
 pub use equip::{
-    check_key_use, consume_giftbox, consume_key_and_box, find_equip_cell, is_equipable, is_female,
-    is_ride_item, is_skill_book, is_skill_forget, look_of, recompute_points, unequip_points,
-    use_checks, use_item, use_source, wear_full_set, wear_of, wear_pos, worn_system_not_ported,
-    CharacterLook, Gear, WornSystem, FISH_MIND_PILL_VNUM, PICKUP_AFFECT_ITEM,
-    UNIQUE_ITEM_WHITE_FLAG,
+    check_key_use, consume_giftbox, consume_key_and_box, equip_points, find_equip_cell,
+    is_equipable, is_female, is_ride_item, is_skill_book, is_skill_forget, look_of,
+    recompute_points, unequip_points, use_checks, use_item, use_source, wear_full_set, wear_of,
+    wear_pos, worn_system_not_ported, CharacterLook, Gear, WornSystem, FISH_MIND_PILL_VNUM,
+    PICKUP_AFFECT_ITEM, UNIQUE_ITEM_WHITE_FLAG,
 };
 pub use equipment::{
     accessory_socket_grade, costume_attr_worn_attrs, counted_attrs, energy_worn_attrs,

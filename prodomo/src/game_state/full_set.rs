@@ -113,14 +113,23 @@ impl GameState {
     ///
     /// As [`GameState::move_item`].
     pub fn attr_full_set(&mut self, vid: Vid, actor: Mover) -> Result<MovedItems, MoveItemRefused> {
-        self.run_item_step(vid, actor, |items, _ids, _rules, _gear, _protos| {
+        self.run_item_step(vid, actor, |items, _ids, _rules, mut gear, _protos| {
             let mut records = Vec::new();
             let mut changes = Vec::new();
             for (cell, forced) in FORCED_CELLS.iter().zip(FORCED.iter()) {
-                let pos = world::character::wear_pos(*cell as u16);
-                let Some(worn) = items.item_at(pos).map(|item| item.id) else {
+                let wear = *cell as u16;
+                let pos = world::character::wear_pos(wear);
+                let Some(before) = items.item_at(pos).cloned() else {
                     continue;
                 };
+                let worn = before.id;
+                // Package C10 (ADR-0008): remove the piece's old points before overwriting its
+                // attributes and re-apply after, so no stat stays behind or goes negative on remove.
+                if let Some(gear) = gear.as_deref_mut() {
+                    if let Ok(off) = world::character::unequip_points(gear, items, wear, &before) {
+                        records.extend(off);
+                    }
+                }
                 // `ClearAttribute` writes the five slots without sending or
                 // saving; each `SetForceAttribute` then sends and saves.
                 for index in 0..5 {
@@ -138,6 +147,14 @@ impl GameState {
                     );
                     records.extend(done.records);
                     changes.extend(done.changes);
+                }
+                if let (Some(gear), Some(after)) =
+                    (gear.as_deref_mut(), items.item_at(pos).cloned())
+                {
+                    if let Ok(on) = world::character::equip_points(gear, items, wear, &after) {
+                        records.extend(on);
+                    }
+                    records.extend(world::character::recompute_points(gear, items, after.vnum));
                 }
             }
             // Every forced pair updated the stored attributes; the store takes
@@ -388,5 +405,50 @@ mod tests {
         let moved = world.item_full_set(Vid::new(VID), mover()).unwrap();
         assert!(moved.records.is_empty());
         assert!(moved.changes.is_empty());
+    }
+
+    #[test]
+    fn attr_full_set_recomputes_worn_points_and_unequip_restores_them() {
+        let mut world = kitted(2);
+        let _ = world.item_full_set(Vid::new(VID), mover()).unwrap();
+        let before_speed = world
+            .points_of(VID)
+            .unwrap()
+            .get_point(common::point_slot::POINT_ATT_SPEED);
+        let moved = world.attr_full_set(Vid::new(VID), mover()).unwrap();
+        let after_speed = world
+            .points_of(VID)
+            .unwrap()
+            .get_point(common::point_slot::POINT_ATT_SPEED);
+        // Both Head and Foots get (APPLY_ATT_SPEED = 7, +8); recompute applies +16 immediately.
+        assert_eq!(after_speed, before_speed + 16);
+        assert!(
+            moved
+                .records
+                .iter()
+                .any(|r| r[0] == protocol::gc_inventory::HEADER_GC_PLAYER_POINT_CHANGE.value()),
+            "recomputed point changes ride out on the wire"
+        );
+        // Unequipping the head piece strips the +8 cleanly back to the pre-forcing baseline.
+        let head_cell = ItemPos::new(
+            EWindows::Inventory as u8,
+            INVENTORY_MAX_NUM + EWearPositions::Head as u16,
+        );
+        let _ = world
+            .move_item(
+                Vid::new(VID),
+                world::character::MoveRequest {
+                    from: head_cell,
+                    to: ItemPos::new(EWindows::Inventory as u8, 0),
+                    count: 1,
+                },
+                mover(),
+            )
+            .unwrap();
+        let restored_speed = world
+            .points_of(VID)
+            .unwrap()
+            .get_point(common::point_slot::POINT_ATT_SPEED);
+        assert_eq!(restored_speed, before_speed + 8);
     }
 }

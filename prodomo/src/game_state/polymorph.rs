@@ -10,9 +10,9 @@
 //! while a morph is on, the plain arm when it clears. The combo has no port yet, so its
 //! reset is a gap; the ride is never on, so stopping it is a no-op.
 //!
-//! The spawn state bit is held only for the reencode (`REMOVE_BIT`, `:7705`), but
-//! `AFF_SPAWN` is never reset (D5), so every later insert and update of the player carries
-//! it, as each later insert carries the shown race (`GetRaceNum`).
+//! Both the spawn state bit (`REMOVE_BIT`, `:7705`) and `AFF_SPAWN` (fixing legacy Defect D5
+//! under ADR-0008) are held only for the reencode and cleared immediately afterwards, so later
+//! inserts and updates do not carry `AFF_SPAWN`.
 
 //!
 //! The ball's use is a `MoveKind::Morphed` world step: the guards run the gates in
@@ -196,15 +196,16 @@ impl GameState {
         polymorph_power(self.pc_skill_level(vid.raw(), SKILL_POLYMORPH))
     }
 
-    /// The reencode `SetPolymorph` runs (`G/char.cpp:7700-7705`): `AFF_SPAWN` lands on the
-    /// caller's base words for good, the spawn state bit is held, the view around the
-    /// caller re-shows it (`ViewReencode`), and the bit is dropped again.
+    /// The reencode `SetPolymorph` runs (`G/char.cpp:7700-7705`, with Defect D5 fixed under
+    /// ADR-0008): `AFF_SPAWN` and the spawn state bit are held for the reencode (`ViewReencode`)
+    /// and both are cleared immediately afterwards.
     fn reencode_with_spawn(&mut self, vid: Vid) {
         let Some(body) = self.bodies.get_mut(&vid) else {
             return;
         };
         let word = usize::try_from((AFF_SPAWN - 1) / 32).unwrap_or(0);
-        body.base_affect_flags[word] |= 1 << ((AFF_SPAWN - 1) % 32);
+        let bit = 1_u32 << ((AFF_SPAWN - 1) % 32);
+        body.base_affect_flags[word] |= bit;
         body.add_state.spawn = true;
         let mut effects = Vec::new();
         if let (Some(place), Some(spot)) = (self.place_of(vid.raw()), self.spot_of(vid.raw())) {
@@ -221,6 +222,7 @@ impl GameState {
         self.deliver(&effects, None);
         if let Some(body) = self.bodies.get_mut(&vid) {
             body.add_state.spawn = false;
+            body.base_affect_flags[word] &= !bit;
         }
     }
 
@@ -760,24 +762,30 @@ mod tests {
     }
 
     /// After the reencode, a late viewer's insert shows the morph's race with no spawn
-    /// state bit (`REMOVE_BIT`, `G/char.cpp:7705`) and `AFF_SPAWN` still set, which nothing
-    /// resets (D5): not even the clear, after which the late insert shows the job again.
+    /// state bit (`REMOVE_BIT`, `G/char.cpp:7705`) and `AFF_SPAWN` cleared after the first
+    /// show (D5 fixed): neither the morph nor the clear leaks `AFF_SPAWN` to late viewers.
     #[test]
-    fn a_late_viewer_sees_the_race_and_the_kept_spawn_affect() {
+    fn a_late_viewer_sees_the_race_without_the_spawn_affect() {
         let (_clock, mut world, _mine, _witness) = a_morph();
         world.run_polymorph(Vid::new(ME), b"101");
         let (_late, seen) = enter_seeing(&mut world, PLACE, 3, (3300, 3200), 12_345);
         let add = alpha_add(&seen);
         assert_eq!(add.w_race_num, u16::try_from(DOG).unwrap());
         assert_eq!(add.b_state_flag, 0, "the spawn bit was dropped");
-        assert!(has_spawn_affect(&add), "AFF_SPAWN stays");
+        assert!(
+            !has_spawn_affect(&add),
+            "AFF_SPAWN cleared after first show"
+        );
 
         world.run_polymorph(Vid::new(ME), b"0");
         let (_later, seen) = enter_seeing(&mut world, PLACE, 4, (3200, 3300), 12_345);
         let add = alpha_add(&seen);
         let job = world.points_of(ME).expect("points").race();
         assert_eq!(add.w_race_num, u16::from(job), "the clear shows the job");
-        assert!(has_spawn_affect(&add), "AFF_SPAWN outlives the clear");
+        assert!(
+            !has_spawn_affect(&add),
+            "AFF_SPAWN stays clear after unmorph"
+        );
     }
 
     /// The caller's mover: empire 1, at peace, with no flags.

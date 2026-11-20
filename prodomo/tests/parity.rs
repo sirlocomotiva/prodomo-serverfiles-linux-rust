@@ -5533,8 +5533,8 @@ fn unsummarised_insert(
 /// 100, and no affect: a point spawns without the spawn motion (`G/regen.cpp:346-353`). The
 /// stone stands within 100 of its box's centre, facing a drawn angle, as a `CHAR_TYPE_STONE` with
 /// its proto's 109 and
-/// 104, and `AFF_SPAWN` (word 0 bit 2) set, because a box's stone always spawns with the motion
-/// (`SpawnMobRange`, `G/char_manager.cpp:480-481`) and nothing resets the flag (D5). Neither is
+/// 104, and no `AFF_SPAWN` (D5 fixed: cleared after the boot show so later entrants do not see
+/// a stale spawn motion). Neither is
 /// on the mini-map, which still lists `npc.txt`'s 48. `npc.txt` stands its characters up in
 /// order, so the stone's VID follows the dog's. Every monster and stone in view, the owner's
 /// `regen.txt`'s included, is in `Build` order and then VID order, within `VIEW_RANGE + 500` in
@@ -5594,9 +5594,12 @@ fn a_map_shows_its_monsters_and_stones_in_view() {
         (CHAR_TYPE_STONE, 8001),
         [109, 104],
     );
-    expected.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0]);
+    expected.extend_from_slice(&[0; 8]);
     expected[5..9].copy_from_slice(&stone[5..9]);
-    assert_eq!(stone, &expected, "the stone, with AFF_SPAWN");
+    assert_eq!(
+        stone, &expected,
+        "the stone, with AFF_SPAWN cleared after boot (D5)"
+    );
     assert!(
         alice.monsters.contains(&dog_vid.to_le_bytes()),
         "the connection holds the dog in view"
@@ -5612,9 +5615,10 @@ fn a_map_shows_its_monsters_and_stones_in_view() {
             "no summary for monster {vid:#x}"
         );
         assert_eq!(insert[26], 0, "no state flag");
-        assert!(
-            matches!(insert[27..35], [0 | 4, 0, 0, 0, 0, 0, 0, 0]),
-            "AFF_SPAWN at most: {insert:02x?}"
+        assert_eq!(
+            &insert[27..35],
+            &[0; 8],
+            "no stale AFF_SPAWN after boot: {insert:02x?}"
         );
     }
     let tree_of = |(x, y): (i32, i32)| (x / SECTREE_SIZE, y / SECTREE_SIZE);
@@ -16452,10 +16456,10 @@ const DOG_HP: i32 = 126;
 /// The damage Alpha's bare fist deals the stray dog. `CalcMeleeDamage`'s only draw is the
 /// unarmed `number(0, 0)`, so the hit is exact: Alpha's attack grade is 344 and the dog's
 /// defence grade 10 (`G/char.cpp:2716-2767`, `:2850-2858`); the hit rating, 274/300 less the
-/// evasion's 0.23 (`G/battle.cpp:271-297`, with the attacker's level, owner question 28), is
-/// 0.6833, which turns the 36 above twice Alpha's level into 24, so the attack is 332, and the
-/// defence leaves 322.
-const PUNCH_ON_THE_DOG: i32 = 322;
+/// evasion's 0.0394 (`G/battle.cpp:271-297`, with the victim's level 1, Defect B5 fixed), is
+/// 0.8739, which turns the 36 above twice Alpha's level into 31, so the attack is 339, and the
+/// defence leaves 329.
+const PUNCH_ON_THE_DOG: i32 = 329;
 /// A stray dog (vnum 101) at regen point (605, 540), where Alpha enters, which stands once and
 /// would stand again only after 1000 seconds.
 const DOG_AT_ALPHA: &str = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t101\n";
@@ -22394,14 +22398,13 @@ fn shown_vid(entered: &Entered, vnum: u16, note: &str) -> u32 {
 /// then `Inchide`. The bet entry explains, then lists the one war — Wolves first (the
 /// tie goes to `To`), the `_35_table` legs unformatted, then `Anuleaza`.
 ///
-/// Picking the war ends the dialog after the title: the quest formats `_80_say`'s three
-/// verbs with one argument, and `string.format` errors (`luaL_argerror`, 5.1's
-/// `lstrlib.c:772-773`; 5.0.3 errors the same way), which the server logs. Legacy runs
-/// the same source, so it errors at the same pick: a quest-source Defect, not a
-/// Divergence. No bet row is stored — the script died before `guild.war_bet`.
+/// Picking the war formats `_80_say` with `(name1, name2, g[s][4])` (fixed under ADR-0004
+/// in ledger 740), offers the two guild choices, then the stake table; picking the first
+/// guild and the 30,000-Yang stake charges Alpha 30,000 Yang and inserts the `guild_war_bet`
+/// row with `bet_from = 30000`.
 #[test]
-fn a_bet_quest_lists_the_reserved_war_and_errors_where_legacy_errors() {
-    let Some((database, mut server, mut alice, _alpha, _yankee, _yankee_listed, entered)) =
+fn a_bet_quest_lists_the_reserved_war_and_places_a_bet() {
+    let Some((database, _server, mut alice, _alpha, _yankee, _yankee_listed, entered)) =
         a_betting_pair_ready_on((475_300, 957_000), None)
     else {
         return;
@@ -22440,22 +22443,41 @@ fn a_bet_quest_lists_the_reserved_war_and_errors_where_legacy_errors() {
     ]
     .concat();
     assert_eq!(alice.read_game(), server_script(1, &wars));
-    // The war pick: the format error ends the dialog after the title.
+    // The war pick: formats `_80_say` cleanly and asks which guild to back.
     alice.send_record(&client_script_answer(0));
-    let ended = [
+    let guild_pick = [
         bet_title(b"Administratorul luptelor:").as_slice(),
-        b"[DONE]".as_slice(),
+        b"Breasla Wolves are o sansa decenta de a invinge[ENTER]breasla MyGuild cu 0 puncte.[ENTER]Pe care breasla vrei sa pariezi?[ENTER][QUESTION 1;Wolves|2;Wolves]"
+            .as_slice(),
     ]
     .concat();
-    assert_eq!(alice.read_game(), server_script(1, &ended));
-    alice.quiet("the error is the click's end");
-    server.wait_for("LUA_ERROR");
-    assert!(
-        server.logged("bad argument #3 to 'format' (no value)"),
-        "the format names its missing argument:{}",
-        server.console()
+    assert_eq!(alice.read_game(), server_script(1, &guild_pick));
+    // Pick guild 1 (Wolves), then pick the second stake (30,000 Yang).
+    alice.send_record(&client_script_answer(0));
+    let price_pick = [
+        bet_title(b"Administratorul luptelor:").as_slice(),
+        b"Hmm... Buna alegere! Pentru care te-ai decis?[ENTER][QUESTION 1;10000Yang: %d|2;30000Yang: %d|3;50000Yang: %d|4;100000Yang: %d|5;Anuleaza]"
+            .as_slice(),
+    ]
+    .concat();
+    assert_eq!(alice.read_game(), server_script(1, &price_pick));
+    alice.send_record(&client_script_answer(1));
+    let done = [
+        bet_title(b"Administratorul luptelor:").as_slice(),
+        b"Totul e gata. Daca ai facut alegerea corecta, vei[ENTER]primi Yang-ul atunci can razboiul breslelor se[ENTER]sfarseste. Succes![ENTER][DONE]"
+            .as_slice(),
+    ]
+    .concat();
+    read_until_all(&mut alice, &[server_script(1, &done)]);
+    alice.quiet("the bet is the click's end");
+    check(
+        &database,
+        "EXISTS (SELECT 1 FROM guild_war_bet WHERE war_id = 1 AND login = 'alice' AND gold = 30000 AND guild = 2)",
     );
-    check(&database, "NOT EXISTS (SELECT 1 FROM guild_war_bet)");
+    check(
+        &database,
+        "(SELECT bet_to FROM guild_war_reservation WHERE id = 1) = 30000",
+    );
 }
 
 /// Ledger 408's bet probe: the skill teacher (vnum 20300, bound but questless) answers
@@ -35257,18 +35279,20 @@ fn a_full_set_kits_forces_and_masters_over_the_wire() {
         .count();
     assert_eq!(updates, 40, "five pairs on eight pieces send forty updates");
     for record in &forced {
-        let pool = record[0] == GC_POINT_CHANGE && [5, 7].contains(&record[8]);
-        if record[0] != ITEM_UPDATE
-            && record[0] != GC_AFFECT_REMOVE
-            && !is_stamina_refill(record)
-            && !pool
-        {
-            panic!(
-                "the forcing sends only updates, pool clamps and the timer's end: header {}",
-                record[0]
-            );
-        }
+        assert!(
+            record[0] == ITEM_UPDATE
+                || record[0] == GC_POINT_CHANGE
+                || record[0] == GC_CHARACTER_UPDATE
+                || record[0] == GC_AFFECT_REMOVE
+                || is_stamina_refill(record),
+            "the forcing sends only updates, recomputed points and the timer's end: header {}",
+            record[0]
+        );
     }
+    assert!(
+        forced.iter().any(|r| r[0] == GC_POINT_CHANGE && r[8] == 17),
+        "attr_full_set recomputes worn piece attributes onto character points"
+    );
     check(
         &database,
         "EXISTS (SELECT 1 FROM item WHERE owner_id = (SELECT id FROM player WHERE name = \
@@ -43455,6 +43479,10 @@ fn a_quest_summons_the_dead_horse_and_gifts_revive_it(
         ],
     );
     let (revived, _) = added_horse_named(&read, b"Alpha's \0");
+    // A revive herb offered to a live horse is refused without consuming the item (C10).
+    alice.send_record(&client_give(revived, 0));
+    assert_eq!(alice.read_game(), an_info_line(b"[LS;452]"));
+    alice.quiet("a revive herb at a live horse is refused without spending");
     alice.send_record(&client_give(revived, 1));
     let mut effect = Vec::new();
     protocol::gc_vid::GcSpecialEffect {
@@ -67709,9 +67737,9 @@ fn a_morphed_attacker_adds_its_morphs_range_to_the_swing() {
 
     // When: the morphed Alpha punches the boar. Then: the damage carries the dog's
     // scaled range on the morphed grade 350 (`2*154 + 2*(3*41/100 + 20)`, the shaman's
-    // own IQ): the 8..=9 roll lands 228 or 229, past the plain punch's 213. The
-    // morph's reencode may still hold a stale view row of the caller, which leaves
-    // before the click lands.
+    // own IQ): with the boar's own level 44 (Defect B5 fixed), the 8..=9 roll lands 234
+    // or 236, past the plain punch's 219. The morph's reencode may still hold a stale
+    // view row of the caller, which leaves before the click lands.
     alice.send_record(&client_target(boar));
     let clicked = drain_morph_reencode(&mut alice, listed.id, yankee_listed.id);
     assert_eq!(clicked[0], GC_TARGET, "{clicked:02x?}");
@@ -67721,8 +67749,8 @@ fn a_morphed_attacker_adds_its_morphs_range_to_the_swing() {
     assert_eq!(&punch[1..5], &boar.to_le_bytes(), "the boar's VID");
     let dealt = i32::from_le_bytes(punch[6..10].try_into().expect("four bytes"));
     assert!(
-        (228..=229).contains(&dealt),
-        "the morphed punch lands 228 or 229: {dealt}"
+        matches!(dealt, 234 | 236),
+        "the morphed punch lands 234 or 236: {dealt}"
     );
     let shown = alice.read_fight();
     assert_eq!(shown[0], GC_TARGET, "{shown:02x?}");

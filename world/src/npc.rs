@@ -23,7 +23,8 @@
 //!   `number(0, 360)` for its rotation, after `SetProto`.
 //! - **A box of one point**, whatever its kind, calls `SpawnMob` there with the entry's direction
 //!   as the rotation: `(direction - 1) * 45`, or `number(0, 7) * 45` when the direction is 0,
-//!   drawn before the call. A group entry at a point spawns its group vnum as a mob vnum (D4).
+//!   drawn before the call. A group or group-group entry at one point spawns its group or
+//!   group-group, not the mob of that number (fixing legacy Defect D4 under ADR-0008).
 //! - **A mob box** calls `SpawnMobRange` (`:473-506`). A stone forces its spawn motion. It tries
 //!   16 points of `number(sx, ex)`, `number(sy, ey)` and keeps the first `SpawnMob` places.
 //! - **A group box** calls `SpawnGroup` (`:595-667`): each member in turn is a `SpawnMobRange`
@@ -42,8 +43,8 @@
 //! create the character and, when the caller passed no rotation, draw `number(0, 360)`. In
 //! `SetProto` an ore vein draws `number(420, 900)`, the seconds before `kill_ore_load_event`
 //! destroys it (`G/char.cpp:2563-2570`). An NPC with no empire takes its map's
-//! (`GetEmpireFromMapIndex`). `Show` with the spawn motion sets `AFF_SPAWN`, which nothing clears
-//! (`G/char.cpp:1884-1913`, D5).
+//! (`GetEmpireFromMapIndex`). `Show` with the spawn motion sets `AFF_SPAWN` only for the first
+//! show, after which it is cleared (fixing legacy Defect D5 under ADR-0008).
 //!
 //! # Divergences
 //!
@@ -601,7 +602,7 @@ impl<'a> NpcSpawner<'a> {
         for _ in 0..units {
             let stood = if entry.kind == RegenKind::Anywhere {
                 self.spawn_mob_random_position(site, vnum, dice)?
-            } else if entry.sx == entry.ex && entry.sy == entry.ey {
+            } else if entry.kind == RegenKind::Mob && entry.sx == entry.ex && entry.sy == entry.ey {
                 let rotation = if entry.direction == 0 {
                     degrees(number(dice, 0, 7) * 45)
                 } else {
@@ -677,7 +678,8 @@ impl<'a> NpcSpawner<'a> {
         Ok(None)
     }
 
-    /// `SpawnGroupGroup`: one draw picks the group, uniformly (D1).
+    /// `SpawnGroupGroup`: one weighted draw picks the group by cumulative probability
+    /// (`G/mob_manager.h:58-83`, fixing legacy Defect D1 under ADR-0008).
     fn spawn_group_group(
         &mut self,
         site: &mut Site<'_>,
@@ -686,16 +688,28 @@ impl<'a> NpcSpawner<'a> {
         dice: &mut dyn Dice,
     ) -> Result<Option<usize>, NpcVidsExhausted> {
         let members = self.groups.group_group(vnum).unwrap_or_default();
-        let Ok(last) = i32::try_from(members.len()) else {
+        let total = members
+            .iter()
+            .fold(0_u32, |acc, &(_, prob)| acc.saturating_add(prob));
+        let Ok(last) = i32::try_from(total) else {
             return Ok(None);
         };
-        if last == 0 {
+        if last <= 0 {
             self.report.no_group += 1;
             return Ok(None);
         }
-        let picked = usize::try_from(number(dice, 1, last) - 1).unwrap_or_default();
+        let draw = u32::try_from(number(dice, 1, last)).unwrap_or(1);
+        let mut cumulative = 0_u32;
+        let mut picked = members[0].0;
+        for &(group_vnum, prob) in members {
+            cumulative = cumulative.saturating_add(prob);
+            if cumulative >= draw {
+                picked = group_vnum;
+                break;
+            }
+        }
         // A group-group is spawned with the regen's `is_aggressive`, which only `ga` sets.
-        self.spawn_group(site, members[picked], area, false, None, dice)
+        self.spawn_group(site, picked, area, false, None, dice)
     }
 
     /// `SpawnGroup`: the leader in the box, then each member in a box drawn around the one
@@ -1954,26 +1968,37 @@ mod tests {
         assert_eq!(dice.left(), 0);
     }
 
-    /// A group-group draws `number(1, members)`, whatever the members' probabilities, and spawns
-    /// that group; an empty or missing one draws nothing.
+    /// A group-group draws `number(1, total_weight)` and picks the first member whose cumulative
+    /// probability covers the draw (Defect D1 fixed); an empty or missing one draws nothing.
     #[test]
-    fn a_group_group_picks_one_group_uniformly() {
+    fn a_group_group_picks_by_cumulative_weight() {
+        // Group-group 600 has group 500 (weight 9, 3 members) and group 502 (weight 1, 2 members).
+        // Raw draw 8 -> rolled 9 -> picks 500 (3 members).
         let entries = [
             boxed(RegenKind::GroupGroup, 600),
             boxed(RegenKind::GroupGroup, 601),
             boxed(RegenKind::GroupGroup, 602),
         ];
-        let mut draws = vec![1];
-        draws.extend([0; 14]);
+        let mut draws = vec![8];
+        draws.extend([0; 21]);
         draws.extend([0, 0, 0]);
         let mut dice = Script::new(&draws);
         let (map, report) = spawn(&entries, &mut dice);
-        assert_eq!(map.npcs.len(), 2, "the draw of 2 picks 502, of two members");
+        assert_eq!(map.npcs.len(), 3, "weight roll 9 picks 500 (three members)");
         assert!(
             !map.npcs.iter().any(Npc::is_aggressive),
             "a group-group is never `ga`"
         );
         assert_eq!(report.no_group, 2);
+        assert_eq!(dice.left(), 0);
+
+        // Raw draw 9 -> rolled 10 -> picks 502 (2 members).
+        let mut draws = vec![9];
+        draws.extend([0; 14]);
+        draws.extend([0, 0, 0]);
+        let mut dice = Script::new(&draws);
+        let (map, _) = spawn(&entries, &mut dice);
+        assert_eq!(map.npcs.len(), 2, "weight roll 10 picks 502 (two members)");
         assert_eq!(dice.left(), 0);
     }
 
@@ -2031,22 +2056,40 @@ mod tests {
         assert_eq!(veins, mining);
     }
 
-    /// A group entry at a point is `SpawnMob` of the group's vnum, as legacy calls it.
+    /// A group or group-group entry at a point spawns its group rather than calling `SpawnMob`
+    /// with the group vnum (Defect D4 fixed), preserving `ga` aggressiveness.
     #[test]
-    fn a_group_at_a_point_spawns_the_mob_of_its_vnum() {
+    fn a_group_at_a_point_spawns_its_group() {
         let group = entry(
             RegenKind::Group { aggressive: true },
-            20_017,
+            500,
             (10_100, 20_100),
             (10_100, 20_100),
         );
-        let (map, _) = spawn(&[group], &mut Script::new(&[0]));
-        assert_eq!(map.npcs.len(), 1);
+        let mut draws = vec![0; 21];
+        draws.push(0);
+        let mut dice = Script::new(&draws);
+        let (map, _) = spawn(&[group], &mut dice);
+        assert_eq!(map.npcs.len(), 3, "group 500 has three 102s");
         assert!(
-            !map.npcs[0].is_aggressive(),
-            "a point never makes one aggressive"
+            map.npcs.iter().all(Npc::is_aggressive),
+            "a point `ga` keeps its aggressive flag"
         );
-        assert!(map.positions.is_empty());
+        assert_eq!(dice.left(), 0);
+
+        let gg = entry(
+            RegenKind::GroupGroup,
+            600,
+            (10_100, 20_100),
+            (10_100, 20_100),
+        );
+        let mut draws = vec![9];
+        draws.extend([0; 14]);
+        draws.push(0);
+        let mut dice = Script::new(&draws);
+        let (map, _) = spawn(&[gg], &mut dice);
+        assert_eq!(map.npcs.len(), 2, "group-group 600 at a point picks 502");
+        assert_eq!(dice.left(), 0);
     }
 
     /// An NPC with no empire takes its map's; one with an empire, a warp or a goto keeps its own.

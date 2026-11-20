@@ -585,6 +585,15 @@ impl GameState {
             self.schedule_vein(vid, lifetime, pulse);
         }
         self.deliver(&effects, None);
+        // Package C10 (Defect D5 fixed under ADR-0008): clear `AFF_SPAWN` immediately after
+        // the first show so later viewers do not receive it on future inserts.
+        if let Some(list) = self.npcs.get_mut(&key) {
+            let list = Arc::make_mut(list);
+            let spawn_mask = !(1_u32 << (world::npc::AFF_SPAWN - 1));
+            for npc in &mut list.npcs[first..] {
+                npc.affect_flags[0] &= spawn_mask;
+            }
+        }
     }
 
     /// `ACMD(do_purge)` and `ACMD(do_weaken)` (`G/cmd_gm.cpp:816-868`,
@@ -2245,5 +2254,69 @@ mod tests {
         world.npcs.remove(&(PLACE.0, dungeon_map));
         world.maps.remove(&(PLACE.0, dungeon_map));
         world.process_pulse(pulses(4));
+    }
+
+    #[test]
+    fn runtime_stone_clears_aff_spawn_after_its_first_show() {
+        let (mut world, mut first) = a_map(Vec::new(), Vec::new());
+        let stone_proto = MobProto {
+            line: 2,
+            table: MobTableRecord {
+                vnum: 8_001,
+                mob_type: gamedata::mob_proto::CHAR_TYPE_STONE,
+                ai_flag: gamedata::mob_proto::AIFLAG_NOMOVE,
+                max_hp: 100,
+                ..MobTableRecord::default()
+            },
+        };
+        let protos = MobProtos::from_rows(vec![stone_proto]);
+        world.install_respawner(
+            Respawner::new(
+                Arc::new(protos),
+                Arc::new(MobGroups::default()),
+                Arc::new(MobLocaleNames::default()),
+                NpcVids::starting_at(FIRST_NPC_VID + 500),
+            ),
+            open_cells(),
+        );
+        let _ = drained(&mut first);
+
+        // Spawn a boxed stone at runtime while `first` is watching: `first` sees `AFF_SPAWN`.
+        let mut entry = at_a_point(8_001, 1, 60);
+        entry.sx = 900;
+        entry.ex = 1100;
+        entry.sy = 900;
+        entry.ey = 1100;
+        world.spawn_dungeon_regen(PLACE.0, PLACE.1, PLACE.1, &[entry], true);
+        let first_seen = drained(&mut first);
+        let first_add = first_seen
+            .iter()
+            .find(|r| r.first() == Some(&CHARACTER_ADD))
+            .expect("first viewer receives stone insert");
+        let aff_spawn_bit = 1u32 << ((crate::loading_phase::AFF_SPAWN - 1) % 32);
+        let first_word0 = u32::from_le_bytes(first_add[27..31].try_into().unwrap());
+        assert_ne!(
+            first_word0 & aff_spawn_bit,
+            0,
+            "first viewer sees AFF_SPAWN on the spawned stone"
+        );
+
+        // A second viewer entering later must NOT see stale `AFF_SPAWN` (Defect D5 fixed).
+        let (_late, late_seen) =
+            super::super::fixtures::enter_seeing(&mut world, PLACE, 0x7002, (1000, 1000), 12_000);
+        let stone_vid = u32::from_le_bytes(first_add[1..5].try_into().unwrap());
+        let late_add = late_seen
+            .iter()
+            .find(|r| {
+                r.first() == Some(&CHARACTER_ADD)
+                    && u32::from_le_bytes(r[1..5].try_into().unwrap()) == stone_vid
+            })
+            .expect("late viewer receives stone insert");
+        let late_word0 = u32::from_le_bytes(late_add[27..31].try_into().unwrap());
+        assert_eq!(
+            late_word0 & aff_spawn_bit,
+            0,
+            "late viewer must not see stale AFF_SPAWN"
+        );
     }
 }

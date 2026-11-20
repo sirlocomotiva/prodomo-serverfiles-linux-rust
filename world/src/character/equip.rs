@@ -359,6 +359,24 @@ pub fn unequip_points(
     Ok(std::mem::take(&mut equipper.trail.records))
 }
 
+/// Applies one worn item's points (`CItem::ModifyPoints(true)`), pairing with [`unequip_points`]
+/// when an item's attributes change in place while worn (Package C10).
+///
+/// # Errors
+///
+/// [`MoveRefused::UnknownVnum`] when the item has no prototype.
+pub fn equip_points(
+    gear: &mut Gear<'_>,
+    items: &mut CharacterItems,
+    wear: u16,
+    item: &Item,
+) -> Result<Vec<MoveRecord>, MoveRefused> {
+    let mut equipper = Equipper::new(items, gear, 0);
+    let proto = equipper.proto(item.vnum)?;
+    equipper.modify_points(wear, item, proto, true);
+    Ok(std::mem::take(&mut equipper.trail.records))
+}
+
 /// The points are computed again after a worn item left (`ComputeBattlePoints` and
 /// `ComputePoints`, `G/item.cpp:1580-1587`).
 ///

@@ -2867,6 +2867,7 @@ impl GameState {
             attacker_dexterity,
             attacker_level: i32::from(points_snapshot.level()),
             victim_dexterity: victim_snapshot.fight.point(point::POINT_DX),
+            victim_level: i32::from(victim_snapshot.fight.level),
             ignore_target_rating: ignore_rating,
         });
         let weapon = self.wielded_weapon(vid);
@@ -3157,6 +3158,7 @@ impl GameState {
             attacker_dexterity: points_snapshot.get_point(point::POINT_DX),
             attacker_level: i32::from(points_snapshot.level()),
             victim_dexterity: victim_dex,
+            victim_level: victim_points.map_or(0, |points| i32::from(points.level())),
             ignore_target_rating: false,
         })
     }
@@ -3350,6 +3352,7 @@ impl GameState {
             attacker_dexterity: poly_attacker_dexterity(&points_snapshot, poly),
             attacker_level: i32::from(points_snapshot.level()),
             victim_dexterity: victim_points.get_point(point::POINT_DX),
+            victim_level: i32::from(victim_points.level()),
             ignore_target_rating: ignore_rating,
         });
         let atk = self.player_damage(vid, victim).unwrap_or(0);
@@ -3656,6 +3659,7 @@ impl GameState {
             attacker_dexterity,
             attacker_level: i32::from(points_snapshot.level()),
             victim_dexterity: victim_snapshot.fight.point(point::POINT_DX),
+            victim_level: i32::from(victim_snapshot.fight.level),
             ignore_target_rating: ignore_rating,
         });
         let weapon = self.wielded_weapon(vid);

@@ -42,9 +42,17 @@ partial rebuild: without `_basic` nobody could create a guild. `object/` is the 
 for those 16, kept as a reference for the Rust `qc` port. No script uses a `define`, so the
 `pre_qc.py` preprocessor was a no-op and is removed.
 
-One file differs from the deployment: `_basic/change_empire.lua` had a stray `end` on line 132
-that made both the legacy `qc` and the Rust one refuse it. The owner had the line removed on
-2026-11-15 (ADR-0004, ledger 680); no other byte of the file changed.
+Two files differ from the deployment, each the smallest edit under ADR-0004 to fix a mistake that
+stops a script:
+
+- `_basic/change_empire.lua` had a stray `end` on line 132 that made both the legacy `qc` and the
+  Rust one refuse it. The owner had the line removed on 2026-11-15 (ADR-0004, ledger 680); no
+  other byte of the file changed.
+- `_basic/guild/guild_war_bet.lua` line 39 passed one concatenated string to `string.format` for a
+  three-verb format (`%s`, `%s`, `%d`), so no bet could ever complete on either server (ledger 408,
+  fixed in ledger 740 under ADR-0004/Package C10). Changed line 39 to pass `name1, name2, g[s][4]`
+  (2,635 bytes `e8630164031d54502d4758991ff468d9f408dbe93dec97e668f02c1f2ada8861` -> 2,597 bytes
+  `11086839bcd4a915006449afcc1141fb0dfc311fd0c706d9c8bb4bcbf276e1e2`); no other line changed.
 
 ## Encodings
 
