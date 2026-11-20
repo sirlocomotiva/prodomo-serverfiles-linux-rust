@@ -670,7 +670,13 @@ mod tests {
     struct Field {
         world: GameState,
         clients: Arc<ChannelClients>,
-        players: BTreeMap<u32, (Lease, UnboundedReceiver<Vec<u8>>)>,
+        players: BTreeMap<
+            u32,
+            (
+                Lease,
+                UnboundedReceiver<crate::client_registry::OutboxEntry>,
+            ),
+        >,
     }
 
     impl Field {

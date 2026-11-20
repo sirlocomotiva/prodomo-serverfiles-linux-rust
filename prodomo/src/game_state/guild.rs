@@ -5982,7 +5982,7 @@ impl GameState {
             return;
         };
         let mut vids: Vec<Vid> = map.present.iter().copied().collect();
-        vids.sort_by_key(|vid| vid.raw());
+        self.sort_vids_by_pid(&mut vids);
         for vid in vids {
             let Some(exit) = self
                 .war_maps
@@ -6000,16 +6000,15 @@ impl GameState {
     }
 
     /// Order the client of `vid` the warp back to the place it came from
-    /// (`CHARACTER::ExitToSavedLocation`, `G/char.cpp:6687-6692`): the warp takes the
-    /// character off the war map and to the exit location, and the exit location is
-    /// forgotten (`m_lExitMapIndex = 0`), so the row the save writes names the place the
-    /// character stands at.
+    /// (`CHARACTER::ExitToSavedLocation`, `G/char.cpp:6687-6692`): the member leaves the
+    /// world on the game thread in ascending PID order (Package C11) before its warp order
+    /// is queued.
     fn order_war_exit(&mut self, vid: Vid, exit: crate::save::ExitLocation) {
         let raw = vid.raw();
-        let Some(clients) = self.clients.as_ref() else {
+        if self.clients.is_none() {
             warn!(vid = raw, "a war map's end has no client registry to reach");
             return;
-        };
+        }
         let Some((channel, map)) = self.place_of(raw) else {
             warn!(
                 vid = raw,
@@ -6017,25 +6016,15 @@ impl GameState {
             );
             return;
         };
-        let ordered = clients
-            .members_on_map(channel, map)
-            .into_iter()
-            .find(|(_, entry)| entry.vid == raw)
-            .is_some_and(|(id, _)| {
-                clients.order(
-                    channel,
-                    id,
-                    ClientOrder::Warp {
-                        x: exit.x,
-                        y: exit.y,
-                        private_map_index: 0,
-                        channel: None,
-                        exit: None,
-                        sorted_until: self.sort_lock(vid),
-                    },
-                )
-            });
-        if !ordered {
+        let order = ClientOrder::Warp {
+            x: exit.x,
+            y: exit.y,
+            private_map_index: 0,
+            channel: None,
+            exit: None,
+            sorted_until: self.sort_lock(vid),
+        };
+        if !self.order_predeparted_warp(vid, channel, map, order) {
             warn!(vid = raw, "a war map's end found no client to order");
         }
     }

@@ -157,6 +157,7 @@ struct OutboxQuota {
     queued: AtomicUsize,
     overflowed: AtomicBool,
     overflow_notify: Notify,
+    next_mark: AtomicU64,
 }
 
 impl OutboxQuota {
@@ -166,8 +167,29 @@ impl OutboxQuota {
             queued: AtomicUsize::new(0),
             overflowed: AtomicBool::new(false),
             overflow_notify: Notify::new(),
+            next_mark: AtomicU64::new(1),
         }
     }
+}
+
+/// One item queued on a descriptor's outbox channel.
+///
+/// Wire records carry raw frame bytes. A [`Self::Mark`] is a zero-byte barrier the game thread
+/// places right before an item step runs (Package C12), so `finish_item_step` can flush every
+/// world record queued *before* the step ahead of the step's own records while leaving records
+/// queued *after* the step untouched in the channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboxEntry {
+    /// One encoded wire record to send to the client.
+    Record(Vec<u8>),
+    /// Ordering barrier placed before an item step ran on the game thread.
+    Mark(u64),
+}
+
+#[derive(Clone, Debug)]
+enum OutboxSender {
+    Plain(mpsc::UnboundedSender<Vec<u8>>),
+    Marked(mpsc::UnboundedSender<OutboxEntry>),
 }
 
 /// The descriptor side's handle on a client's outbox cap (Package C3).
@@ -217,7 +239,7 @@ impl OutboxGuard {
 /// slow client, and a dropped client is detected by the closed channel.
 #[derive(Clone, Debug)]
 pub struct ClientOutbox {
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: OutboxSender,
     quota: Option<Arc<OutboxQuota>>,
 }
 
@@ -225,12 +247,15 @@ impl ClientOutbox {
     /// Wraps a sender half with no outbox cap (for unit-test fixtures).
     #[must_use]
     pub const fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-        Self { tx, quota: None }
+        Self {
+            tx: OutboxSender::Plain(tx),
+            quota: None,
+        }
     }
 
-    fn with_quota(tx: mpsc::UnboundedSender<Vec<u8>>, quota: Arc<OutboxQuota>) -> Self {
+    fn with_quota(tx: mpsc::UnboundedSender<OutboxEntry>, quota: Arc<OutboxQuota>) -> Self {
         Self {
-            tx,
+            tx: OutboxSender::Marked(tx),
             quota: Some(quota),
         }
     }
@@ -253,7 +278,11 @@ impl ClientOutbox {
                 return false;
             }
         }
-        if self.tx.send(record).is_ok() {
+        let sent = match &self.tx {
+            OutboxSender::Plain(tx) => tx.send(record).is_ok(),
+            OutboxSender::Marked(tx) => tx.send(OutboxEntry::Record(record)).is_ok(),
+        };
+        if sent {
             true
         } else {
             if let Some(quota) = &self.quota {
@@ -263,10 +292,30 @@ impl ClientOutbox {
         }
     }
 
+    /// Place a zero-byte ordering barrier at the current FIFO position of this outbox
+    /// (Package C12). Returns `None` on plain test outboxes, overflowed outboxes, or closed
+    /// descriptors.
+    #[must_use]
+    pub fn place_mark(&self) -> Option<u64> {
+        let OutboxSender::Marked(tx) = &self.tx else {
+            return None;
+        };
+        let quota = self.quota.as_ref()?;
+        if quota.overflowed.load(Ordering::Acquire) {
+            return None;
+        }
+        let id = quota.next_mark.fetch_add(1, Ordering::AcqRel);
+        tx.send(OutboxEntry::Mark(id)).ok().map(|()| id)
+    }
+
     /// Whether the descriptor is still draining this queue and has not overflowed.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        !self.tx.is_closed()
+        let closed = match &self.tx {
+            OutboxSender::Plain(tx) => tx.is_closed(),
+            OutboxSender::Marked(tx) => tx.is_closed(),
+        };
+        !closed
             && !self
                 .quota
                 .as_ref()
@@ -564,23 +613,36 @@ pub struct Lease {
     outbox: ClientOutbox,
     guard: OutboxGuard,
     registry: Arc<ChannelClients>,
-    inbox: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    inbox: Option<mpsc::UnboundedReceiver<OutboxEntry>>,
     orders: Option<mpsc::UnboundedReceiver<ClientOrder>>,
 }
 
 impl Lease {
-    /// Take the next record addressed to this client, if one is waiting.
+    /// Take the next record addressed to this client, if one is waiting (skipping barriers).
     pub fn try_next(&mut self) -> Option<Vec<u8>> {
-        self.inbox.as_mut().and_then(|inbox| inbox.try_recv().ok())
+        let inbox = self.inbox.as_mut()?;
+        loop {
+            match inbox.try_recv() {
+                Ok(OutboxEntry::Record(record)) => return Some(record),
+                Ok(OutboxEntry::Mark(_)) => {}
+                Err(_) => return None,
+            }
+        }
     }
 
-    /// Wait for the next record addressed to this client.
+    /// Wait for the next record addressed to this client (skipping barriers).
     ///
     /// This resolves to `None` once every sender is gone, which is also how a descriptor
     /// task learns to stop listening for broadcasts.
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         match self.inbox.as_mut() {
-            Some(inbox) => inbox.recv().await,
+            Some(inbox) => loop {
+                match inbox.recv().await {
+                    Some(OutboxEntry::Record(record)) => return Some(record),
+                    Some(OutboxEntry::Mark(_)) => {}
+                    None => return None,
+                }
+            },
             None => std::future::pending().await,
         }
     }
@@ -594,12 +656,17 @@ impl Lease {
     ///
     /// Returns `None` when the queue is already lent out, so a second call before the next
     /// take-back is a no-op rather than a silent loss.
-    pub fn take_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+    pub fn take_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<OutboxEntry>> {
         self.inbox.take()
     }
 
+    /// Borrow the queue in place while it is home on the lease (Package C12).
+    pub fn receiver_mut(&mut self) -> Option<&mut mpsc::UnboundedReceiver<OutboxEntry>> {
+        self.inbox.as_mut()
+    }
+
     /// Take the queue back after a [`Lease::take_receiver`] arm.
-    pub fn put_receiver(&mut self, inbox: mpsc::UnboundedReceiver<Vec<u8>>) {
+    pub fn put_receiver(&mut self, inbox: mpsc::UnboundedReceiver<OutboxEntry>) {
         if self.inbox.is_none() {
             self.inbox = Some(inbox);
         } else {
@@ -932,5 +999,51 @@ mod tests {
         assert!(guard.is_overflowed());
         assert!(!outbox.is_open(), "overflowed outbox reports closed");
         guard.overflowed().await;
+    }
+
+    #[test]
+    fn a_mark_separates_pre_step_records_from_post_step_records() {
+        let registry = Arc::new(ChannelClients::new());
+        let mut lease = registry.join(entry(1, 100, "Ordered"));
+        let outbox = lease.outbox();
+        assert!(outbox.send(b"heal-before".to_vec()));
+        assert!(outbox.send(b"chat-before".to_vec()));
+        let mark = outbox.place_mark().expect("mark placed");
+        assert!(outbox.send(b"tick-after".to_vec()));
+
+        let rx = lease.receiver_mut().expect("inbox home");
+        let mut before = Vec::new();
+        while let Ok(entry) = rx.try_recv() {
+            match entry {
+                OutboxEntry::Record(record) => before.push(record),
+                OutboxEntry::Mark(id) if id >= mark => break,
+                OutboxEntry::Mark(_) => {}
+            }
+        }
+        assert_eq!(
+            before,
+            vec![b"heal-before".to_vec(), b"chat-before".to_vec()]
+        );
+        // Post-mark record stays untouched in the channel for the next turn.
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(OutboxEntry::Record(b"tick-after".to_vec()))
+        );
+    }
+
+    #[test]
+    fn place_mark_orders_entries_without_consuming_quota() {
+        let registry = Arc::new(ChannelClients::with_outbox_capacity(1));
+        let mut lease = registry.join(entry(1, 100, "Marked"));
+        let outbox = lease.outbox();
+        let m1 = outbox.place_mark().expect("first mark lands");
+        assert!(outbox.send(vec![1]), "single record still fits capacity 1");
+        let m2 = outbox.place_mark().expect("second mark lands at cap");
+        assert!(m2 > m1, "marks are strictly increasing");
+        assert!(!lease.outbox_guard().is_overflowed());
+        let mut rx = lease.take_receiver().expect("receiver is home");
+        assert_eq!(rx.try_recv().ok(), Some(OutboxEntry::Mark(m1)));
+        assert_eq!(rx.try_recv().ok(), Some(OutboxEntry::Record(vec![1])));
+        assert_eq!(rx.try_recv().ok(), Some(OutboxEntry::Mark(m2)));
     }
 }

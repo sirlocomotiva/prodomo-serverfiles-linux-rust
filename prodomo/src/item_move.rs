@@ -156,6 +156,10 @@ pub struct MovedItems {
     /// `__OpenPrivateShop` sends once the descriptor has sent the list's lines
     /// (`UseSilkBotaryReal`, `:2215-2228`). `None` while the step asked for none.
     pub silk_botary: Option<Vec<Vec<u8>>>,
+    /// The outbox barrier placed right before this step ran on the game thread (Package C12).
+    /// `finish_item_step` flushes every outbox record ahead of this mark before sending
+    /// [`Self::records`], leaving later records queued for the next turn.
+    pub outbox_mark: Option<u64>,
 }
 
 /// What a used quest item's scripts landed besides the step's records and rows: the GRAND
@@ -266,6 +270,7 @@ impl MovedItems {
             monarch_money: None,
             price_list: None,
             silk_botary: None,
+            outbox_mark: None,
         }
     }
 
@@ -358,6 +363,7 @@ impl MovedItems {
             monarch_money: None,
             price_list: None,
             silk_botary: None,
+            outbox_mark: None,
         }
     }
 

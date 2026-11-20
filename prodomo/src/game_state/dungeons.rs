@@ -273,19 +273,21 @@ impl super::GameState {
     /// remembered, and its client is ordered the warp to (`x`, `y`) on the private
     /// map, on the Channel that hosts it.
     fn dungeon_jump_member(&mut self, index: i32, channel: u8, vid: Vid, x: i32, y: i32) {
-        self.dungeon_jump_member_scaled(index, channel, vid, x, y, true);
+        self.dungeon_jump_member_scaled(index, channel, vid, (x, y), true, true);
     }
 
     /// The member jump with (`d.new_jump_party`) or without (`d.new_jump`) `JumpParty`'s
     /// hundredfold scale: the exit save, then the warp order for the finished point.
+    /// When `predepart` is true (Package C11: multi-character party jump), the member leaves
+    /// the world on the game thread in PID order before its warp order is queued.
     fn dungeon_jump_member_scaled(
         &mut self,
         index: i32,
         channel: u8,
         vid: Vid,
-        x: i32,
-        y: i32,
+        (x, y): (i32, i32),
         map_units: bool,
+        predepart: bool,
     ) {
         let raw = vid.raw();
         let Some((_, from)) = self.place_of(raw) else {
@@ -310,27 +312,26 @@ impl super::GameState {
         } else {
             (x, y)
         };
-        let Some(clients) = self.clients.as_ref() else {
-            return;
+        let order = crate::client_registry::ClientOrder::Warp {
+            x,
+            y,
+            private_map_index: index,
+            channel: Some(channel),
+            exit,
+            sorted_until: self.sort_lock(vid),
         };
-        let ordered = clients
-            .members_on_map(channel, from)
-            .into_iter()
-            .find(|(_, entry)| entry.vid == raw)
-            .is_some_and(|(id, _)| {
-                clients.order(
-                    channel,
-                    id,
-                    crate::client_registry::ClientOrder::Warp {
-                        x,
-                        y,
-                        private_map_index: index,
-                        channel: Some(channel),
-                        exit,
-                        sorted_until: self.sort_lock(vid),
-                    },
-                )
-            });
+        let ordered = if predepart {
+            self.order_predeparted_warp(vid, channel, from, order)
+        } else {
+            let Some(clients) = self.clients.as_ref() else {
+                return;
+            };
+            clients
+                .members_on_map(channel, from)
+                .into_iter()
+                .find(|(_, entry)| entry.vid == raw)
+                .is_some_and(|(id, _)| clients.order(channel, id, order))
+        };
         if !ordered {
             tracing::warn!(vid = raw, "a dungeon jump found no client to order");
         }
@@ -377,15 +378,15 @@ impl super::GameState {
         }
     }
 
-    /// `d.exit_all()` (`G/questlua_dungeon.cpp:1257-1265`): every member present is
-    /// ordered the warp back to the place it came from (`ExitToSavedLocation`,
-    /// `G/char.cpp:6687-6692`), in VID order. Quiet with none.
+    /// `d.exit_all()` (`G/questlua_dungeon.cpp:1257-1265`): every member present leaves
+    /// the world in ascending PID order (Package C11) and is ordered the warp back to the
+    /// place it came from (`ExitToSavedLocation`, `G/char.cpp:6687-6692`). Quiet with none.
     pub(super) fn dungeon_exit_all(&mut self, index: i32) {
         let Some(dungeon) = self.dungeons.by_index.get(&index) else {
             return;
         };
         let mut vids: Vec<Vid> = dungeon.present.iter().copied().collect();
-        vids.sort_by_key(|vid| vid.raw());
+        self.sort_vids_by_pid(&mut vids);
         for vid in vids {
             let Some(exit) = self
                 .dungeons
@@ -395,19 +396,18 @@ impl super::GameState {
             else {
                 continue;
             };
-            self.order_dungeon_exit(vid, exit);
+            self.order_dungeon_exit_inner(vid, exit, true);
             self.unpresent(index, vid);
         }
     }
 
-    /// One member's warp back to the place it came from: the ordered warp names the
-    /// remembered exit. The caller drops the member from the present set, as
-    /// `d.exit_all` and the party's `FExitDungeon` arm do.
-    pub(super) fn order_dungeon_exit(&mut self, vid: Vid, exit: crate::save::ExitLocation) {
+    pub(super) fn order_dungeon_exit_inner(
+        &mut self,
+        vid: Vid,
+        exit: crate::save::ExitLocation,
+        predepart: bool,
+    ) {
         let raw = vid.raw();
-        let Some(clients) = self.clients.as_ref() else {
-            return;
-        };
         let Some((channel, map)) = self.place_of(raw) else {
             return;
         };
@@ -416,24 +416,26 @@ impl super::GameState {
         } else {
             0
         };
-        let ordered = clients
-            .members_on_map(channel, map)
-            .into_iter()
-            .find(|(_, entry)| entry.vid == raw)
-            .is_some_and(|(id, _)| {
-                clients.order(
-                    channel,
-                    id,
-                    crate::client_registry::ClientOrder::Warp {
-                        x: exit.x,
-                        y: exit.y,
-                        private_map_index: private,
-                        channel: None,
-                        exit: None,
-                        sorted_until: self.sort_lock(vid),
-                    },
-                )
-            });
+        let order = crate::client_registry::ClientOrder::Warp {
+            x: exit.x,
+            y: exit.y,
+            private_map_index: private,
+            channel: None,
+            exit: None,
+            sorted_until: self.sort_lock(vid),
+        };
+        let ordered = if predepart {
+            self.order_predeparted_warp(vid, channel, map, order)
+        } else {
+            let Some(clients) = self.clients.as_ref() else {
+                return;
+            };
+            clients
+                .members_on_map(channel, map)
+                .into_iter()
+                .find(|(_, entry)| entry.vid == raw)
+                .is_some_and(|(id, _)| clients.order(channel, id, order))
+        };
         if !ordered {
             tracing::warn!(vid = raw, "a dungeon exit found no client to order");
         }
@@ -652,7 +654,7 @@ impl super::GameState {
     /// (`G/dungeon.cpp:398-399`), so the shared member jump's scale would land the solo
     /// jumper a hundredfold past the entry.
     fn dungeon_jump_member_raw(&mut self, index: i32, channel: u8, vid: Vid, x: i32, y: i32) {
-        self.dungeon_jump_member_scaled(index, channel, vid, x, y, false);
+        self.dungeon_jump_member_scaled(index, channel, vid, (x, y), false, false);
     }
 
     /// `d.clear_regen()` (`G/questlua_dungeon.cpp:235-243`): the dungeon's regens go.

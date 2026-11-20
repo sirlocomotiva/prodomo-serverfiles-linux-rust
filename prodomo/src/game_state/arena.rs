@@ -291,23 +291,26 @@ impl GameState {
             .arena_slots()
             .into_iter()
             .find(|slot| self.arenas[&slot.0][slot.1].pids == [0; 2]);
-        let success = if let Some(slot) = slot {
+        if let Some(slot) = slot {
+            // Tell the GM before `start_arena` pre-departs the duelists, in case the GM is
+            // one of them and its outbox leaves with it (Package C11).
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"Dalian started successfully.",
+                &[],
+            );
             self.start_arena(slot, [a, b], sets, minutes);
-            true
         } else {
-            false
-        };
-        self.tell(
-            vid,
-            mover,
-            CHAT_TYPE_INFO,
-            if success {
-                b"Dalian started successfully."
-            } else {
-                b"There is a problem starting Dalian."
-            },
-            &[],
-        );
+            self.tell(
+                vid,
+                mover,
+                CHAT_TYPE_INFO,
+                b"There is a problem starting Dalian.",
+                &[],
+            );
+        }
     }
 
     fn arena_end_line(&mut self, vid: Vid, rest: &[u8], mover: Mover) {
@@ -323,9 +326,6 @@ impl GameState {
             return;
         };
         let slot = self.arena_member(player);
-        if let Some(slot) = slot {
-            self.end_arena(slot);
-        }
         self.tell(
             vid,
             mover,
@@ -337,6 +337,9 @@ impl GameState {
             },
             &[],
         );
+        if let Some(slot) = slot {
+            self.end_arena(slot);
+        }
     }
 
     fn arena_slots(&self) -> Vec<Slot> {
@@ -493,8 +496,18 @@ impl GameState {
         arena.timeout = Some((self.last_pulse + minutes * 60 * 25, 0));
         let start = arena.start;
         for (vid, (x, y)) in players.into_iter().zip(start) {
-            self.order_warp(vid, (x * 100, y * 100));
             self.arena_refill(vid);
+            if let Some((channel, map)) = self.place_of(vid.raw()) {
+                let order = crate::client_registry::ClientOrder::Warp {
+                    x: x * 100,
+                    y: y * 100,
+                    private_map_index: 0,
+                    channel: None,
+                    exit: None,
+                    sorted_until: self.sort_lock(vid),
+                };
+                let _ordered = self.order_predeparted_warp(vid, channel, map, order);
+            }
         }
     }
 
@@ -562,31 +575,21 @@ impl GameState {
         }
     }
 
-    fn arena_return_warp(&self, vid: Vid, (x, y): (i32, i32), channel: u8) {
-        let Some(body) = self.bodies.get(&vid) else {
+    fn arena_return_warp(&mut self, vid: Vid, (x, y): (i32, i32), channel: u8) {
+        let Some((body_channel, body_map)) =
+            self.bodies.get(&vid).map(|body| (body.channel, body.map))
+        else {
             return;
         };
-        let Some(clients) = self.clients.as_ref() else {
-            return;
+        let order = crate::client_registry::ClientOrder::Warp {
+            x,
+            y,
+            private_map_index: 0,
+            channel: Some(channel),
+            exit: None,
+            sorted_until: self.sort_lock(vid),
         };
-        if let Some((id, _)) = clients
-            .members_on_map(body.channel, body.map)
-            .into_iter()
-            .find(|(_, entry)| entry.vid == vid.raw())
-        {
-            let _ordered = clients.order(
-                body.channel,
-                id,
-                crate::client_registry::ClientOrder::Warp {
-                    x,
-                    y,
-                    private_map_index: 0,
-                    channel: Some(channel),
-                    exit: None,
-                    sorted_until: self.sort_lock(vid),
-                },
-            );
-        }
+        let _ordered = self.order_predeparted_warp(vid, body_channel, body_map, order);
     }
 
     pub(super) fn arena_disconnect(&mut self, vid: Vid) {

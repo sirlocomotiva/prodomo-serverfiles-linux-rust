@@ -58638,3 +58638,89 @@ First-run failure: 1 scenario failed on the first full run
 of B5-fixed 234|236); updated and verified 8/8 in parallel, then Run 2 passed 5,778/0. Parity:
 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of 2,332 rows (100% closed);
 607 scenarios. No ADR changed.
+
+## 741. Package C9 (quest step send order), C11 (multi-character warp order), and C12 (`finish_item_step` outbox mark)
+
+Closes **Package C9, C11, and C12** from `docs/STATUS.md`:
+
+- **Package C12 — `finish_item_step` outbox mark (`prodomo/src/client_registry.rs`,
+  `prodomo/src/item_move.rs`, `prodomo/src/game_state.rs`, `prodomo/src/main.rs`,
+  `prodomo/tests/parity.rs`):**
+  - Replaced the raw `Vec<u8>` outbox channel with `OutboxEntry::{Record(Vec<u8>), Mark(u64)}` and
+    added `ClientOutbox::place_mark` (which does not consume the C3 `max_client_outbox` record
+    quota).
+  - Added `MovedItems::outbox_mark: Option<u64>` and `GameState::mark_outbox` /
+    `GameState::run_item_step`, stamping the mover's outbox before every item step runs on the game
+    thread (all 39 `answer_item_step` / `MovedItems` callers).
+  - Added `flush_outbox_to_mark` in `prodomo/src/main.rs` and called it inside `finish_item_step`
+    before sending `moved.records`, so any world record queued ahead of the item step (such as a
+    heal tick or chat line) reaches the client before the step's own item/point records, while
+    records queued after the mark stay untouched in the outbox.
+  - Removed the late-heal acceptance workaround in
+    `prodomo/tests/parity.rs::every_apply_type_with_its_own_arm_moves_its_points_as_legacy` and
+    added three unit tests (`a_mark_separates_pre_step_records_from_post_step_records`,
+    `place_mark_orders_entries_without_consuming_quota`,
+    `flush_outbox_to_mark_splits_pre_mark_from_post_mark`).
+- **Package C11 — multi-character warp order (`prodomo/src/game_state.rs`,
+  `prodomo/src/game_state/{dungeons,guild,arena,meley,party,death}.rs`,
+  `prodomo/tests/parity.rs`):**
+  - Added `GameState::predeparted: HashMap<Vid, Kept>`, `sort_vids_by_pid`, and
+    `order_predeparted_warp` so multi-character warps remove each member from the world on the game
+    thread in legacy ascending player-ID order ahead of sending `ClientOrder::Warp` (`leave_world_by`
+    returns the pre-departed `Kept` snapshot when the descriptor processes its warp or a concurrent
+    disconnect).
+  - Wired `order_predeparted_warp` into dungeon jumps and exits (`dungeon_jump_party`,
+    `dungeon_jump_member`, `dungeon_exit_all`), guild war and Meley exits (`order_war_exit`,
+    `order_war_warp`, `meley_exit_all`), arena starts and ends (`start_arena`, `end_arena`, with
+    the GM confirmation sent ahead of pre-departing a GM duelist), and `FExitDungeon`
+    (`unlink_party_collecting` + `flush_dungeon_nears` after `remove_body` so a leader's own
+    `GC_CHARACTER_DEL` broadcasts to near members before their warps pre-depart them).
+  - Tightened `prodomo/tests/parity.rs` (`read_ordered_jump_departure`, `read_own_removal`,
+    `forest_drop_warps_yankee_home`) to pin ascending player-ID removal order: an earlier member
+    never hears a later member's removal, and a later member always hears the earlier member's
+    removal first.
+- **Package C9 — quest step send order (`docs/STATUS.md`, `prodomo/tests/parity.rs`):**
+  - Audited all 47 queued kinds in `WorldMoves` and `QuietOwned`
+    (`prodomo/src/game_state/quests.rs`, `prodomo/src/game_state/quest_quiet.rs`) against legacy
+    call-site writes:
+    - *Pure state/DB queues with no immediate client wire record* (19 kinds): `affects`, `clears`,
+      `guild_land_sets`, `guild_privs`, `empire_privs`, `character_privs`, `guild_exps`, `exp`,
+      `skill_groups`, `temple_prepares`, `ox_quizzes`, `gaya_opens`, `event_starts`,
+      `dungeon_timers`, `dungeon_clears`, `dungeon_kills`, `damage_race_sets`,
+      `server_timer_ops`, `account_pids`, `confirm_timeouts`, `dungeon_spawns` (only visible to
+      viewers already on the dungeon map).
+    - *Wire-emitting queues flushed by `apply_world_moves` after `quest_step` commits PostgreSQL
+      Transfers and returns `GC_SCRIPT` / item / point records to the descriptor* (26 kinds):
+      `warps`, `drops`, `villages` (`pc.warp_to_village`), `conquerors` (`pc.set_conqueror`),
+      `sash_opens`, `changelooks`, `minings`, `horses`, `ds_refines`, `ds_attrs`, `party_sets`,
+      `dungeon_sets`, `dungeon_jumps`, `dungeon_notices`, `dungeon_warps`, `dungeon_exits`,
+      `dungeon_singles`, `empire_moves` (`pc.change_empire` `RestartAtSamePos`), `commands`,
+      `gaya_market_opens`, `aura_opens`, `shop_opens`, `rank_points`, `observes`, `quiet`
+      (`notice_all`, `notice_in_map`, `syschat`, `cmdchat`, `big_notice`, `say_in_map`, `chat`,
+      `ocha_notice`), and `world_boss` / `meley` / `ship` / `guild` / `arena` quest dispatches.
+  - Recorded this as a Divergence in `docs/STATUS.md` (alongside V22 and ledger 413): ADR-0003
+    requires a quest step's item and gold Transfers to commit before its records reach the client,
+    and the Rewrite's descriptor/game-thread split sends the step's `GC_SCRIPT` and item/point
+    records directly from the descriptor while `apply_world_moves` flushes world broadcasts,
+    re-shows, window opens, and `ClientOrder::Warp` orders to the outbox/order queues afterward
+    (`the_exchange_scroll_moves_alpha_to_the_yellow_empire`).
+- **Two first-run test defects fixed during gates:**
+  - `prodomo/src/game_state/mob_battle.rs::a_dead_ended_follower_past_1000_walks_back_to_its_leader`:
+    spawning the follower 1500 from its leader before `P0` let `state_idle`'s protege follow stamp
+    a random `min_1` in `150..=400`, which had a 1-in-251 chance of equalling `state_battle`'s
+    `min_2` and hitting `npc_goto`'s same-dest early return (`mob_ai.rs:885`). Moved the follower
+    past 1000 after `P0`.
+  - `prodomo/tests/parity.rs::read_heal_tick` / `a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds`:
+    clamped the expected +29 heal tick at Alpha's max HP (`1420`) because ledger 740's B5 fix
+    reduces the boar's swing damage against level-154 Alpha so a swing can leave HP within 29 of
+    max HP (verified 8/8 in parallel).
+
+Gates (2026-11-20), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,781
+passed, 0 failed in 46 targets; with it 5,781 passed, 0 failed in 46 targets (492 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+First-run failures: `game_state::mob_battle::tests::a_dead_ended_follower_past_1000_walks_back_to_its_leader`
+(1-in-251 idle/battle `dest` collision) and `a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds`
+(missing `.min(1420)` max-HP clamp on heal tick after ledger 740's B5 fix); both fixed and Run 2
+passed 5,781/0. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of
+2,332 rows (100% closed); 607 scenarios. No ADR changed.

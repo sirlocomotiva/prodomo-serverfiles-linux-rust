@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 740 |
+| measure | value at ledger 741 |
 |---|---|
 | Parity inventory | 2,332 rows: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`; **Package B complete — all 12 inventory files closed** |
 | Scenarios | 607 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,778 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 740 has the receipt) |
+| Tests | 5,781 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 741 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 126 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 48 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -149,15 +149,12 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
    `gc_inventory.rs`: `HEADER_GC_SYNC_POSITION` (`0x05`) flipped to `true` (126 of 134);
    `0x5f` (`HEADER_GC_REFINE_INFORMATION_OLD`) has no send site and stays `false` (`0x77`
    `HEADER_GC_REFINE_INFORMATION_NEW` is `true`).
-9. **A quest step's send order.** A step's world moves run after its script, kind by kind
-   (`apply_world_moves`, `prodomo/src/game_state/quests.rs`), so a record a legacy call writes
-   as it is called can leave behind the step's page. Found in ledger 680: `pc.change_empire`'s
-   re-show (`RestartAtSamePos`, `G/char_change_empire.cpp:119-123`) reaches the client after
-   the gold change, the scroll's removal and the last page, where legacy writes it first.
-   `the_exchange_scroll_moves_alpha_to_the_yellow_empire` pins today's order and names this
-   item. List every queued kind against its legacy call's writes. *Exit:* each kind either
-   sends in call order or is a Divergence row with its reason. This is a difference the
-   Rewrite's design causes, so ADR-0008 does not make it an improvement.
+9. **A quest step's send order.** **Done in ledger 741.** All 47 `WorldMoves` and `QuietOwned`
+   kinds (`prodomo/src/game_state/{quests,quest_quiet}.rs`) are audited against legacy call-site
+   writes (ledger 741): 19 emit no immediate client record, and the 26 wire-emitting kinds flush
+   after the descriptor sends the step's committed `GC_SCRIPT` / item / point records (recorded in
+   the Divergence register below alongside V22 and ledger 413;
+   `the_exchange_scroll_moves_alpha_to_the_yellow_empire` pins `pc.change_empire`).
 10. **Legacy's mistakes still reproduced are fixed** (ADR-0008). **Done in ledger 740.** All seven
     are fixed with regression tests, Defect and Divergence rows, and no register row says
     "reproduced" or "provisional": D1 (weighted group-group draw), D4 (point group/group-group
@@ -166,32 +163,22 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
     for `/attr_full_set` and `/change_attr`/`/add_attr`/`/change_rare_attr`/`/add_rare_attr`, revive
     herb own-dead-horse guard, `guild_war_bet.lua:39` format args (ADR-0004), and B5 (`victim_level`
     in `CalcAttackRating`).
-11. **A Warp the game thread orders for several characters.** Legacy warps a party, a guild or
-    an arena pair inside one call, member by member in player-ID order
-    (`ForEachOnMapMember`, `G/party.h:295`, `CDungeon::JumpParty`, `G/dungeon.cpp:396-425`):
-    a later member hears each earlier member's removal, and an earlier one never hears a
-    later one's. The Rewrite hands each member's descriptor a `ClientOrder::Warp` and each
-    descriptor leaves the world when it gets to it, so either member may go first and the
-    first by player ID can hear a removal legacy never sends it. Found in ledger 685: two
-    forest scenarios lost a full run on it; their readers (`read_own_removal`) now accept
-    both orders and name this item. The sites are the dungeon jumps and exits
-    (`game_state/dungeons.rs`), the guild war and land Warps (`guild.rs`) and the arena
-    (`arena.rs`). *Exit:* the members leave the world in legacy's order on the game thread
-    and the scenarios pin it, or the order is a Divergence row with its reason. This is a
-    difference the Rewrite's design causes, so ADR-0008 does not make it an improvement.
-12. **An item step's records against the world's own.** A descriptor sends an item step's
-    records only after their rows are stored (`finish_item_step`, `prodomo/src/main.rs`), and
-    the records the world queued for that client before the step (a heal tick, a chat line)
-    wait in its outbox until then. So the client can hear the step's points before a heal the
-    step started from, and keep the heal's older value until the next tick; legacy writes
-    both in the order it ran them. Found in ledger 706: the apply scenario
-    (`every_apply_type_with_its_own_arm_moves_its_points_as_legacy`) lost a full run on it
-    (the move's 953 hit points, then the heal's 787), and its reader now accepts the late heal
-    and names this item. *Exit:* the
-    world marks the step's place in the outbox and the descriptor sends what came before the
-    mark first, for every `finish_item_step` caller, or the order is a Divergence row with
-    its reason. This is a difference the Rewrite's design causes, so ADR-0008 does not make
-    it an improvement.
+11. **A Warp the game thread orders for several characters.** **Done in ledger 741.**
+    `GameState::order_predeparted_warp` and `sort_vids_by_pid` (`prodomo/src/game_state.rs`)
+    pre-depart each member on the game thread in legacy ascending player-ID order ahead of
+    `ClientOrder::Warp` across dungeon jumps/exits (`dungeons.rs`), guild/Meley warps (`guild.rs`,
+    `meley.rs`), arena duels (`arena.rs`), and `FExitDungeon` (`party.rs`), holding each `Kept`
+    snapshot for the descriptor's warp or disconnect. The forest scenarios
+    (`read_ordered_jump_departure`, `read_own_removal`, `forest_drop_warps_yankee_home`) pin the
+    ascending PID order.
+12. **An item step's records against the world's own.** **Done in ledger 741.**
+    `ClientOutbox::place_mark` (`prodomo/src/client_registry.rs`), `GameState::run_item_step`
+    (`prodomo/src/game_state.rs`), and `flush_outbox_to_mark` in `finish_item_step`
+    (`prodomo/src/main.rs`) flush every world record queued before the item step ahead of
+    `moved.records` for all 39 `finish_item_step` callers while leaving post-step records in the
+    outbox. The late-heal workaround in
+    `every_apply_type_with_its_own_arm_moves_its_points_as_legacy` is removed and three unit tests
+    pin the mark boundary.
 
 ### D. The play-test kit (opens step 5; the play test itself is out of scope for now)
 
@@ -520,6 +507,7 @@ owner should know about (178.5):
 | A revive herb is spent only when it revives the giver's own dead horse (ledger 740). | `G/char_item.cpp:9483-9499` spends the herb even when refused on a live horse or another player's horse. |
 | `guild_war_bet.lua:39` formats `_80_say` with `(name1, name2, g[s][4])` so guild-war bets complete (ADR-0004, ledger 740). | Legacy passes one concatenated string for three format verbs (`%s`, `%s`, `%d`) and raises a Lua error on every bet. |
 | `CalcAttackRating` computes victim evasion from the victim's own level (B5, ledger 740). | `int victim_lv = pkAttacker->GetLevel();` (`G/battle.cpp:282`) uses the attacker's level for victim evasion. |
+| A quest step's queued world moves (`WorldMoves` and `QuietOwned`: broadcasts, warps, drops, village/empire/conqueror re-shows, dungeon jumps/exits, and window opens) flush through the outbox and order queue after the descriptor writes the step's committed `GC_SCRIPT`, item, and point records (ledger 741; `the_exchange_scroll_moves_alpha_to_the_yellow_empire`, alongside V22 and ledger 413). | Legacy runs the quest callback directly on the character and writes each call's packets inline before the step finishes (`G/questlua_*.cpp`, `G/char_change_empire.cpp:119-123`). ADR-0003 commits a step's item and gold Transfers before the descriptor sends the step's records, so world-side side effects flush after the step completes. |
 
 ## Legacy defects not to reproduce
 

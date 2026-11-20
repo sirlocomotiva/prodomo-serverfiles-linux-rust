@@ -11854,9 +11854,9 @@ fn special_apply_values(
 /// `points[at..at + len]` it sent against the client's view `view`, which then takes every
 /// record from `at` on. False when the view does not yet know the points the move needs.
 ///
-/// `docs/STATUS.md` C12: a heal the world ran before the move can reach the client after the
-/// move's records, carrying the points the move started from. The move is then checked from
-/// that heal, and the view keeps the move's value, not the late heal's.
+/// Package C12 (ledger 741): `finish_item_step` flushes pre-step outbox records up to the
+/// step's mark before sending the step's own records, so a heal tick that ran before the
+/// move always arrives ahead of `points[at..at + len]`, never behind it.
 fn apply_move_checked(
     special: (u8, i16),
     (sign, real): (i64, (i64, i64)),
@@ -11868,30 +11868,8 @@ fn apply_move_checked(
         .iter()
         .map(|(_, value)| *value)
         .collect();
-    let mut want = special_apply_values(special, sign, real, |kind| view.get(&kind).copied());
-    let mut late = None;
-    if want.as_ref().is_some_and(|want| *want != sent) {
-        for (index, &(kind, value)) in points.iter().enumerate().skip(at + len) {
-            if !matches!(kind, 5 | 7) {
-                continue;
-            }
-            let mut healed = view.clone();
-            healed.insert(kind, value);
-            let again = special_apply_values(special, sign, real, |k| healed.get(&k).copied());
-            if again.as_ref() == Some(&sent) {
-                (want, late) = (again, Some(index));
-                break;
-            }
-        }
-    }
-    view.extend(
-        points
-            .iter()
-            .enumerate()
-            .skip(at)
-            .filter(|(index, _)| Some(*index) != late)
-            .map(|(_, point)| *point),
-    );
+    let want = special_apply_values(special, sign, real, |kind| view.get(&kind).copied());
+    view.extend(points.iter().skip(at).copied());
     let Some(want) = want else {
         return false;
     };
@@ -17013,8 +16991,8 @@ fn read_heal_tick(keyed: &mut Keyed, mob: u32, victim: u32, hp_now: i64, due: st
             let value = i64::from_le_bytes(record[17..25].try_into().expect("eight bytes"));
             assert_eq!(
                 value,
-                hp_now + 29,
-                "each swing stamps last_move, so the tick adds 29"
+                (hp_now + 29).min(1420),
+                "each swing stamps last_move, so the tick adds 29 up to max HP 1420"
             );
             return;
         }
@@ -18074,7 +18052,7 @@ fn a_hit_monster_turns_on_its_attacker_and_swings_every_two_seconds() {
     // TODO at the send site says so (`G/char.cpp:5542-5545`).
     assert_eq!(second.owner, Some(boar), "the claim is sent again");
     let before = first.hp.expect("the first swing's hit points");
-    let ticked = [0, 29, 86].map(|tick| before + tick - i64::from(second.damage));
+    let ticked = [0, 29, 86].map(|tick| (before + tick).min(1420) - i64::from(second.damage));
     assert!(
         second.hp.is_some_and(|hp| ticked.contains(&hp)),
         "the second swing on top of at most one tick: {:?} from {before}",
@@ -26742,18 +26720,91 @@ fn forest_dialog_spends_the_tickets(party: ForestParty, guardian: u32) -> Forest
     }
 }
 
-/// `who`'s own removal on a Warp the game thread ordered for the whole party. Each member's
-/// descriptor carries its Warp out, in no fixed order (`docs/STATUS.md`, next steps, C11), so
-/// a member still standing may hear `other` go first.
-fn read_own_removal(who: &mut Keyed, own: u32, other: u32) {
-    let mut removed = vec![GC_CHARACTER_DEL];
-    removed.extend_from_slice(&other.to_le_bytes());
-    let mut record = who.read_game();
-    if record == removed {
-        record = who.read_game();
+/// `who`'s removal on a Warp the game thread ordered for the whole party (Package C11,
+/// ledger 741): members leave the world on the game thread in ascending PID order, so the
+/// first member (`earlier == None`) never hears a later member's removal, while a later
+/// member (`earlier == Some(first_vid)`) always hears the earlier member's removal first.
+fn read_own_removal(who: &mut Keyed, own: u32, earlier: Option<u32>) {
+    let read_del = |who: &mut Keyed, expected: u32, msg: &str| {
+        let mut expected_bytes = vec![GC_CHARACTER_DEL];
+        expected_bytes.extend_from_slice(&expected.to_le_bytes());
+        let got = loop {
+            let record = who.read_game();
+            if record[0] == GC_CHARACTER_DEL {
+                break record;
+            }
+            assert!(
+                matches!(
+                    record[0],
+                    GC_PARTY_UNLINK | GC_PARTY_UPDATE | GC_POINT_CHANGE
+                ),
+                "only party unlink/bonus clear may precede removal: {record:02x?}"
+            );
+        };
+        assert_eq!(got, expected_bytes, "{msg}");
+    };
+    if let Some(first) = earlier {
+        read_del(
+            who,
+            first,
+            "later member hears earlier member's removal first (C11)",
+        );
     }
-    removed[1..5].copy_from_slice(&own.to_le_bytes());
-    assert_eq!(record, removed, "EncodeRemovePacket(this)");
+    read_del(who, own, "EncodeRemovePacket(this)");
+}
+
+fn read_ordered_jump_departure(who: &mut Keyed, vid: u32, earlier: Option<u32>, port: u16) {
+    let mut removed = vec![GC_CHARACTER_DEL];
+    removed.extend_from_slice(&vid.to_le_bytes());
+    let mut saw_earlier = false;
+    let got = loop {
+        let record = who.read_game();
+        if record[0] == GC_CHARACTER_DEL {
+            if let Some(first) = earlier {
+                if !saw_earlier && record[1..5] == first.to_le_bytes() {
+                    saw_earlier = true;
+                    continue;
+                }
+            }
+            break record;
+        }
+        if record[0] == ITEM_SET {
+            assert_eq!(record.len(), ITEM_SET_LEN);
+            assert_eq!(record[1], 1, "the ticket stood in the inventory");
+            assert_eq!(u16::from_le_bytes([record[2], record[3]]), 0);
+            assert_eq!(
+                u32::from_le_bytes([record[4], record[5], record[6], record[7]]),
+                0,
+                "the take clears the member's cell"
+            );
+            continue;
+        }
+        // Ledger 404's relog replants Yankee's revive, whose expiry look update lands
+        // mid-jump; its remove is the revive timer's own and filtered.
+        assert!(
+            matches!(
+                record[0],
+                GC_PARTY_UPDATE
+                    | GC_PARTY_UNLINK
+                    | GC_PARTY_PARAMETER
+                    | GC_CHARACTER_UPDATE
+                    | GC_POINT_CHANGE
+            ),
+            "the jump syncs the party first: {record:02x?}"
+        );
+    };
+    if earlier.is_some() {
+        assert!(
+            saw_earlier,
+            "later member must hear earlier member's removal before its own (C11)"
+        );
+    }
+    assert_eq!(got, removed, "EncodeRemovePacket(this)");
+    assert_eq!(
+        who.read_game(),
+        a_warp_record((782_400, 1_502_100), port),
+        "the jump lands at the entry"
+    );
 }
 
 fn forest_jump_lands_at_the_entry(
@@ -26773,50 +26824,10 @@ fn forest_jump_lands_at_the_entry(
         port: _,
     } = party;
     let port = server.channel(1).port();
-    let jumpers = [
-        (&mut alice, alpha_vid, yankee_vid),
-        (&mut yankee, yankee_vid, alpha_vid),
-    ];
-    for (who, vid, other) in jumpers {
-        let mut removed = vec![GC_CHARACTER_DEL];
-        removed.extend_from_slice(&vid.to_le_bytes());
-        let got = loop {
-            let record = who.read_game();
-            if record[0] == GC_CHARACTER_DEL {
-                // The other member's descriptor may have left first (`read_own_removal`).
-                if record[1..5] == other.to_le_bytes() {
-                    continue;
-                }
-                break record;
-            }
-            if record[0] == ITEM_SET {
-                assert_eq!(record.len(), ITEM_SET_LEN);
-                assert_eq!(record[1], 1, "the ticket stood in the inventory");
-                assert_eq!(u16::from_le_bytes([record[2], record[3]]), 0);
-                assert_eq!(
-                    u32::from_le_bytes([record[4], record[5], record[6], record[7]]),
-                    0,
-                    "the take clears the member's cell"
-                );
-                continue;
-            }
-            // Ledger 404's relog replants Yankee's revive, whose expiry look update lands
-            // mid-jump; its remove is the revive timer's own and filtered.
-            assert!(
-                matches!(
-                    record[0],
-                    GC_PARTY_UPDATE | GC_PARTY_UNLINK | GC_PARTY_PARAMETER | GC_CHARACTER_UPDATE
-                ),
-                "the jump syncs the party first: {record:02x?}"
-            );
-        };
-        assert_eq!(got, removed, "EncodeRemovePacket(this)");
-        assert_eq!(
-            who.read_game(),
-            a_warp_record((782_400, 1_502_100), port),
-            "the jump lands at the entry"
-        );
-    }
+    // Package C11: Alpha (lower PID) leaves first and never hears Yankee's removal;
+    // Yankee (higher PID) leaves second and hears Alpha's removal before his own.
+    read_ordered_jump_departure(&mut alice, alpha_vid, None, port);
+    read_ordered_jump_departure(&mut yankee, yankee_vid, Some(alpha_vid), port);
     wait_for(
         database,
         "(SELECT count(*) FROM item WHERE vnum = 30613) = 0",
@@ -27275,7 +27286,7 @@ fn forest_tail_sends_the_party_home(
             chat_packet(CHAT_TYPE_NOTICE, empire, b"going"),
             "{what} hears the tail exit"
         );
-        read_own_removal(who, own, other);
+        read_own_removal(who, own, (own == yankee_vid).then_some(other));
         assert_eq!(
             who.read_game(),
             a_warp_record((470_000, 950_000), port),
@@ -27396,7 +27407,7 @@ fn a_party_enters_the_forest_and_its_timer_sends_it_home() {
             chat_packet(CHAT_TYPE_NOTICE, 1, b"second"),
             "{what} hears only the second exit"
         );
-        read_own_removal(who, own, other);
+        read_own_removal(who, own, (own == yankee_vid).then_some(other));
         assert_eq!(
             who.read_game(),
             a_warp_record((470_000, 950_000), port),
@@ -27466,12 +27477,12 @@ fn forest_tick_nears_while_both_inside(mut party: ForestParty) -> ForestParty {
     party
 }
 
-/// The leader's wire is gone; Yankee's carries its own warp home. Alpha's own removal
-/// may or may not arrive first: the warp queues to Yankee's session while the removal
-/// fans from the game thread, and the warp-leave drops Yankee's pending outbox with
-/// it. A stranger's removal still fails. The `RemoveBonus` fan zeroes Yankee's role
-/// points through `ComputePoints` between the two.
+/// The leader's wire is gone; Yankee's carries Alpha's removal before Yankee's own
+/// removal and warp home (`leave_world_by` flushes `FExitDungeon` exits after
+/// `remove_body`, Package C11). The `RemoveBonus` fan zeroes Yankee's role points
+/// through `ComputePoints` ahead of the removals.
 fn forest_drop_warps_yankee_home(yankee: &mut Keyed, alpha_vid: u32, yankee_vid: u32, port: u16) {
+    let mut removed_alpha = false;
     let mut removed_self = false;
     let mut warped = false;
     for _ in 0..32 {
@@ -27482,9 +27493,12 @@ fn forest_drop_warps_yankee_home(yankee: &mut Keyed, alpha_vid: u32, yankee_vid:
         if record[0] == GC_CHARACTER_DEL {
             let vid = u32::from_le_bytes(record[1..5].try_into().expect("four bytes"));
             if vid == alpha_vid {
+                assert!(!removed_self, "Alpha leaves before Yankee (C11)");
+                removed_alpha = true;
                 continue;
             }
             assert_eq!(vid, yankee_vid, "no stranger leaves: {record:02x?}");
+            assert!(removed_alpha, "Yankee hears Alpha's removal first (C11)");
             removed_self = true;
             continue;
         }
@@ -27502,7 +27516,10 @@ fn forest_drop_warps_yankee_home(yankee: &mut Keyed, alpha_vid: u32, yankee_vid:
             "behind the disconnect: {record:02x?}"
         );
     }
-    assert!(removed_self && warped, "Yankee sees its warp home");
+    assert!(
+        removed_alpha && removed_self && warped,
+        "Yankee sees Alpha's removal, its own removal, and its warp home"
+    );
 }
 
 /// Alpha lands home beside Yankee, so Yankee reads the arrive: the insert, its info
@@ -44952,9 +44969,9 @@ fn the_exchange_scroll_moves_alpha_to_the_yellow_empire() {
     );
 
     // And: her body is shown again in the yellow empire. The Rewrite sends the re-show behind
-    // the page, because a step's world moves run after its script; legacy sends it from inside
-    // `pc.change_empire` (`RestartAtSamePos`, `G/char_change_empire.cpp:119-123`), before the
-    // gold, the scroll and the page. `docs/STATUS.md`, package C9, owns the order.
+    // the page, because a step's world moves run after its script and `quest_step` commits
+    // Transfers before sending `records` (a recorded Divergence under Package C9, ledger 741);
+    // legacy sends it from inside `pc.change_empire` (`RestartAtSamePos`, `G/char_change_empire.cpp:119-123`).
     assert_eq!(
         alpha.read_game(),
         [&[GC_CHARACTER_DEL][..], &add[1..5]].concat(),

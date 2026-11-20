@@ -566,6 +566,11 @@ pub struct GameState {
     /// were. Keeping them apart also means a departed client is removed from one map
     /// and cannot leave a stale sender behind in the other.
     outboxes: HashMap<common::vid::Vid, ClientOutbox>,
+    /// Snapshots of characters already removed from the world on the game thread ahead of
+    /// their `ClientOrder::Warp` (Package C11: deterministic multi-character warp order).
+    /// Retrieved by [`GameState::leave_world_by`] when the descriptor runs its warp or a
+    /// concurrent disconnect.
+    predeparted: HashMap<common::vid::Vid, Kept>,
     /// `g_bItemCountLimit`: the largest stack a merge may build.
     item_count_limit: u16,
     /// The draw a sash rolls its absorption from, and the draws the boot spawn places and turns
@@ -2275,10 +2280,10 @@ impl GameState {
     fn apply_kit_line(&mut self, command: GameCommand) {
         match command {
             GameCommand::ItemFullSet { vid, mover, reply } => {
-                answer_item_step(vid, reply, self.item_full_set(vid, mover));
+                self.answer_item_step(vid, reply, |this| this.item_full_set(vid, mover));
             }
             GameCommand::AttrFullSet { vid, mover, reply } => {
-                answer_item_step(vid, reply, self.attr_full_set(vid, mover));
+                self.answer_item_step(vid, reply, |this| this.attr_full_set(vid, mover));
             }
             GameCommand::FullSet { vid, mover, reply } => {
                 let moved = self.full_set(vid, mover);
@@ -2287,17 +2292,17 @@ impl GameState {
                 }
             }
             GameCommand::Slow { vid, mover, reply } => {
-                answer_item_step(vid, reply, self.slow(vid, mover));
+                self.answer_item_step(vid, reply, |this| this.slow(vid, mover));
             }
             GameCommand::ItemPurge { vid, mover, reply } => {
-                answer_item_step(vid, reply, self.item_purge(vid, mover));
+                self.answer_item_step(vid, reply, |this| this.item_purge(vid, mover));
             }
             GameCommand::Book {
                 vid,
                 rest,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.book(vid, &rest, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.book(vid, &rest, mover)),
             GameCommand::SetAttr { vid, rest, reply } => {
                 let stored = self.run_set_attr(vid, &rest);
                 if reply.send(stored).is_err() {
@@ -2311,11 +2316,9 @@ impl GameState {
                 line,
                 reply,
             } => {
-                answer_item_step(
-                    vid,
-                    reply,
-                    self.run_tool_refine_line(vid, &rest, mover, line),
-                );
+                self.answer_item_step(vid, reply, |this| {
+                    this.run_tool_refine_line(vid, &rest, mover, line)
+                });
             }
             GameCommand::UseItemLine {
                 vid,
@@ -2323,29 +2326,31 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.run_use_item_line(vid, &rest, mover));
+                self.answer_item_step(vid, reply, |this| this.run_use_item_line(vid, &rest, mover));
             }
             GameCommand::CardsLine { vid, rest, reply } => {
-                answer_item_step(vid, reply, self.run_cards_line(vid, &rest));
+                self.answer_item_step(vid, reply, |this| this.run_cards_line(vid, &rest));
             }
             GameCommand::RideLine { vid, mover, reply } => {
-                answer_item_step(vid, reply, self.run_ride_line(vid, mover));
+                self.answer_item_step(vid, reply, |this| this.run_ride_line(vid, mover));
             }
             GameCommand::DragonSoul { vid, rest, reply } => {
-                answer_item_step(vid, reply, self.run_dragon_soul(vid, &rest));
+                self.answer_item_step(vid, reply, |this| this.run_dragon_soul(vid, &rest));
             }
             GameCommand::Costume {
                 vid,
                 rest,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.run_costume(vid, &rest, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.run_costume(vid, &rest, mover)),
             GameCommand::DsChangeAttr {
                 vid,
                 rest,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.run_ds_change_attr(vid, &rest, mover)),
+            } => self.answer_item_step(vid, reply, |this| {
+                this.run_ds_change_attr(vid, &rest, mover)
+            }),
             _ => debug_assert!(false, "the dispatch routes only kit lines here"),
         }
     }
@@ -4043,12 +4048,13 @@ impl GameState {
         }
     }
 
-    /// As [`GameState::leave_world`], for a character that leaves by `departure`. A player
-    /// stunned or dead stands first with 50 hit points (B5), and its fight's events end; a
-    /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
-    pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
-        self.leave_world_departure_gates(vid, departure);
-        // `CloseMyShop` in `CHARACTER::Destroy` (`G/char.cpp:570`): the window drops
+    /// Detaches a departing character from its active world sessions (shop, multi-farm,
+    /// trade, party, guild, fight, target, outbox) ahead of body removal.
+    fn clear_world_presence(
+        &mut self,
+        vid: common::vid::Vid,
+        departure: Departure,
+    ) -> Vec<(common::vid::Vid, i32, crate::save::ExitLocation)> {
         // before the body goes, so the viewers see the sign clear.
         self.close_my_shop(vid);
         let _asked = self.silk_asked.remove(&vid);
@@ -4059,12 +4065,23 @@ impl GameState {
             self.check_multi_farm_account(&addr, vid, false);
         }
         self.cancel_trade(vid);
-        self.unlink_party(vid);
+        let pending_dungeon_exits = self.unlink_party_collecting(vid);
         self.unlink_guild(vid);
         self.leave_fight(vid, departure);
         self.clear_target(vid);
         let _outbox = self.outboxes.remove(&vid);
-        // The save takes the affects before the event goes with them (`SaveAffect` runs in
+        pending_dungeon_exits
+    }
+
+    /// As [`GameState::leave_world`], for a character that leaves by `departure`. A player
+    /// stunned or dead stands first with 50 hit points (B5), and its fight's events end; a
+    /// disconnect also tells its view it has no owner, which a warp leaves to the map it left.
+    pub fn leave_world_by(&mut self, vid: common::vid::Vid, departure: Departure) -> Option<Kept> {
+        if let Some(kept) = self.predeparted.remove(&vid) {
+            return Some(kept);
+        }
+        self.leave_world_departure_gates(vid, departure);
+        let pending_dungeon_exits = self.clear_world_presence(vid, departure);
         // `CHARACTER::Save`, before `Disconnect` ends the character's events).
         let affects = self.saved_affects_of(vid);
         let _event = self.affect_events.remove(&vid);
@@ -4201,6 +4218,9 @@ impl GameState {
         };
         let _skills = self.pc_skills.remove(&vid.raw());
         self.characters.destroy(vid).ok()?;
+        // Dispatch `FExitDungeon` member exits after this leader's own `remove_body` has
+        // broadcast `GC_CHARACTER_DEL` to them (Package C11).
+        self.flush_dungeon_nears(pending_dungeon_exits, true);
         Some(kept)
     }
 
@@ -4248,6 +4268,87 @@ impl GameState {
         self.outboxes
             .get(&vid)
             .is_some_and(|outbox| outbox.send(record))
+    }
+
+    /// Place a zero-byte ordering barrier on `vid`'s outbox ahead of an item step
+    /// (Package C12).
+    fn mark_outbox(&self, vid: common::vid::Vid) -> Option<u64> {
+        self.outboxes.get(&vid).and_then(ClientOutbox::place_mark)
+    }
+
+    /// Run one item step on the game thread, marking `vid`'s outbox before the step runs
+    /// so `finish_item_step` flushes pre-step world records ahead of the step's own records
+    /// (Package C12).
+    fn answer_item_step(
+        &mut self,
+        vid: common::vid::Vid,
+        reply: tokio::sync::oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
+        run: impl FnOnce(&mut Self) -> Result<MovedItems, MoveItemRefused>,
+    ) {
+        let mark = self.mark_outbox(vid);
+        let mut answer = run(self);
+        if let Ok(moved) = &mut answer {
+            moved.outbox_mark = mark;
+        }
+        // A dropped answer means the descriptor is closing. The world has moved the item, and
+        // the store has not, so the next login loads the old cell; that is the same outcome as
+        // a write that failed, and it is logged.
+        if reply.send(answer).is_err() {
+            warn!(
+                ?vid,
+                "an item moved in the world and nobody was left to store it"
+            );
+        }
+    }
+
+    /// Sort `vids` in ascending player-ID order (tie-breaking by VID), matching legacy's
+    /// `ForEachOnMapMember` map order (Package C11).
+    pub(super) fn sort_vids_by_pid(&self, vids: &mut [common::vid::Vid]) {
+        vids.sort_by_key(|vid| {
+            let pid = self
+                .characters
+                .find_by_vid(*vid)
+                .map_or(u32::MAX, world::character::Character::player_id);
+            (pid, vid.raw())
+        });
+    }
+
+    /// Remove `vid` from the world on the game thread ahead of its descriptor's
+    /// `ClientOrder::Warp` (Package C11), holding the [`Kept`] snapshot so the descriptor's
+    /// `leave_world` (or a concurrent disconnect) retrieves it without reordering removal
+    /// broadcasts across members of a multi-character warp.
+    pub(super) fn order_predeparted_warp(
+        &mut self,
+        vid: common::vid::Vid,
+        channel_now: u8,
+        map_now: i32,
+        order: crate::client_registry::ClientOrder,
+    ) -> bool {
+        let raw = vid.raw();
+        let lease_id = self.clients.as_ref().and_then(|clients| {
+            clients
+                .members_on_map(channel_now, map_now)
+                .into_iter()
+                .find(|(_, entry)| entry.vid == raw)
+                .map(|(id, _)| id)
+        });
+        let Some(id) = lease_id else {
+            return false;
+        };
+        let sort_blocked = match &order {
+            crate::client_registry::ClientOrder::Warp { sorted_until, .. } => {
+                *sorted_until != 0 && *sorted_until > quests::quest_now()
+            }
+            _ => false,
+        };
+        if !sort_blocked {
+            if let Some(kept) = self.leave_world_by(vid, Departure::Warp) {
+                self.predeparted.insert(vid, kept);
+            }
+        }
+        self.clients
+            .as_ref()
+            .is_some_and(|clients| clients.order(channel_now, id, order))
     }
 
     /// Run one `CG_ITEM_MOVE` for the character online under `vid`.
@@ -5341,14 +5442,14 @@ impl GameState {
                 request,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.move_item(vid, request, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.move_item(vid, request, mover)),
             GameCommand::UseItem {
                 vid,
                 at,
                 mover,
                 account,
                 reply,
-            } => answer_item_step(vid, reply, self.use_item(vid, at, mover, &account)),
+            } => self.answer_item_step(vid, reply, |this| this.use_item(vid, at, mover, &account)),
             GameCommand::Shop {
                 vid,
                 step,
@@ -5535,7 +5636,9 @@ impl GameState {
                 reply,
             } => {
                 let place = self.live_place(vid, place);
-                answer_item_step(vid, reply, self.drop_item(vid, at, count, place, mover));
+                self.answer_item_step(vid, reply, |this| {
+                    this.drop_item(vid, at, count, place, mover)
+                });
             }
             GameCommand::DestroyItem {
                 vid,
@@ -5543,37 +5646,21 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.destroy_item(vid, at, mover));
+                self.answer_item_step(vid, reply, |this| this.destroy_item(vid, at, mover));
             }
             command @ (GameCommand::Refine { .. }
             | GameCommand::DragonSoulRefine { .. }
             | GameCommand::RefineElement { .. }) => {
                 self.apply_refine_step(command);
             }
-            GameCommand::Attr67 {
-                vid,
-                sub_header,
-                regist,
-                mover,
-                reply,
-            } => {
-                answer_item_step(vid, reply, self.attr67(vid, sub_header, regist, mover));
-            }
-            command @ (GameCommand::MyShop { .. }
+            command @ (GameCommand::Attr67 { .. }
+            | GameCommand::GayaSystem { .. }
+            | GameCommand::MyShop { .. }
             | GameCommand::Switchbot { .. }
             | GameCommand::Aura { .. }
             | GameCommand::Sash { .. }
             | GameCommand::Changelook { .. }
             | GameCommand::CubeRenewal { .. }) => self.apply_window_step(command),
-            GameCommand::GayaSystem {
-                vid,
-                sub_header,
-                pos,
-                mover,
-                reply,
-            } => {
-                answer_item_step(vid, reply, self.gaya_system(vid, sub_header, pos, mover));
-            }
             GameCommand::UseItemToItem {
                 vid,
                 at,
@@ -5581,7 +5668,9 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.use_item_to_item(vid, at, dest, mover));
+                self.answer_item_step(vid, reply, |this| {
+                    this.use_item_to_item(vid, at, dest, mover)
+                });
             }
             GameCommand::GiveItem {
                 vid,
@@ -5592,7 +5681,9 @@ impl GameState {
                 reply,
             } => {
                 let place = self.live_place(vid, place);
-                answer_item_step(vid, reply, self.give_item(vid, target, at, place, mover));
+                self.answer_item_step(vid, reply, |this| {
+                    this.give_item(vid, target, at, place, mover)
+                });
             }
             GameCommand::DropGold {
                 vid,
@@ -5602,7 +5693,7 @@ impl GameState {
                 reply,
             } => {
                 let place = self.live_place(vid, place);
-                answer_item_step(vid, reply, self.drop_gold(vid, gold, place, mover));
+                self.answer_item_step(vid, reply, |this| this.drop_gold(vid, gold, place, mover));
             }
             GameCommand::PickupItem {
                 vid,
@@ -5612,7 +5703,9 @@ impl GameState {
                 reply,
             } => {
                 let place = self.live_place(vid, place);
-                answer_item_step(vid, reply, self.pickup_item(vid, ground, place, mover));
+                self.answer_item_step(vid, reply, |this| {
+                    this.pickup_item(vid, ground, place, mover)
+                });
             }
             command @ (GameCommand::Fishing { .. }
             | GameCommand::FishEvent { .. }
@@ -5638,7 +5731,7 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.refine(vid, pos, refine_type, mover));
+                self.answer_item_step(vid, reply, |this| this.refine(vid, pos, refine_type, mover));
             }
             GameCommand::DragonSoulRefine {
                 vid,
@@ -5647,11 +5740,9 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(
-                    vid,
-                    reply,
-                    self.dragon_soul_refine(vid, sub_header, grid, mover),
-                );
+                self.answer_item_step(vid, reply, |this| {
+                    this.dragon_soul_refine(vid, sub_header, grid, mover)
+                });
             }
             GameCommand::RefineElement {
                 vid,
@@ -5659,7 +5750,7 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.refine_element(vid, arg, mover));
+                self.answer_item_step(vid, reply, |this| this.refine_element(vid, arg, mover));
             }
             _ => debug_assert!(false, "only refines reach apply_refine_step"),
         }
@@ -5669,6 +5760,28 @@ impl GameState {
     /// line lint: the switchbot, the aura, the sash, the changelook and the cube.
     fn apply_window_step(&mut self, command: GameCommand) {
         match command {
+            GameCommand::Attr67 {
+                vid,
+                sub_header,
+                regist,
+                mover,
+                reply,
+            } => {
+                self.answer_item_step(vid, reply, |this| {
+                    this.attr67(vid, sub_header, regist, mover)
+                });
+            }
+            GameCommand::GayaSystem {
+                vid,
+                sub_header,
+                pos,
+                mover,
+                reply,
+            } => {
+                self.answer_item_step(vid, reply, |this| {
+                    this.gaya_system(vid, sub_header, pos, mover)
+                });
+            }
             GameCommand::MyShop {
                 vid,
                 sign,
@@ -5676,7 +5789,7 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.myshop(vid, sign, &tables, mover));
+                self.answer_item_step(vid, reply, |this| this.myshop(vid, sign, &tables, mover));
             }
             GameCommand::Switchbot {
                 vid,
@@ -5686,11 +5799,9 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(
-                    vid,
-                    reply,
-                    self.switchbot(vid, sub_header, slot, &bodies, mover),
-                );
+                self.answer_item_step(vid, reply, |this| {
+                    this.switchbot(vid, sub_header, slot, &bodies, mover)
+                });
             }
             GameCommand::Aura {
                 vid,
@@ -5699,7 +5810,7 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.aura(vid, sub_header, cells, mover));
+                self.answer_item_step(vid, reply, |this| this.aura(vid, sub_header, cells, mover));
             }
             GameCommand::Sash {
                 vid,
@@ -5709,7 +5820,9 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.sash(vid, sub_header, (pos, at), mover));
+                self.answer_item_step(vid, reply, |this| {
+                    this.sash(vid, sub_header, (pos, at), mover)
+                });
             }
             GameCommand::Changelook {
                 vid,
@@ -5719,11 +5832,9 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(
-                    vid,
-                    reply,
-                    self.changelook(vid, sub_header, (pos, at), mover),
-                );
+                self.answer_item_step(vid, reply, |this| {
+                    this.changelook(vid, sub_header, (pos, at), mover)
+                });
             }
             GameCommand::CubeRenewal {
                 vid,
@@ -5732,7 +5843,9 @@ impl GameState {
                 mover,
                 reply,
             } => {
-                answer_item_step(vid, reply, self.cube_renewal(vid, sub_header, words, mover));
+                self.answer_item_step(vid, reply, |this| {
+                    this.cube_renewal(vid, sub_header, words, mover)
+                });
             }
             _ => debug_assert!(false, "only window commands reach apply_window_step"),
         }
@@ -5748,45 +5861,51 @@ impl GameState {
                 dir,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.fish(vid, dir, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.fish(vid, dir, mover)),
             GameCommand::FishEvent {
                 vid,
                 step,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.fish_event(vid, step, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.fish_event(vid, step, mover)),
             GameCommand::DailyGift {
                 vid,
                 step,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.daily_gift(vid, step, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.daily_gift(vid, step, mover)),
             GameCommand::WorldBoss {
                 vid,
                 step,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, Ok(self.world_boss_step(vid, step, mover))),
+            } => {
+                self.answer_item_step(
+                    vid,
+                    reply,
+                    |this| Ok(this.world_boss_step(vid, step, mover)),
+                );
+            }
             GameCommand::Biologist {
                 vid,
                 step,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.biologist(vid, step, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.biologist(vid, step, mover)),
             GameCommand::Premium {
                 vid,
                 step,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.premium(vid, step, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.premium(vid, step, mover)),
             GameCommand::Protected {
                 vid,
                 step,
                 mover,
                 reply,
-            } => answer_item_step(vid, reply, self.protected(vid, step, mover)),
+            } => self.answer_item_step(vid, reply, |this| this.protected(vid, step, mover)),
             GameCommand::ExtendInven { vid, mover, reply } => {
-                answer_item_step(vid, reply, self.extend_inven(vid, mover));
+                self.answer_item_step(vid, reply, |this| this.extend_inven(vid, mover));
             }
             GameCommand::NpcsOn {
                 channel,
@@ -7116,23 +7235,6 @@ fn drop_lifetime_pulses(seconds: i32) -> u64 {
         .unwrap_or(0)
         .saturating_mul(u64::from(PASSES_PER_SEC))
         .max(1)
-}
-
-/// Hands an item step's answer back to the descriptor that asked for it.
-fn answer_item_step(
-    vid: common::vid::Vid,
-    reply: tokio::sync::oneshot::Sender<Result<MovedItems, MoveItemRefused>>,
-    answer: Result<MovedItems, MoveItemRefused>,
-) {
-    // A dropped answer means the descriptor is closing. The world has moved the item, and
-    // the store has not, so the next login loads the old cell; that is the same outcome as
-    // a write that failed, and it is logged.
-    if reply.send(answer).is_err() {
-        warn!(
-            ?vid,
-            "an item moved in the world and nobody was left to store it"
-        );
-    }
 }
 
 #[cfg(test)]

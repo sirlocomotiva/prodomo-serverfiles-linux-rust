@@ -585,16 +585,28 @@ impl GameState {
     /// in a living dungeon, every linked near member is sent to its saved exit. The
     /// unlinked leader itself is skipped: its departure is already in progress, and
     /// legacy's `WarpSet` on the destroyed character is unobservable.
+    #[cfg(test)]
     pub(super) fn unlink_party(&mut self, vid: Vid) {
+        let pending = self.unlink_party_collecting(vid);
+        self.flush_dungeon_nears(pending, false);
+    }
+
+    /// Same as [`Self::unlink_party`], returning the `FExitDungeon` member exits so
+    /// `leave_world_by` can dispatch them after `remove_body` broadcasts the leader's own
+    /// `GC_CHARACTER_DEL` to those members (Package C11).
+    pub(super) fn unlink_party_collecting(
+        &mut self,
+        vid: Vid,
+    ) -> Vec<(Vid, i32, crate::save::ExitLocation)> {
         let Ok(character) = self.characters.find_by_vid(vid) else {
-            return;
+            return Vec::new();
         };
         let pid = character.player_id();
         // `m_pkPartyRequestEvent` is the character's, so logging out cancels its outgoing
         // request. A party it was a member of survives as legacy's does.
         self.parties.requests.remove(&pid);
         let Some(leader) = self.party_leader_of(pid) else {
-            return;
+            return Vec::new();
         };
         let is_leader = pid == leader;
         self.send_party_unlink_one_to_all(leader, vid, pid);
@@ -607,7 +619,7 @@ impl GameState {
             member.vid = None;
         }
         if !is_leader {
-            return;
+            return Vec::new();
         }
         let linked: Vec<Vid> = self.parties.by_leader.get(&leader).map_or_default(|party| {
             party
@@ -619,26 +631,28 @@ impl GameState {
         for other in linked {
             self.zero_role_points(other, true);
         }
-        self.exit_dungeon_nears(vid, leader);
+        let pending = self.collect_dungeon_nears(vid, leader);
         if let Some(party) = self.parties.by_leader.get_mut(&leader) {
             for member in party.members.values_mut() {
                 member.near = false;
             }
         }
+        pending
     }
 
-    /// `FExitDungeon` (`G/party.cpp:623-629`, called at `:655-661`): the leader `vid`
-    /// unlinks while standing in a living dungeon, so every other linked near member
-    /// of `leader`'s party is sent to its saved exit (`ExitToSavedLocation`,
-    /// `G/char.cpp:6685-6692`), in PID order, and leaves the present set. Members with
-    /// no saved exit stay, as `d.exit_all` leaves them. Quiet when the leader stands
-    /// in no living dungeon.
-    fn exit_dungeon_nears(&mut self, vid: Vid, leader: CharacterId) {
+    /// `FExitDungeon` (`G/party.cpp:623-629`, called at `:655-661`): collect every other
+    /// linked near member of `leader`'s party standing in a living dungeon with a saved exit,
+    /// in PID order (`BTreeMap` order).
+    fn collect_dungeon_nears(
+        &self,
+        vid: Vid,
+        leader: CharacterId,
+    ) -> Vec<(Vid, i32, crate::save::ExitLocation)> {
         let Some((_, map)) = self.place_of(vid.raw()) else {
-            return;
+            return Vec::new();
         };
         if !self.dungeons.lives(u32::try_from(map).unwrap_or(0)) {
-            return;
+            return Vec::new();
         }
         let nears: Vec<Vid> = self.parties.by_leader.get(&leader).map_or_default(|party| {
             party
@@ -650,15 +664,26 @@ impl GameState {
                 })
                 .collect()
         });
-        for near in nears {
-            let Some(exit) = self
-                .dungeons
-                .get(map)
-                .and_then(|dungeon| dungeon.exits.get(&near).copied())
-            else {
-                continue;
-            };
-            self.order_dungeon_exit(near, exit);
+        nears
+            .into_iter()
+            .filter_map(|near| {
+                let exit = self
+                    .dungeons
+                    .get(map)
+                    .and_then(|dungeon| dungeon.exits.get(&near).copied())?;
+                Some((near, map, exit))
+            })
+            .collect()
+    }
+
+    /// Dispatch the `FExitDungeon` warps collected by [`Self::unlink_party_collecting`].
+    pub(super) fn flush_dungeon_nears(
+        &mut self,
+        pending: Vec<(Vid, i32, crate::save::ExitLocation)>,
+        predepart: bool,
+    ) {
+        for (near, map, exit) in pending {
+            self.order_dungeon_exit_inner(near, exit, predepart);
             self.unpresent(map, near);
         }
     }

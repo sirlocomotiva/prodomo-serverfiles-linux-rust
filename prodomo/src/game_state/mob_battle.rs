@@ -1882,7 +1882,7 @@ mod tests {
             BATTLE_TYPE_MELEE,
             (175, 2000),
             0,
-            (SPOT.0 + 1500, SPOT.1),
+            (SPOT.0 + 500, SPOT.1),
             10_000,
         );
         follower.leader = Some(FIRST_NPC_VID);
@@ -1890,6 +1890,9 @@ mod tests {
         let mut alpha = enter(&mut world, 1, (SPOT.0 + 1500, SPOT.1 + 100), 12_345);
         world.start_pc_recovery(Vid::new(1));
         world.process_pulse(P0);
+        // Move the follower past 1000 only after `P0` so `state_idle`'s protege follow
+        // does not pre-stamp a `dest` that a 1-in-251 draw in `state_battle` could match.
+        world.npc_move(FIRST_NPC_VID + 1, SPOT.0 + 1500, SPOT.1);
         drained(&mut alpha);
         hit(&mut world, 1, FIRST_NPC_VID + 1);
         let spot = world.spot_of(1).unwrap();

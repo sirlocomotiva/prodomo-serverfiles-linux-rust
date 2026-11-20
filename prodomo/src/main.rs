@@ -833,6 +833,17 @@ struct Descriptor {
     channel_number: u8,
 }
 
+/// Returns the lent outbox receiver to the lease so `finish_item_step` can flush pre-step
+/// outbox records up to the step's mark (Package C12).
+fn return_outbox(
+    held: &mut Held,
+    outbox: &mut Option<mpsc::UnboundedReceiver<prodomo::client_registry::OutboxEntry>>,
+) {
+    if let (Some(lease), Some(inbox)) = (held.presence.as_mut(), outbox.take()) {
+        lease.put_receiver(inbox);
+    }
+}
+
 /// The descriptor read loop: consume frames, write broadcasts, and stop at a close.
 ///
 /// The loop owns the lease's queue between turns, so it is a function of its own rather than
@@ -855,7 +866,7 @@ async fn pump_descriptor<S>(
     // Broadcast records land in the lease's queue and are written here, so no world work
     // ever awaits a socket. The queue is lent out of the lease for the duration of one
     // `select!`, because the lease itself belongs to `held` and the analyzer may replace it.
-    let mut outbox: Option<mpsc::UnboundedReceiver<Vec<u8>>> = None;
+    let mut outbox: Option<mpsc::UnboundedReceiver<prodomo::client_registry::OutboxEntry>> = None;
     // The game thread's orders to this client are lent out the same way.
     let mut orders: Option<mpsc::UnboundedReceiver<ClientOrder>> = None;
     let mut pending: Vec<Vec<u8>> = Vec::new();
@@ -879,6 +890,7 @@ async fn pump_descriptor<S>(
             // a Divergence of the departure.
             Ok(Some(_)) if held.departed => continue,
             Ok(Some(step)) => {
+                return_outbox(held, &mut outbox);
                 let seat = locations.map(|locations| ChannelSeat {
                     locations,
                     handle,
@@ -916,11 +928,7 @@ async fn pump_descriptor<S>(
             }
             () = save_tick(held.save.as_mut()) => save_on_tick(context, addr, held).await,
             () = wait_login_deadline(phase, login_deadline) => {
-                info!(
-                    %addr,
-                    ?phase,
-                    "Client did not finish login before the deadline; closing"
-                );
+                info!(%addr, ?phase, "Client did not finish login before the deadline; closing");
                 break;
             }
             () = wait_presence_overflow(held.presence.as_ref()) => {
@@ -958,8 +966,10 @@ async fn pump_descriptor<S>(
             // arm only receives; the write happens after the select, because `session` is
             // borrowed mutably by the other arms.
             broadcast = next_broadcast(&mut outbox) => {
-                if let Some(record) = broadcast {
-                    pending.push(record);
+                if let Some(entry) = broadcast {
+                    if let prodomo::client_registry::OutboxEntry::Record(record) = entry {
+                        pending.push(record);
+                    }
                 } else {
                     // The member's sender is gone, which deregistration would also do. The
                     // lease is still held, so the only way here is a closed queue: keep the
@@ -1008,7 +1018,7 @@ async fn save_on_tick(context: &ConnectionContext, addr: SocketAddr, held: &mut 
 /// straight over; a descriptor with no lease lends nothing.
 fn lend_queues(
     held: &mut Held,
-    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    outbox: &mut Option<mpsc::UnboundedReceiver<prodomo::client_registry::OutboxEntry>>,
     orders: &mut Option<mpsc::UnboundedReceiver<ClientOrder>>,
 ) {
     let Some(lease) = held.presence.as_mut() else {
@@ -1040,7 +1050,7 @@ async fn settle(held: &mut Held) {
 async fn flush_outbox<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
-    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    outbox: &mut Option<mpsc::UnboundedReceiver<prodomo::client_registry::OutboxEntry>>,
     pending: &mut Vec<Vec<u8>>,
     guard: Option<&prodomo::client_registry::OutboxGuard>,
 ) -> bool
@@ -1052,11 +1062,50 @@ where
         return false;
     }
     if let Some(queue) = outbox.as_mut() {
-        while let Ok(record) = queue.try_recv() {
-            pending.push(record);
+        while let Ok(entry) = queue.try_recv() {
+            if let prodomo::client_registry::OutboxEntry::Record(record) = entry {
+                pending.push(record);
+            }
         }
     }
     write_pending(session, addr, pending, guard).await
+}
+
+/// Flush only the world records queued in `held.presence` ahead of `mark`, leaving any
+/// records queued after `mark` untouched in the outbox channel (Package C12).
+async fn flush_outbox_to_mark<S>(
+    session: &mut LiveClientSession<S>,
+    addr: SocketAddr,
+    held: &mut Held,
+    mark: u64,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let before_phase = session.phase();
+    let guard = held.presence.as_ref().map(Lease::outbox_guard);
+    if guard
+        .as_ref()
+        .is_some_and(prodomo::client_registry::OutboxGuard::is_overflowed)
+    {
+        warn!(%addr, "Client outbox reached capacity; closing slow client");
+        return false;
+    }
+    let mut before = Vec::new();
+    if let Some(queue) = held.presence.as_mut().and_then(Lease::receiver_mut) {
+        while let Ok(entry) = queue.try_recv() {
+            match entry {
+                prodomo::client_registry::OutboxEntry::Record(record) => before.push(record),
+                prodomo::client_registry::OutboxEntry::Mark(id) if id >= mark => break,
+                prodomo::client_registry::OutboxEntry::Mark(_) => {}
+            }
+        }
+    }
+    if !write_pending(session, addr, &mut before, guard.as_ref()).await {
+        return false;
+    }
+    stand_on_phase_change(held, before_phase, session.phase());
+    true
 }
 
 /// [`flush_outbox`], then stand the player up when a record it wrote changed the phase (a
@@ -1064,7 +1113,7 @@ where
 async fn flush_turn<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
-    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    outbox: &mut Option<mpsc::UnboundedReceiver<prodomo::client_registry::OutboxEntry>>,
     pending: &mut Vec<Vec<u8>>,
     held: &mut Held,
 ) -> bool
@@ -1089,7 +1138,7 @@ where
 async fn take_order<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
-    outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    outbox: &mut Option<mpsc::UnboundedReceiver<prodomo::client_registry::OutboxEntry>>,
     pending: &mut Vec<Vec<u8>>,
     held: &mut Held,
     follow: impl AsyncFnOnce(&mut LiveClientSession<S>, &mut Held) -> bool,
@@ -2860,6 +2909,13 @@ where
     if let Some(quickslots) = moved.quickslots {
         held.quickslots = quickslots;
     }
+    // Package C12: flush every world record queued before this step ran (e.g. a heal tick or
+    // chat line) ahead of this step's own records so a stale tick never overwrites them.
+    if let Some(mark) = moved.outbox_mark {
+        if !flush_outbox_to_mark(session, addr, held, mark).await {
+            return false;
+        }
+    }
     if let Err(error) = send_all(session, &moved.records).await {
         warn!(%addr, %error, "Client session stopped");
         return false;
@@ -2890,7 +2946,9 @@ where
 /// `select!` waits on the other arms alone. That is why this is one function rather than a
 /// `select!` arm over an `Option`: an arm over a `None` receiver returns at once and would
 /// spin the loop.
-async fn next_broadcast(outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>) -> Option<Vec<u8>> {
+async fn next_broadcast(
+    outbox: &mut Option<mpsc::UnboundedReceiver<prodomo::client_registry::OutboxEntry>>,
+) -> Option<prodomo::client_registry::OutboxEntry> {
     match outbox.as_mut() {
         Some(receiver) => receiver.recv().await,
         None => std::future::pending().await,
@@ -9080,8 +9138,10 @@ where
     let mut queued = Vec::new();
     if let Some(lease) = held.presence.as_mut() {
         if let Some(mut inbox) = lease.take_receiver() {
-            while let Ok(record) = inbox.try_recv() {
-                queued.push(record);
+            while let Ok(entry) = inbox.try_recv() {
+                if let prodomo::client_registry::OutboxEntry::Record(record) = entry {
+                    queued.push(record);
+                }
             }
             lease.put_receiver(inbox);
         }
@@ -17351,7 +17411,11 @@ mod tests {
         let lifecycle = ClientLifecycle::start(1, HandshakeServerKind::Game, 0).state;
         let mut session = LiveClientSession::new(ours, lifecycle).expect("a plaintext session");
         let (queue, receiver) = mpsc::unbounded_channel();
-        queue.send(vec![0xA1, 0xA2]).expect("the queue is open");
+        queue
+            .send(prodomo::client_registry::OutboxEntry::Record(vec![
+                0xA1, 0xA2,
+            ]))
+            .expect("the queue is open");
         let mut outbox = Some(receiver);
         let mut pending = vec![vec![0xA0]];
         let mut held = Held::default();
@@ -17637,13 +17701,19 @@ mod tests {
             ..Held::default()
         };
         queue
-            .send(vec![HEADER_GC_EMPIRE.value(), 1])
+            .send(prodomo::client_registry::OutboxEntry::Record(vec![
+                HEADER_GC_EMPIRE.value(),
+                1,
+            ]))
             .expect("the queue is open");
         assert!(flush_turn(&mut session, addr(), &mut outbox, &mut pending, &mut held).await);
         assert_eq!(held.avatar, Some(sitting()));
 
         queue
-            .send(vec![HEADER_GC_PHASE.value(), PHASE_DEAD])
+            .send(prodomo::client_registry::OutboxEntry::Record(vec![
+                HEADER_GC_PHASE.value(),
+                PHASE_DEAD,
+            ]))
             .expect("the queue is open");
         assert!(flush_turn(&mut session, addr(), &mut outbox, &mut pending, &mut held).await);
         assert_eq!(session.phase(), ClientPhase::Dead);
@@ -17679,6 +17749,42 @@ mod tests {
             held.avatar.as_ref().map(|avatar| avatar.sitting),
             Some(false)
         );
+    }
+
+    /// Package C12: `flush_outbox_up_to` writes records queued before an item step's mark ahead
+    /// of the step's own records and leaves post-mark records untouched in the lease's inbox.
+    #[tokio::test]
+    async fn flush_outbox_to_mark_splits_pre_mark_from_post_mark() {
+        let (ours, mut theirs) = tokio::io::duplex(4096);
+        let lifecycle = ClientLifecycle::start(1, HandshakeServerKind::Game, 0).state;
+        let mut session = LiveClientSession::new(ours, lifecycle).expect("a plaintext session");
+        let registry = std::sync::Arc::new(prodomo::client_registry::ChannelClients::new());
+        let lease = registry.join(prodomo::client_registry::ClientEntry {
+            channel: 1,
+            map: 1,
+            name: "Alpha".to_owned(),
+            vid: 1,
+            empire: 1,
+            language: 0,
+        });
+        let outbox = lease.outbox();
+        assert!(outbox.send(vec![0xA1]));
+        let mark = outbox.place_mark().expect("mark lands");
+        assert!(outbox.send(vec![0xC1]));
+        let mut held = Held {
+            presence: Some(lease),
+            ..Held::default()
+        };
+        assert!(flush_outbox_to_mark(&mut session, addr(), &mut held, mark).await);
+        assert!(session.send(&[0xB1]).await.is_ok());
+        let mut rx = held.presence.as_mut().and_then(Lease::take_receiver);
+        let mut pending = Vec::new();
+        assert!(flush_turn(&mut session, addr(), &mut rx, &mut pending, &mut held).await);
+        drop(session);
+        let mut written = Vec::new();
+        theirs.read_to_end(&mut written).await.expect("stream ends");
+        let tail = &written[written.len() - 3..];
+        assert_eq!(tail, &[0xA1, 0xB1, 0xC1]);
     }
 
     /// A dead caller runs its lines from `POS_DEAD`, which the restart lines need, sitting or

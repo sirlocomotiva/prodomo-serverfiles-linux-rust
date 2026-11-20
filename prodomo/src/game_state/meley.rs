@@ -496,14 +496,15 @@ impl GameState {
             return;
         };
         let index = run.index;
-        let vids: Vec<Vid> = self
+        let mut vids: Vec<Vid> = self
             .bodies
             .iter()
             .filter(|(_, body)| body.map == index)
             .map(|(vid, _)| *vid)
             .collect();
+        self.sort_vids_by_pid(&mut vids);
         for vid in vids {
-            self.order_meley_out(vid);
+            self.order_meley_out_predepart(vid);
         }
         self.dungeons.destroy(index);
         let channels: Vec<u8> = self
@@ -601,6 +602,47 @@ impl GameState {
             return;
         };
         self.order_quest_warp(reader, x, y, 0, mover);
+    }
+
+    /// Multi-character variant of [`Self::order_meley_out`] (Package C11): pre-departs
+    /// `vid` on the game thread in PID order before ordering its warp out of Meley's lair.
+    fn order_meley_out_predepart(&mut self, reader: Vid) {
+        let Some((channel_now, map_now)) = self.place_of(reader.raw()) else {
+            return;
+        };
+        let at = self
+            .recall
+            .atlas()
+            .and_then(|atlas| atlas.region(SUBMAP))
+            .map_or_else(
+                || {
+                    let empire = self.bodies.get(&reader).map_or(0, |body| body.card.empire);
+                    crate::channel_login::EMPIRE_START
+                        .get(usize::from(empire))
+                        .copied()
+                        .unwrap_or((0, 0))
+                },
+                |region| (region.sx + SUB_SPOT.0 * 100, region.sy + SUB_SPOT.1 * 100),
+            );
+        let channel = self
+            .recall
+            .atlas()
+            .and_then(|atlas| atlas.index_at(at.0, at.1))
+            .and_then(|idx| {
+                self.maps
+                    .keys()
+                    .find(|(_, map)| *map == idx)
+                    .map(|(ch, _)| *ch)
+            });
+        let order = crate::client_registry::ClientOrder::Warp {
+            x: at.0,
+            y: at.1,
+            private_map_index: 0,
+            channel,
+            exit: None,
+            sorted_until: self.sort_lock(reader),
+        };
+        let _ordered = self.order_predeparted_warp(reader, channel_now, map_now, order);
     }
 
     /// `SetLadderPoint`'s chat (`G/guild_war.cpp:732-751`): the `[LS;1001]` line to

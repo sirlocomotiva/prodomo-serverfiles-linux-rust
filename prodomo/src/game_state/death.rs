@@ -1729,7 +1729,13 @@ mod tests {
     struct Field {
         world: GameState,
         clients: Arc<ChannelClients>,
-        players: BTreeMap<u32, (Lease, UnboundedReceiver<Vec<u8>>)>,
+        players: BTreeMap<
+            u32,
+            (
+                Lease,
+                UnboundedReceiver<crate::client_registry::OutboxEntry>,
+            ),
+        >,
         clock: TestClock,
     }
 
@@ -1851,7 +1857,13 @@ mod tests {
         /// What `vid`'s client was sent since the last look.
         fn heard(&mut self, vid: Vid) -> Vec<Vec<u8>> {
             let (_, inbox) = self.players.get_mut(&vid.raw()).expect("the player joined");
-            std::iter::from_fn(|| inbox.try_recv().ok()).collect()
+            let mut out = Vec::new();
+            while let Ok(entry) = inbox.try_recv() {
+                if let crate::client_registry::OutboxEntry::Record(record) = entry {
+                    out.push(record);
+                }
+            }
+            out
         }
 
         /// Forgets what every client was sent so far.
@@ -3966,6 +3978,24 @@ mod tests {
     }
 
     fn start_death_test_arena(field: &mut Field, sets: u32) {
+        let saved: Vec<_> = [(ALPHA, HERE), (BRAVO, BESIDE)]
+            .into_iter()
+            .map(|(vid, at)| {
+                let level = field.world.bodies[&vid].card.level;
+                let inv = field
+                    .world
+                    .characters
+                    .find_by_vid(vid)
+                    .expect("fighter online")
+                    .items();
+                let items: Vec<(ItemPos, Item)> = inv
+                    .occupied()
+                    .into_iter()
+                    .map(|(pos, id)| (pos, inv.item(id).expect("occupied item").clone()))
+                    .collect();
+                (vid, at, level, items)
+            })
+            .collect();
         field.world.load_arenas(&[quest::host::Arena {
             map_index: PLACE.1,
             start_a: (HERE.0 / 100, HERE.1 / 100),
@@ -3975,11 +4005,17 @@ mod tests {
         field
             .world
             .start_arena(((0, map), 0), [ALPHA, BRAVO], sets, 5);
-        field.pulse(P0 + 250);
-        field.pulse(P0 + 500);
-        // Starting a duel orders the warp; the fixture already stands at its starts.
+        // Starting a duel pre-departs and orders the warp; complete the warp and re-enter at the
+        // arena starts so the readiness pulses find both duelists on the arena map.
         let _alpha = field.ordered(ALPHA);
         let _bravo = field.ordered(BRAVO);
+        for (vid, at, level, items) in saved {
+            let _kept = field.world.leave_world_by(vid, Departure::Warp);
+            let _dropped = field.players.remove(&vid.raw());
+            let _shown = field.join_with(vid, (PLACE.1, at), level, &items);
+        }
+        field.pulse(P0 + 250);
+        field.pulse(P0 + 500);
         field.quiet();
     }
 
@@ -4089,14 +4125,18 @@ mod tests {
         let won = field.world.last_pulse;
         field.pulse(won + 250);
         assert!(!field.world.arena_can_attack(ALPHA, BRAVO));
-        assert!(!field.world.is_dead(ALPHA.raw()));
-        assert_eq!(field.points(ALPHA).exp(), EXP);
         for vid in [ALPHA, BRAVO] {
             assert!(field
                 .ordered(vid)
                 .iter()
                 .any(|order| matches!(order, ClientOrder::Warp { .. })));
         }
+        // End-of-duel pre-departs both duelists in order; the saved snapshot keeps EXP intact.
+        let kept = field
+            .world
+            .leave_world_by(ALPHA, Departure::Warp)
+            .expect("end_arena pre-departed ALPHA");
+        assert_eq!(kept.points.expect("kept points").exp(), EXP);
     }
 
     /// Sharing the arena map is not membership (`G/arena.cpp:717`): an outsider's
