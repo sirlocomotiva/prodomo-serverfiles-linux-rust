@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 742 |
+| measure | value at ledger 743 |
 |---|---|
 | Parity inventory | 2,332 rows: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`; **Package B complete — all 12 inventory files closed** |
 | Scenarios | 607 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,782 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 742 has the receipt) |
+| Tests | 5,795 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 743 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 126 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 48 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -26,8 +26,8 @@ the tail is closed.
 
 A client can do what the `ported` rows say: log in, choose and create characters, enter the
 world, move, chat, fight monsters and players, die and restart, use and trade items, shop, store,
-join parties and guilds, fight guild wars, run quests, and use the GM commands. Package B is
-closed (all 2,332 Parity rows are `ported` or `unused`); Package C (hardening, C1–C12) is next.
+join parties and guilds, fight guild wars, run quests, and use the GM commands. Packages B and C
+are closed (all 2,332 Parity rows are `ported` or `unused`, and all twelve hardening items C1–C12 are done); Package D (play-test kit) is next.
 
 ## Direction review, 2026-11-15
 
@@ -136,13 +136,13 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
    `Drop`; the next test process now drops its databases (an advisory lock per process says
    whose owner is gone) and removes its directories and servers (`parity::scratch`), and
    `tools/gates.sh` fails when a run leaves a database, a server, a temporary file or a core.
-7. **Mutation testing resumes by risk, not by section.** The 450 deferred per-section sweeps are
-   not run again. One sweep each covers the code where a wrong line loses or duplicates value:
-   the Transfers (trade, shop, private shop, safebox and mall, refine), the item move and stack
-   rules, death and its penalties, and the damage formulas. Every survivor gets a named test.
-   The owner confirmed on 2026-11-15 that this machine is the one to use, so nothing blocks it.
-   The driver is `tools/mutate.py` (the one the sweeps up to ledger 229k used, rescued in ledger
-   683); it runs on a copy of the tree, never in the working tree.
+7. **Mutation testing resumes by risk, not by section.** **Done in ledger 743.** Four risk-based
+   semantic mutation sweeps ran via `tools/mutate.py` on an isolated copy of the tree across
+   Transfers (24 mutants), item move/stack rules (12 mutants), death/item-drop penalties (14
+   mutants), and damage formulas (29 mutants): 79 semantic mutants, 0 compile kills, 12 real
+   survivors closed by 12 new targeted unit tests (78/78 non-equivalent mutants killed; 1
+   equivalent mutant `melee_quarter_chance_ge10` proved equivalent at `percent == 10` and pinned
+   on both sides). The 450 deferred per-section sweeps are not owed.
 8. **Widths.** **Done in ledger 738.** `.scratch/probes/738/gc_widths.cpp` compiles verbatim
    `server/server/game/packet.h` with `i686-linux-gnu-g++-12 -static` and verifies all 145
    game-to-client headers and dynamic sub-structs against Rust codecs with zero differences

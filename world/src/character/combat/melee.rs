@@ -3267,4 +3267,74 @@ mod tests {
         );
         assert_eq!(victim.hp, 106);
     }
+
+    /// `quarter_chance` halves below 10 and quarters above 10 (`5 + (pct - 10) / 4`);
+    /// note that `percent >= 10` vs `percent > 10` is an equivalent mutant at 10 because
+    /// `5 + (10 - 10) / 4 == 5 == 10 / 2`, so this pins both sides of the boundary.
+    #[test]
+    fn quarter_chance_halves_below_ten_and_quarters_above_ten() {
+        assert_eq!(quarter_chance(9), 4);
+        assert_eq!(quarter_chance(10), 5);
+        assert_eq!(quarter_chance(14), 6);
+        assert_eq!(quarter_chance(26), 9);
+    }
+
+    /// `POINT_MALL_ATTBONUS` caps its added damage at 300 (`G/char_battle.cpp:2185`;
+    /// kills C7 mutant `melee_mall_att_cap`).
+    #[test]
+    fn mall_attack_bonus_caps_at_three_hundred() {
+        let mut points = alpha();
+        points.set_point(point::POINT_MALL_ATTBONUS, 20);
+        let mut victim = dog();
+        victim.hp = 5_000;
+        victim.max_hp = 5_000;
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: false,
+            poly: None,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
+        };
+        let mut dice = Script::new(&[60]);
+        let (struck, _stolen, _events) =
+            damage_normal_range(&mut dice, &mut striker, &mut victim, 2_500, false);
+        // 20% of 2500 is 500, capped at 300 -> 2800 (not 2700).
+        assert_eq!(struck, Struck::Landed { damage: 2_800 });
+        assert_eq!(victim.hp, 2_200);
+    }
+
+    /// A lethal range hit on a Meley statue stops at 1 HP (`G/char_battle.cpp:2379-2381`;
+    /// kills C7 mutant `melee_statue_floor`).
+    #[test]
+    fn a_lethal_range_hit_on_a_meley_statue_leaves_one_hp() {
+        let mut points = alpha();
+        let mut victim = dog();
+        victim.hp = 10;
+        let mut striker = Striker {
+            points: &mut points,
+            weapon: None,
+            empire: 1,
+            map: 1,
+            user_rate: 100,
+            meley_blocked: false,
+            cannot_dead: false,
+            meley_statue: true,
+            poly: None,
+            dragon_stones: [common::dragon::DragonStone::default();
+                common::dragon::DRAGON_STONE_ROWS],
+            dragon_counts: [0; common::dragon::DRAGON_STONE_ROWS],
+        };
+        let mut dice = Script::new(&[60]);
+        let (struck, _stolen, _events) =
+            damage_normal_range(&mut dice, &mut striker, &mut victim, 50, false);
+        assert_eq!(struck, Struck::Landed { damage: 9 });
+        assert_eq!(victim.hp, 1);
+    }
 }

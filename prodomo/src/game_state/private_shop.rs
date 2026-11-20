@@ -5092,4 +5092,64 @@ mod tests {
         );
         assert_eq!(update[12], super::PRIVATE_SHOP_STATE_MODIFY);
     }
+
+    /// Buying a ware with less gold than its price is refused before anything moves
+    /// (kills C7 mutant `pshop_buy_gold_check`).
+    #[test]
+    fn a_buy_with_too_little_gold_is_refused_and_leaves_the_shop_untouched() {
+        let (mut state, mut inbox) = a_seller((6, 19, 1));
+        let buyer = held(7, 19, 1);
+        let (mut viewer_inbox, _) = enter_seeing_with(
+            &mut state,
+            (1, 1),
+            12,
+            (5, 6),
+            10_000,
+            &[(inventory(0), buyer)],
+        );
+        drained(&mut inbox);
+        drained(&mut viewer_inbox);
+        state
+            .private_build(
+                SELLER,
+                super::PrivateBuild {
+                    title: title_of(b"Axes"),
+                    poly_vnum: 0,
+                    title_type: 0,
+                    page_count: 1,
+                },
+                &[priced(0, 500, 0, 3)],
+                mover(),
+            )
+            .unwrap()
+            .unwrap();
+        let viewer = Vid::new(12);
+        state
+            .characters
+            .find_by_vid_mut(viewer)
+            .expect("the buyer is in the world")
+            .set_gold(499);
+        let _opened = state.private_start(viewer, SELLER.raw(), mover());
+        drained(&mut viewer_inbox);
+        let refused = state.private_buy(viewer, 3, mover()).unwrap();
+        assert!(refused.is_err(), "499 Yang cannot buy a 500-Yang ware");
+        assert_eq!(
+            state.characters.find_by_vid(viewer).unwrap().gold(),
+            499,
+            "buyer keeps its gold"
+        );
+        assert!(
+            state.private_shops[&SELLER].wares[3].is_some(),
+            "the ware stays in the shop"
+        );
+        assert_eq!(state.private_shops[&SELLER].gold, 0, "stash stays empty");
+        let heard = drained(&mut viewer_inbox);
+        let needle = b"You don't have enough Yang.";
+        assert!(
+            heard
+                .iter()
+                .any(|record| record.windows(needle.len()).any(|w| w == needle)),
+            "buyer hears the insufficient-Yang notice"
+        );
+    }
 }

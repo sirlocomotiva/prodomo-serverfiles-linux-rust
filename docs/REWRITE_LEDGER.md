@@ -58744,3 +58744,32 @@ passed, 0 failed in 46 targets; with it 5,782 passed, 0 failed in 46 targets (50
 and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
 No test failed on the first run. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`,
 0 `codec`, of 2,332 rows (100% closed); 607 scenarios. No ADR changed.
+
+## 743. Package C7 (risk-based mutation sweeps) and countdown `ITEM_UNIQUE` drop creation
+
+Closes **Package C7** from `docs/STATUS.md`, completing all of Package C (C1–C12):
+
+- **Four risk-based semantic mutation sweeps via `tools/mutate.py`** on an isolated copy of the tree covering every value-loss, value-duplication, penalty, and damage-formula surface (79 semantic mutants total, 0 compile-error kills):
+  1. **Transfers** (24 mutants across `world/src/character/trade.rs`, `shop.rs`, `safebox.rs`, `smith_refine.rs`, `prodomo/src/game_state/private_shop.rs`, `smith_refine.rs`, `db/src/items.rs`): 22 killed on baseline; 2 survivors (`pshop_buy_gold_check`, `refine_success_boundary`).
+  2. **Item move & stack rules** (12 mutants across `world/src/character/item_move.rs`): 12 of 12 killed on baseline.
+  3. **Death & item-drop penalties** (14 mutants across `world/src/character/death_penalty.rs`, `prodomo/src/game_state/death.rs`, `item_penalty.rs`): 11 killed on baseline; 3 survivors (`item_penalty_inv_pct_ge`, `item_penalty_equip_pct_ge`, `item_penalty_band_worst_all_eq`).
+  4. **Damage formulas** (29 mutants across `world/src/character/combat/melee.rs`, `mob_melee.rs`, `pvp.rs`): 21 killed on baseline; 8 survivors (7 real coverage gaps: `melee_quarter_chance_gt`, `mall_att_cap`, `melee_statue_floor`, `pvp_empire_tenth`, `pvp_user_rate`, `pvp_steal_hp_clamp`, `pvp_resist_combat_ge90`; 1 equivalent mutant `melee_quarter_chance_ge10`, since `percent == 10` halves on both branches).
+- **12 targeted survivor-killing unit tests added** (verified 78/78 non-equivalent mutants killed, 0 survivors, 0 compile kills):
+  - `prodomo/src/game_state/private_shop.rs`: `a_buy_with_too_little_gold_is_refused_and_leaves_the_shop_untouched`.
+  - `prodomo/src/game_state/smith_refine.rs`: `a_refine_roll_equal_to_the_probability_succeeds`.
+  - `prodomo/src/game_state/item_penalty.rs`: `an_inventory_roll_equal_to_the_band_percent_drops_the_item`, `an_equipment_roll_equal_to_the_band_percent_drops_the_worn_item`, `the_worst_band_with_an_empty_inventory_can_drop_more_than_one_worn_item`.
+  - `world/src/character/combat/melee.rs`: `quarter_chance_halves_below_ten_and_quarters_above_ten`, `mall_attack_bonus_caps_at_three_hundred`, `a_lethal_range_hit_on_a_meley_statue_leaves_one_hp`.
+  - `world/src/character/combat/pvp.rs`: `a_foreign_empire_map_takes_a_tenth_and_user_rate_scales_the_hit`, `hp_steal_clamps_to_the_victims_remaining_hp`, `combat_resist_applies_at_exactly_ninety_percent_hp`.
+  - `quarter_chance_halves_below_ten_and_quarters_above_ten` also pins the `percent == 10` boundary (half) beside `9` and `11`.
+- **Countdown `ITEM_UNIQUE` drop creation (`world/src/character/drop_item.rs`):**
+  - First-run failure diagnosis on `a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses` caught a live defect: `unported_drop` still refused every `ITEM_UNIQUE`, so catching any of the four countdown rings/cloaks in `fishing.txt` (`70048`–`70051`, `VALUE0 = 240`, `VALUE2 = 0`) logged `NotPorted(Unique)` and gave no item after `GC_FISHING FISH`.
+  - Narrowed `unported_drop` to real-time uniques (`proto.values[2] != 0`, which start `unique_expire_event` unworn at creation) and added `ITEM_SOCKET_UNIQUE_REMAIN_TIME` (socket 5) stamping in `stamp_created_sockets` (`G/item_manager.cpp:214-224`). Added unit test `countdown_unique_stamps_remain_time_in_socket_five`.
+
+Gates (2026-11-20), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,795
+passed, 0 failed in 46 targets; with it 5,795 passed, 0 failed in 46 targets (492 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+First-run failure before fix: `a_bite_left_on_the_line_gets_away_and_a_take_after_one_lands_or_misses`
+(caught stale `UnportedDrop::Unique` refusal on `70049`); fixed in `world/src/character/drop_item.rs`
+and re-verified clean (5,795/0). Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`,
+0 `codec`, of 2,332 rows (100% closed); 607 scenarios. No ADR changed.

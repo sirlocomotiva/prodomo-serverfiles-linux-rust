@@ -1140,4 +1140,134 @@ mod tests {
         );
         assert!(field.lost().is_empty(), "nothing fell");
     }
+
+    /// Level 50 is the first level that pays the item drop penalty (`< 50` skips, 50 pays;
+    /// kills C7 mutant `item_penalty_level_gate`).
+    #[test]
+    fn a_level_50_character_pays_the_item_drop_penalty() {
+        let mut field = Field::a_field();
+        field.join(50, WORST, &[in_inventory(0)]);
+        field.world.dice = Pcg32::new(a_dropping_seed(), 0);
+        field.world.item_drop_penalty(
+            Vid::new(VICTIM),
+            Some(Attacker {
+                vid: Vid::new(KILLER),
+                pc: false,
+            }),
+            false,
+        );
+        assert!(!field.holds(EWindows::Inventory, 0), "level 50 drops");
+        assert_eq!(field.lost(), vec![11]);
+    }
+
+    /// An inventory draw equal to `row.inventory_pct` (`100` in band 8) drops the item
+    /// (`>=`, not `>`; kills C7 mutant `item_penalty_inv_pct_ge`).
+    #[test]
+    fn an_inventory_roll_equal_to_the_band_percent_drops_the_item() {
+        let seed = (0_u64..100_000)
+            .find(|&seed| {
+                let mut dice = Pcg32::new(seed, 0);
+                number(&mut dice, 1, 1_000) == 100 && number(&mut dice, 1, 100) > 20
+            })
+            .expect("a seed with draw_inventory == 100 and draw_equipment > 20");
+        let mut field = Field::a_field();
+        field.join(60, WORST, &[in_inventory(0)]);
+        field.world.dice = Pcg32::new(seed, 0);
+        field.world.item_drop_penalty(
+            Vid::new(VICTIM),
+            Some(Attacker {
+                vid: Vid::new(KILLER),
+                pc: false,
+            }),
+            false,
+        );
+        assert_eq!(field.lost(), vec![11], "draw == inventory_pct drops");
+    }
+
+    /// An equipment draw equal to `row.equipment_pct` (`20` in band 8) drops the worn item
+    /// (`>=`, not `>`; kills C7 mutant `item_penalty_equip_pct_ge`).
+    #[test]
+    fn an_equipment_roll_equal_to_the_band_percent_drops_the_worn_item() {
+        let seed = (0_u64..100_000)
+            .find(|&seed| {
+                let mut dice = Pcg32::new(seed, 0);
+                number(&mut dice, 1, 1_000) > 100 && number(&mut dice, 1, 100) == 20
+            })
+            .expect("a seed with draw_inventory > 100 and draw_equipment == 20");
+        let mut field = Field::a_field();
+        field.join(60, WORST, &[in_equipment(EWearPositions::Ear, 17_040)]);
+        field.world.dice = Pcg32::new(seed, 0);
+        field.world.item_drop_penalty(
+            Vid::new(VICTIM),
+            Some(Attacker {
+                vid: Vid::new(KILLER),
+                pc: false,
+            }),
+            false,
+        );
+        assert_eq!(field.lost(), vec![12], "draw == equipment_pct drops");
+    }
+
+    /// Only the worst band (`band == 8`) with an empty inventory raises the equipment drop
+    /// ceiling from `equipment_qty` (1) to all worn items (kills C7 mutant
+    /// `item_penalty_band_worst_all_eq`).
+    #[test]
+    fn the_worst_band_with_an_empty_inventory_can_drop_more_than_one_worn_item() {
+        let seed = (0_u64..200_000)
+            .find(|&seed| {
+                let mut dice = Pcg32::new(seed, 0);
+                if number(&mut dice, 1, 1_000) > 75 || number(&mut dice, 1, 100) > 15 {
+                    return false;
+                }
+                // Fisher-Yates shuffle of 2 worn slots consumes 1 draw (0..=1).
+                let _ = number(&mut dice, 0, 1);
+                // Band 8 with empty inventory skips `number(1, equipment_qty)` and draws `1..=2`.
+                if number(&mut dice, 1, 2) != 2 {
+                    return false;
+                }
+                // Scatter of the second dropped item stays inside the sectree.
+                number(&mut dice, -7, 7) >= 0 && number(&mut dice, -7, 7) >= 0
+            })
+            .expect("a seed dropping both worn items in band 8");
+        let two_worn = [
+            (wear_pos(EWearPositions::Ear as u16), an_item(12, 17_040, 0)),
+            (
+                wear_pos(EWearPositions::Neck as u16),
+                an_item(13, 16_040, 0),
+            ),
+        ];
+        let mut worst = Field::a_field();
+        worst.join(60, WORST, &two_worn);
+        worst.world.dice = Pcg32::new(seed, 0);
+        worst.world.item_drop_penalty(
+            Vid::new(VICTIM),
+            Some(Attacker {
+                vid: Vid::new(KILLER),
+                pc: false,
+            }),
+            false,
+        );
+        assert_eq!(
+            worst.lost().len(),
+            2,
+            "band 8 with empty inventory drops both worn items"
+        );
+
+        let mut band7 = Field::a_field();
+        band7.join(60, -100_000, &two_worn);
+        band7.world.dice = Pcg32::new(seed, 0);
+        band7.world.item_drop_penalty(
+            Vid::new(VICTIM),
+            Some(Attacker {
+                vid: Vid::new(KILLER),
+                pc: false,
+            }),
+            false,
+        );
+        assert_eq!(
+            band7.lost().len(),
+            1,
+            "band 7 is capped at equipment_qty = 1 even with an empty inventory"
+        );
+    }
 }

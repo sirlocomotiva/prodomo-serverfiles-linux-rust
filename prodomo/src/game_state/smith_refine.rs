@@ -836,4 +836,29 @@ mod tests {
         assert!(matches!(moved.changes[0], RowChange::Destroyed { id: 7 }));
         assert_eq!(moved.gold, Some(-600));
     }
+
+    /// A draw equal to the recipe's probability succeeds (`<=`, not `<`; kills C7
+    /// mutant `refine_success_boundary`).
+    #[test]
+    fn a_refine_draw_equal_to_prob_succeeds() {
+        let seed = (0_u64..10_000)
+            .find(|&seed| {
+                let mut dice = world::character::Pcg32::new(seed, 0);
+                world::character::number(&mut dice, 1, 100) == 50
+            })
+            .expect("a seed whose first 1..=100 draw is 50");
+        let mut world = a_smithy(50);
+        world.dice = world::character::Pcg32::new(seed, 0);
+        let vid = Vid::new(1);
+        let moved = world
+            .refine(vid, 0, REFINE_TYPE_NORMAL, mover())
+            .expect("player 1");
+        assert!(says(&moved, REFINE_SUCCEEDED), "draw == prob succeeds");
+        assert!(matches!(moved.changes[0], RowChange::Destroyed { id: 7 }));
+        assert!(matches!(
+            &moved.changes[1],
+            RowChange::Created(row) if row.vnum == 11
+        ));
+        assert_eq!(moved.gold, Some(-600));
+    }
 }

@@ -685,4 +685,92 @@ mod tests {
         assert!(mall < empire, "the mall before the empire tenth");
         assert!(empire < user_rate, "the empire tenth before the user rate");
     }
+
+    /// A foreign empire map scales PvP damage to 9/10 and `user_rate` scales it by percent
+    /// (kills C7 mutants `pvp_empire_tenth` and `pvp_user_rate`).
+    #[test]
+    fn a_foreign_empire_map_takes_a_tenth_and_user_rate_scales_the_hit() {
+        let attacker = player(20, 100);
+        let victim = player(20, 500);
+        let mut dice = Script::new(&[]);
+        let strike = strike_pc_by_pc(
+            &mut dice,
+            &PvAttacker {
+                points: &attacker,
+                empire: 1,
+                map: 21, // Chunjo (empire 2)
+                user_rate: 50,
+            },
+            &victim_of(&victim),
+            200,
+            PvKind::Normal,
+        );
+        // 200 * 9 / 10 = 180, then 180 * 50 / 100 = 90.
+        assert_eq!(
+            strike.end,
+            PvEnd::Landed {
+                damage: 90,
+                flag: DAMAGE_NORMAL,
+            }
+        );
+    }
+
+    /// `POINT_STEAL_HP` clamps the steal base to the victim's remaining hit points
+    /// (kills C7 mutant `pvp_steal_hp_clamp`).
+    #[test]
+    fn hp_steal_clamps_to_the_victims_remaining_hp() {
+        let mut attacker = player(20, 100);
+        attacker.set_point(point::POINT_STEAL_HP, 10);
+        let victim = player(20, 40);
+        let mut dice = Script::new(&[0]);
+        let strike = strike_pc_by_pc(
+            &mut dice,
+            &attacker_of(&attacker),
+            &victim_of(&victim),
+            200,
+            PvKind::Normal,
+        );
+        // min(200, 40) * 10 / 100 = 4 (not 200 * 10 / 100 = 20).
+        assert_eq!(
+            strike.actions,
+            vec![
+                PvAction::Fly(FLY_HP_SMALL),
+                PvAction::Attacker {
+                    kind: point::POINT_HP,
+                    amount: 4,
+                },
+                PvAction::Victim {
+                    kind: point::POINT_HP,
+                    amount: -4,
+                },
+            ]
+        );
+    }
+
+    /// `POINT_RESIST_COMBAT` applies when the victim is at exactly 90% HP (`>= 90`, not `>`;
+    /// kills C7 mutant `pvp_resist_combat_ge90`).
+    #[test]
+    fn combat_resist_applies_at_exactly_ninety_percent_hp() {
+        let attacker = player(20, 100);
+        let max_hp = player(20, 0).max_hp();
+        assert_eq!(max_hp % 10, 0);
+        let mut victim = player(20, max_hp * 9 / 10);
+        victim.set_point(point::POINT_RESIST_COMBAT, 25);
+        assert_eq!(pc_hp_pct(&victim), 90);
+        let mut dice = Script::new(&[]);
+        let strike = strike_pc_by_pc(
+            &mut dice,
+            &attacker_of(&attacker),
+            &victim_of(&victim),
+            100,
+            PvKind::Normal,
+        );
+        assert_eq!(
+            strike.end,
+            PvEnd::Landed {
+                damage: 75,
+                flag: DAMAGE_NORMAL,
+            }
+        );
+    }
 }

@@ -101,7 +101,7 @@ const SET_EAR: usize = 7;
 pub enum UnportedDrop {
     /// `ITEM_ELK`: gold as an item, which is neither numbered nor counted.
     Elk,
-    /// `ITEM_UNIQUE`: the remaining time in socket 2 and the expiry event.
+    /// Real-time `ITEM_UNIQUE` (`value2 != 0`): starts `unique_expire_event` unworn at creation.
     Unique,
     /// `ITEM_DS`: `DragonSoulItemInitialize` and the dragon soul inventory.
     DragonSoul,
@@ -248,7 +248,7 @@ pub fn attribute_set_index(item_type: i32, sub_type: i32) -> Option<usize> {
 pub fn unported_drop(vnum: u32, proto: &ItemProto) -> Option<UnportedDrop> {
     match proto.item_type {
         ITEM_ELK => Some(UnportedDrop::Elk),
-        ITEM_UNIQUE => Some(UnportedDrop::Unique),
+        ITEM_UNIQUE if proto.values[2] != 0 => Some(UnportedDrop::Unique),
         ITEM_DS => Some(UnportedDrop::Soul),
         ITEM_BLEND => Some(UnportedDrop::Blend),
         _ if SOCKETED_VNUMS.contains(&vnum) => Some(UnportedDrop::Vnum(vnum)),
@@ -711,10 +711,23 @@ fn make_blend_item(
     Ok(item)
 }
 
-/// The sockets `CreateItem` fills on a new item of `proto`: the gain-socket loop
-/// (`AlterToSocketItem`, `G/item.cpp:1795-1805`), then the limit stamps in socket 0
-/// (`G/item_manager.cpp:277-320`), with `now_secs` the base of a `LIMIT_REAL_TIME` one.
+/// The sockets `CreateItem` fills on a new item of `proto`: the `ITEM_UNIQUE` remain time
+/// in socket 5 (`G/item_manager.cpp:214-224`), the gain-socket loop (`AlterToSocketItem`,
+/// `G/item.cpp:1795-1805`), then the limit stamps in socket 0 (`G/item_manager.cpp:277-320`),
+/// with `now_secs` the base of a real-time stamp.
 pub fn stamp_created_sockets(item: &mut Item, proto: &ItemProto, now_secs: i64) {
+    if proto.item_type == ITEM_UNIQUE {
+        let remain =
+            usize::try_from(common::constants::ITEM_SOCKET_UNIQUE_REMAIN_TIME).unwrap_or(5);
+        item.sockets[remain] = if proto.values[2] == 0 {
+            proto.values[0]
+        } else {
+            let [b0, b1, b2, b3, ..] = now_secs
+                .saturating_add(i64::from(proto.values[0]))
+                .to_le_bytes();
+            i32::from_le_bytes([b0, b1, b2, b3])
+        };
+    }
     // `bGainSocketPct` is a `BYTE`, so the low byte; past six the whole array fills.
     let [socket_pct, ..] = proto.gain_socket_pct.to_le_bytes();
     for socket in item
@@ -1100,7 +1113,6 @@ mod tests {
     fn unported_arms_name_themselves() {
         for (vnum, item_type, sub_type, path) in [
             (1, ITEM_ELK, 0, UnportedDrop::Elk),
-            (71001, ITEM_UNIQUE, 0, UnportedDrop::Unique),
             (50513, ITEM_DS, 0, UnportedDrop::Soul),
             (72723, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(72723)),
             (70037, ITEM_USE, USE_ABILITY_UP, UnportedDrop::Vnum(70037)),
@@ -1108,10 +1120,44 @@ mod tests {
             let proto = ItemProto::for_category_rule(vnum, item_type, sub_type);
             assert_eq!(unported_drop(vnum, &proto), Some(path), "vnum {vnum}");
         }
-        for (vnum, item_type) in [(30111, ITEM_QUEST), (71135, ITEM_RING)] {
+        let mut realtime_unique = ItemProto::for_category_rule(71005, ITEM_UNIQUE, 0);
+        realtime_unique.values[2] = 1;
+        assert_eq!(
+            unported_drop(71005, &realtime_unique),
+            Some(UnportedDrop::Unique)
+        );
+        for (vnum, item_type) in [
+            (30111, ITEM_QUEST),
+            (71135, ITEM_RING),
+            (70049, ITEM_UNIQUE),
+        ] {
             let proto = ItemProto::for_category_rule(vnum, item_type, 0);
             assert_eq!(unported_drop(vnum, &proto), None, "vnum {vnum}");
         }
+    }
+
+    #[test]
+    fn countdown_unique_stamps_remain_time_in_socket_five() {
+        let mut proto = ItemProto::for_category_rule(70049, ITEM_UNIQUE, 0);
+        proto.values[0] = 240;
+        proto.values[2] = 0;
+        let protos = table(vec![proto]);
+        let mut dice = Script::new(vec![1]);
+        let mut gauss = Gauss::new();
+        let item = make_drop_item(
+            &mut dice,
+            &mut gauss,
+            &mut ids(),
+            &protos,
+            &made(&[], &[], &no_groups()),
+            70049,
+            DropAsk {
+                count: 1,
+                rare_pct: -1,
+            },
+        )
+        .expect("a countdown ITEM_UNIQUE creates cleanly");
+        assert_eq!(item.sockets[5], 240);
     }
 
     #[test]
