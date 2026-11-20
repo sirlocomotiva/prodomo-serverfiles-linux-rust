@@ -71940,3 +71940,341 @@ fn meley_kill_vnum(alice: &mut Keyed, adds: &[(u32, u32, (i32, i32))], want_vnum
         assert!(killed, "killed Meley spawn vid={vid} vnum={want_vnum}");
     }
 }
+
+/// Parse one `key=value` unsigned integer field from a tracing log line.
+fn parse_log_u64(log: &str, line_needle: &str, key: &str) -> u64 {
+    let line = log
+        .lines()
+        .rev()
+        .find(|line| line.contains(line_needle))
+        .unwrap_or_else(|| panic!("missing log line {line_needle:?} in:\n{log}"));
+    let prefix = format!("{key}=");
+    let start = line
+        .find(&prefix)
+        .unwrap_or_else(|| panic!("missing {prefix:?} in {line:?}"));
+    let rest = &line[start + prefix.len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end]
+        .parse::<u64>()
+        .unwrap_or_else(|err| panic!("bad {prefix:?} in {line:?}: {err}"))
+}
+
+/// Package C1: eight scripted clients walk, chat, and swing at mobs on Channel 1 while the
+/// game loop records every Pulse's duration; clean shutdown reports 99th-percentile Pulse
+/// latency well under the 20 ms exit bar.
+#[test]
+fn channel_one_load_run_keeps_p99_pulse_under_twenty_milliseconds() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    let mut clients: Vec<(Keyed, Vec<u32>)> = Vec::with_capacity(8);
+    for idx in 0..8usize {
+        let login = format!("load{idx}");
+        let name = format!("Load{idx}");
+        create_account(&server, &login);
+        let aid = support::rows(
+            database.url(),
+            &format!("SELECT id FROM account WHERE login = '{login}'"),
+            1,
+        )[0][0];
+        let x = 469_300 + i32::try_from(idx).expect("small") * 80;
+        let y = 964_200 + i32::try_from(idx).expect("small") * 60;
+        sql(
+            &database,
+            &format!("UPDATE account SET empire = 1 WHERE id = {aid}"),
+        );
+        sql(
+            &database,
+            &format!(
+                "INSERT INTO player (account_id, slot, name, job, level, x, y, map_index, \
+                 hp, sp, stamina, gold) \
+                 VALUES ({aid}, 0, '{name}', 0, 20, {x}, {y}, 1, 500, 200, 500, 0)"
+            ),
+        );
+        let (mut client, _ch, _items) = load_character(&server, login.as_bytes(), 0);
+        let entered = enter_game_shown(&mut client);
+        let mobs: Vec<u32> = entered
+            .shown
+            .monsters
+            .iter()
+            .filter(|r| r.first() == Some(&GC_CHARACTER_ADD) && r.len() >= 24)
+            .map(|r| u32::from_le_bytes(r[1..5].try_into().expect("vid")))
+            .collect();
+        let _ = drain_all_wire(&mut client, 80);
+        clients.push((client, mobs));
+    }
+    // 15 rounds x ~180 ms (~2.7 s, > 65 Pulses) of concurrent moves, swings, and chat fan-out.
+    for round in 0..15i32 {
+        for (idx, (client, mobs)) in clients.iter_mut().enumerate() {
+            let dx = if round % 2 == 0 { 120 } else { -120 };
+            let x = 469_300 + i32::try_from(idx).expect("small") * 80 + dx;
+            let y = 964_200 + i32::try_from(idx).expect("small") * 60 + (round % 3) * 40;
+            client.send_record(&client_move(
+                0,
+                0,
+                0,
+                x,
+                y,
+                1000 + u32::try_from(round).expect("r") * 100,
+            ));
+            if let Some(&mob_vid) = mobs.first() {
+                client.send_record(&client_attack(mob_vid));
+            }
+            if round % 3 == 0 {
+                client.send_record(&client_chat(CHAT_TALKING, b"load step"));
+            }
+        }
+        for (client, _) in &mut clients {
+            let _ = drain_all_wire(client, 20);
+        }
+    }
+    drop(clients);
+    let log = server.stop_gracefully();
+    let samples = parse_log_u64(&log, "Game loop stop acknowledged", "pulse_samples");
+    let p99_us = parse_log_u64(&log, "Game loop stop acknowledged", "p99_pulse_us");
+    assert!(
+        samples >= 40,
+        "expected at least 40 timed Pulses, got {samples}:\n{log}"
+    );
+    assert!(
+        p99_us < 20_000,
+        "99th-percentile Pulse must stay under 20 ms (20,000 us), got {p99_us} us:\n{log}"
+    );
+}
+
+/// Package C2: a runaway `while true do end` in a quest script stops as a script error at the
+/// instruction-count limit instead of freezing the game thread, and the Pulse keeps counting.
+#[test]
+fn a_runaway_quest_script_stops_as_a_script_error_and_keeps_the_pulse_counting() {
+    const RUNAWAY_QUEST: &[u8] = b"quest runaway_c2 begin\n\
+        \tstate start begin\n\
+        \t\twhen login begin\n\
+        \t\t\tchat(\"before_c2_loop\")\n\
+        \t\t\twhile true do end\n\
+        \t\t\tchat(\"after_c2_loop\")\n\
+        \t\tend\n\
+        \tend\n\
+        end\n";
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let (mut server, _data) = Server::start_with_files_configured(
+        binary(),
+        database.url(),
+        &[("locale/europe/quest/zz_probe/runaway_c2.lua", RUNAWAY_QUEST)],
+        "test_server = false",
+    );
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _ch, _items) = load_character(&server, b"alice", 0);
+    let _shown = enter_game_shown(&mut alice);
+    let burst = drain_all_wire(&mut alice, 600);
+    assert!(
+        burst.iter().any(|r| r
+            .windows(b"before_c2_loop".len())
+            .any(|w| w == b"before_c2_loop")),
+        "script started and ran before the infinite loop"
+    );
+    assert!(
+        !burst.iter().any(|r| r
+            .windows(b"after_c2_loop".len())
+            .any(|w| w == b"after_c2_loop")),
+        "script must not pass the infinite loop"
+    );
+    server.wait_for("quest instruction limit exceeded");
+    // The game thread is still alive and responsive: a talking chat echoes back and Pulses count.
+    alice.send_record(&client_chat(CHAT_TALKING, b"still alive"));
+    let after = drain_all_wire(&mut alice, 400);
+    assert!(
+        after
+            .iter()
+            .any(|r| r.windows(b"still alive".len()).any(|w| w == b"still alive")),
+        "the game loop kept running after the runaway quest aborted"
+    );
+    drop(alice);
+    let log = server.stop_gracefully();
+    let pulses = parse_log_u64(&log, "Game loop stop acknowledged", "final_pulse");
+    assert!(pulses >= 10, "Pulses kept counting: {pulses}");
+}
+
+/// Package C3: a slow client whose outbox reaches `max_client_outbox` is closed without
+/// stalling the game thread or other live clients.
+#[test]
+fn a_slow_client_whose_outbox_reaches_capacity_is_closed() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nmax_client_outbox = 128\nshout_limit_level = 1\nenable_global_shout = true",
+    );
+    create_account(&server, "alice");
+    create_account(&server, "bob");
+    add_characters(&database);
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) \
+         SELECT id, 'Alpha', 'IMPLEMENTOR' FROM account WHERE login = 'alice'",
+    );
+    let bob_aid = support::rows(
+        database.url(),
+        "SELECT id FROM account WHERE login = 'bob'",
+        1,
+    )[0][0];
+    sql(
+        &database,
+        &format!("UPDATE account SET empire = 1 WHERE id = {bob_aid}"),
+    );
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO player (account_id, slot, name, job, level, x, y, map_index, \
+             hp, sp, stamina, gold) \
+             VALUES ({bob_aid}, 0, 'SlowBob', 0, 20, 469300, 964200, 1, 500, 200, 500, 0)"
+        ),
+    );
+    let (mut alice, _ch, _items) = load_character(&server, b"alice", 0);
+    let _ = enter_game_shown(&mut alice);
+    let _ = drain_all_wire(&mut alice, 200);
+
+    let (mut slow_bob, _ch, _items) = load_character(&server, b"bob", 0);
+    let _ = enter_game_shown(&mut slow_bob);
+    // SlowBob stops reading from its socket here; Alice floods `/n` notices (which cost no chat
+    // counter) until SlowBob's kernel receive buffer and 128-record outbox fill and the server
+    // closes SlowBob's descriptor while Alice stays open.
+    let mut notice = Vec::with_capacity(403);
+    notice.extend_from_slice(b"/n ");
+    notice.extend_from_slice(&[b'x'; 400]);
+    let single = client_chat(CHAT_TALKING, &notice);
+    let mut burst = Vec::new();
+    for _ in 0..64 {
+        burst.extend_from_slice(&single);
+    }
+    for _ in 0..800 {
+        alice.send_record(&burst);
+        let _ = drain_all_wire(&mut alice, 10);
+        server.drain_log();
+        if server.logged("Client outbox reached capacity; closing slow client") {
+            break;
+        }
+    }
+    server.wait_for("Client outbox reached capacity; closing slow client");
+    // Alice stays open and responsive after SlowBob was evicted.
+    let _ = drain_all_wire(&mut alice, 100);
+    alice.send_record(&client_chat(CHAT_TALKING, b"alice still alive"));
+    let alice_after = drain_all_wire(&mut alice, 400);
+    assert!(
+        alice_after.iter().any(|r| r
+            .windows(b"alice still alive".len())
+            .any(|w| w == b"alice still alive")),
+        "healthy client must remain open after slow client is closed"
+    );
+    // Drain whatever was already in SlowBob's kernel receive buffer; the socket must hit EOF.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut closed = false;
+    while std::time::Instant::now() < deadline {
+        let (_bytes, quiet) = slow_bob.client.drain(Duration::from_millis(200));
+        if quiet == Quiet::Closed {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "the slow client's socket must be closed after outbox overflow"
+    );
+}
+
+/// Package C3: an accepted connection that never finishes handshake and login within
+/// `login_deadline_seconds` is closed, while a logged-in client stays open past it.
+#[test]
+fn a_silent_connection_that_never_finishes_login_is_closed_at_the_deadline() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false\nlogin_deadline_seconds = 1\nping_event_second_cycle = 60",
+    );
+    // 1) Silent in Handshake on Channel 1: closed at the 1 s deadline.
+    let (mut silent_handshake, _token) = accepted(server.channel(1));
+    // 2) Finishes Handshake into Auth, then stays silent: closed at the 1 s deadline.
+    let (mut silent_auth, first) = accepted(server.auth());
+    assert_eq!(shake(&mut silent_auth, first), [GC_PHASE, PHASE_AUTH]);
+    // 3) Logs in cleanly into Game: deadline disarms and the socket stays open past 1 s.
+    create_account(&server, "alice");
+    add_characters(&database);
+    let (mut alice, _ch, _items) = load_character(&server, b"alice", 0);
+    let _ = enter_game_shown(&mut alice);
+    let _ = drain_all_wire(&mut alice, 200);
+
+    let (_b1, q1) = silent_handshake.drain(Duration::from_secs(3));
+    assert_eq!(q1, Quiet::Closed, "silent Handshake connection must close");
+    let (_b2, q2) = silent_auth.drain(Duration::from_secs(3));
+    assert_eq!(q2, Quiet::Closed, "silent Auth connection must close");
+    server.wait_for_count(
+        "Client did not finish login before the deadline; closing",
+        2,
+    );
+
+    let (_b3, q3) = alice.client.drain(Duration::from_millis(1400));
+    assert_eq!(
+        q3,
+        Quiet::Open,
+        "logged-in client must stay open past login deadline"
+    );
+}
+
+/// Package C3: before login completes, each phase caps frame sizes at the largest record that
+/// phase accepts (`Handshake` 13 B, `Auth` 66 B, non-mark `Login` 257 B) and closes at once
+/// on a prefix declaring more.
+#[test]
+fn an_oversized_frame_before_login_closes_the_connection_immediately() {
+    let Some(database) = ScratchDatabase::create() else {
+        return;
+    };
+    let mut server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = false",
+    );
+    // 1) Handshake (cap 13): a 4-byte CG_CHAT prefix declaring 100 bytes closes immediately.
+    let (mut in_handshake, _token) = accepted(server.channel(1));
+    in_handshake.send(&[0x03, 100, 0, 0]);
+    let (_b, q) = in_handshake.drain(Duration::from_secs(2));
+    assert_eq!(q, Quiet::Closed, "oversized frame in Handshake must close");
+    server.wait_for("exceeds limit 13");
+
+    // 2) Auth (cap 66): an encrypted CG_CHAT prefix declaring 100 bytes closes immediately.
+    let (mut in_auth, first) = accepted(server.auth());
+    assert_eq!(shake(&mut in_auth, first), [GC_PHASE, PHASE_AUTH]);
+    in_auth.send(&sealed(&[0x03, 100, 0, 0]));
+    let (_b, q) = in_auth.drain(Duration::from_secs(2));
+    assert_eq!(q, Quiet::Closed, "oversized frame in Auth must close");
+    server.wait_for("exceeds limit 66");
+
+    // 3) Non-mark Login (cap 257): an encrypted CG_CHAT prefix declaring 300 bytes closes at once.
+    let (mut in_login, first) = accepted(server.channel(1));
+    assert_eq!(shake(&mut in_login, first), [GC_PHASE, PHASE_LOGIN]);
+    in_login.send(&sealed(&[0x03, 0x2c, 0x01, 0]));
+    let (_b, q) = in_login.drain(Duration::from_secs(2));
+    assert_eq!(
+        q,
+        Quiet::Closed,
+        "oversized frame in non-mark Login must close"
+    );
+    server.wait_for("exceeds limit 257");
+}

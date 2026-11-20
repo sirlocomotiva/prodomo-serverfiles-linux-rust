@@ -69,7 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use mlua::{Function, Lua, MultiValue, Thread, Value};
+use mlua::{Function, HookTriggers, Lua, MultiValue, Thread, Value};
 
 use crate::host::{self, Host, HostError, BRIDGE};
 
@@ -90,6 +90,39 @@ pub const CONFIRM_TIMEOUT: u8 = 2;
 
 /// `QUEST_SKIN_COUNT` (`questmanager.h:47-55`): `set_skin` takes a skin below it.
 const QUEST_SKIN_COUNT: u8 = 6;
+
+/// Maximum Lua VM instructions one quest call or resume step may execute before the host
+/// aborts it as a script error (Package C2, ADR-0006).
+///
+/// Generous enough for every live quest loop while stopping a runaway `while true do end`
+/// well inside a single 40 ms Pulse instead of freezing the game thread.
+pub const DEFAULT_INSTRUCTION_LIMIT: u32 = 1_000_000;
+
+/// Error text raised by the instruction-count hook when a script runs past the budget.
+const INSTRUCTION_LIMIT_ERROR: &str = "quest instruction limit exceeded";
+
+/// Removes the main-state instruction hook when dropped so every `Lua::set_hook` leaves the
+/// VM clean even on an early return.
+struct LuaHookGuard<'a>(&'a Lua);
+
+impl Drop for LuaHookGuard<'_> {
+    fn drop(&mut self) {
+        self.0.remove_hook();
+    }
+}
+
+fn arm_lua_instruction_hook(lua: &Lua, limit: u32) -> LuaHookGuard<'_> {
+    lua.set_hook(HookTriggers::new().every_nth_instruction(limit), |_, _| {
+        Err(mlua::Error::runtime(INSTRUCTION_LIMIT_ERROR))
+    });
+    LuaHookGuard(lua)
+}
+
+fn arm_thread_instruction_hook(thread: &Thread, limit: u32) {
+    thread.set_hook(HookTriggers::new().every_nth_instruction(limit), |_, _| {
+        Err(mlua::Error::runtime(INSTRUCTION_LIMIT_ERROR))
+    });
+}
 
 /// The event directories of `object/` (`questmanager.cpp:80-109`, with `__EVENT_MANAGER__` and
 /// `ENABLE_QUEST_DIE_EVENT` defined), in the order `NPC::Set` walks its name map.
@@ -2810,6 +2843,7 @@ impl Run<'_, '_> {
         let Some(condition) = self.host.chunk(&file) else {
             return true;
         };
+        let _hook = arm_lua_instruction_hook(self.lua(), DEFAULT_INSTRUCTION_LIMIT);
         match condition.call::<MultiValue>(()) {
             Ok(values) => values.back().is_some_and(truthy),
             Err(error) => {
@@ -2824,6 +2858,7 @@ impl Run<'_, '_> {
         let Some(chunk) = arg.and_then(|file| self.host.chunk(file)) else {
             return Vec::new();
         };
+        let _hook = arm_lua_instruction_hook(self.lua(), DEFAULT_INSTRUCTION_LIMIT);
         match chunk.call::<MultiValue>(()) {
             Ok(values) => values
                 .back()
@@ -2852,7 +2887,7 @@ impl Run<'_, '_> {
                 None => None,
             };
             for entry in entries.into_iter().flatten() {
-                if is_true(entry.when.as_ref()) {
+                if is_true(self.lua(), entry.when.as_ref()) {
                     avail.push(entry);
                 }
             }
@@ -2902,7 +2937,7 @@ impl Run<'_, '_> {
             let Some(dot) = arg.iter().position(|byte| *byte == b'.') else {
                 continue;
             };
-            if arg[dot + 1..] != *verb || !is_true(entry.when.as_ref()) {
+            if arg[dot + 1..] != *verb || !is_true(self.lua(), entry.when.as_ref()) {
                 continue;
             }
             if pc.running.is_some() {
@@ -3108,7 +3143,10 @@ impl Run<'_, '_> {
             cx.window = std::mem::take(&mut running.window);
         }
         let resumed = match &running.thread {
-            Ok(thread) => args.and_then(|args| thread.resume::<MultiValue>(args)),
+            Ok(thread) => {
+                arm_thread_instruction_hook(thread, DEFAULT_INSTRUCTION_LIMIT);
+                args.and_then(|args| thread.resume::<MultiValue>(args))
+            }
             Err(error) => Err(error.clone()),
         };
         // The window goes back to the script before any end of it reads it.
@@ -3342,10 +3380,11 @@ fn is_refusal(error: &mlua::Error) -> bool {
 
 /// `IsScriptTrue` (`questlua.cpp:173`): no condition is true, else the truth of its last
 /// result; an error is false.
-fn is_true(when: Option<&Code>) -> bool {
+fn is_true(lua: &Lua, when: Option<&Code>) -> bool {
     let Some(when) = when else {
         return true;
     };
+    let _hook = arm_lua_instruction_hook(lua, DEFAULT_INSTRUCTION_LIMIT);
     let result = when
         .as_ref()
         .map_err(Clone::clone)
@@ -12378,5 +12417,61 @@ end
         assert_eq!(dword(9.3e18), 0);
         assert_eq!(dword(f64::INFINITY), 0);
         assert_eq!(dword(f64::NAN), 0);
+    }
+
+    /// Package C2: a runaway `while true do end` in a quest script or `when ... with`
+    /// condition aborts at the instruction limit as a script error instead of freezing.
+    #[test]
+    fn a_runaway_quest_script_aborts_at_the_instruction_limit() {
+        let root =
+            std::env::temp_dir().join(format!("quest-manager-{}-runaway-loop", std::process::id()));
+        let files = [
+            ("settings.lua", ""),
+            ("translate.lua", ""),
+            (
+                "quest/questlib.lua",
+                "function spin_forever() while true do end end\n",
+            ),
+            ("quest/locale.lua", ""),
+            ("quest/quest_list", ""),
+            (
+                "quest/test/test.quest",
+                "quest runaway begin\n\
+                 \tstate start begin\n\
+                 \t\twhen 20001.chat.\"loop\" with spin_forever() begin\n\
+                 \t\t\tchat(\"unreachable\")\n\
+                 \t\tend\n\
+                 \t\twhen 20001.click begin\n\
+                 \t\t\tchat(\"before\")\n\
+                 \t\t\twhile true do end\n\
+                 \t\t\tchat(\"after\")\n\
+                 \t\tend\n\
+                 \tend\n\
+                 end\n",
+            ),
+        ];
+        for (path, text) in files {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let host = Host::load(&root);
+        fs::remove_dir_all(&root).unwrap();
+        let mut manager = Manager::new(host.unwrap(), b"", b"");
+        let mut game = Fake::default();
+        // Clicking NPC 20001 evaluates the runaway `chat` condition (must abort and fail
+        // closed as false) and then runs the runaway `click` body (must log `"before"`,
+        // abort at the instruction limit, never reach `"after"`, and end cleanly).
+        assert!(manager.click(PID, VID, 20001, &mut game));
+        let chats: Vec<String> = game
+            .chats
+            .iter()
+            .map(|(_, text)| String::from_utf8_lossy(text).into_owned())
+            .collect();
+        assert_eq!(chats, ["before"]);
+        assert!(
+            !manager.is_running(PID),
+            "the runaway script must have ended cleanly"
+        );
     }
 }

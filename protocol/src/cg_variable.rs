@@ -1220,6 +1220,14 @@ impl VariableClientFrameDecoder {
         self.max_frame_size
     }
 
+    /// Update the maximum complete frame size the decoder accepts.
+    ///
+    /// The descriptor tightens this before login so an unauthenticated peer cannot buffer
+    /// more than the largest record its current phase accepts, then raises it once logged in.
+    pub fn set_max_frame_size(&mut self, max_frame_size: usize) {
+        self.max_frame_size = max_frame_size;
+    }
+
     /// Return the number of bytes currently buffered.
     #[must_use]
     pub fn buffered_len(&self) -> usize {

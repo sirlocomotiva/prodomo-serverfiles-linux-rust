@@ -545,6 +545,53 @@ impl Server {
         self.console.iter().any(|line| line.contains(needle))
     }
 
+    /// Non-blocking drain of any console lines buffered since the last wait.
+    pub fn drain_log(&mut self) {
+        self.console.extend(self.lines.try_iter());
+    }
+
+    /// Send `SIGTERM` for a clean shutdown, wait for exit, drain stdout, and return the console.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `SIGTERM` cannot be sent or the server does not exit within [`PROCESS_TIMEOUT`].
+    pub fn stop_gracefully(&mut self) -> String {
+        let pid = self.child.id().to_string();
+        let sent = Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .expect("kill -TERM should run");
+        assert!(sent.success(), "kill -TERM {pid} failed: {sent}");
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        loop {
+            self.drain_log();
+            if let Some(status) = self.child.try_wait().expect("status should be readable") {
+                // Drain any remaining lines written right before stdout closed.
+                let drain_until = Instant::now() + Duration::from_secs(2);
+                while let Ok(line) = self
+                    .lines
+                    .recv_timeout(drain_until.saturating_duration_since(Instant::now()))
+                {
+                    self.console.push(line);
+                }
+                assert!(
+                    status.success(),
+                    "prodomo exited non-zero on SIGTERM: {status}\n{}",
+                    self.console()
+                );
+                return self.console();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "prodomo did not exit after SIGTERM:\n{}",
+                self.console()
+            );
+            if let Ok(line) = self.lines.recv_timeout(POLL_INTERVAL) {
+                self.console.push(line);
+            }
+        }
+    }
+
     /// The console collected so far, for a failure message.
     #[must_use]
     pub fn console(&self) -> String {

@@ -187,3 +187,49 @@ async fn each_pulse_is_published_before_it_is_processed() {
     assert_eq!(controller.pulse(), 3);
     drop(effects);
 }
+
+#[test]
+fn pulse_budget_records_overruns_and_p99_in_the_summary() {
+    let mut state = LoopState::default();
+    for _ in 0..99 {
+        state.record_pulse(500);
+    }
+    state.record_pulse(super::PULSE_BUDGET_US + 5_000);
+    let summary = state.summary();
+    assert_eq!(summary.pulse_samples, 100);
+    assert_eq!(summary.pulse_overruns, 1);
+    assert_eq!(summary.max_pulse_us, super::PULSE_BUDGET_US + 5_000);
+    assert_eq!(summary.p99_pulse_us, 500);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_pulse_counts_as_an_overrun_in_the_live_loop() {
+    let one = NonZeroUsize::MIN;
+    let (tokio_ends, thread_ends) = bounded_channels(one, one);
+    let terminal_rx = tokio_ends.terminal_rx;
+    let _effects = tokio_ends.effect_rx;
+    let _commands = tokio_ends.command_tx;
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&stop_requested);
+    let pulse = Arc::new(AtomicU64::new(0));
+    let thread = thread::spawn(move || {
+        run_guarded(thread_ends, one, stop_requested, pulse, move |current| {
+            if current == 1 {
+                thread::sleep(Duration::from_millis(50));
+            } else {
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+    });
+    let terminal = terminal_rx.await.unwrap();
+    thread.join().unwrap();
+    let GameLoopTerminal::Stopped(summary) = terminal else {
+        panic!("expected clean stop, got {terminal:?}");
+    };
+    assert_eq!(summary.pulse_samples, 2);
+    assert!(
+        summary.pulse_overruns >= 1,
+        "the 50 ms pulse must exceed the 40 ms budget: {summary:?}"
+    );
+    assert!(summary.max_pulse_us >= super::PULSE_BUDGET_US);
+}

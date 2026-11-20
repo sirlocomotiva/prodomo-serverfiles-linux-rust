@@ -531,6 +531,12 @@ pub struct GameSettings {
     pub player_delete_level_limit_lower: i32,
     /// Skills are disabled.
     pub skill_disable: bool,
+    /// Maximum queued records in one client's outbox before the slow client is closed
+    /// (Package C3). Defaults to 4,096 records; must be at least 1.
+    pub max_client_outbox: usize,
+    /// Seconds an accepted connection has to finish the handshake and login before it is
+    /// closed (Package C3). Defaults to 30 seconds; must be at least 1.
+    pub login_deadline_seconds: u64,
 }
 
 impl Default for GameSettings {
@@ -606,6 +612,8 @@ impl Default for GameSettings {
             player_delete_level_limit_lower: 0,
             skill_disable: false,
             item_id_range: default_item_id_span(),
+            max_client_outbox: 4096,
+            login_deadline_seconds: 30,
         }
     }
 }
@@ -711,6 +719,8 @@ pub enum TopologyError {
         /// The other Channel hosting it.
         channel: u8,
     },
+    /// A non-zero limit was configured as zero.
+    ZeroLimit(&'static str),
     /// An `[access]` address is not a dotted IPv4 address.
     BadAccessIp {
         /// The key holding it (`ban_ip` or `block_country_ip`).
@@ -740,6 +750,7 @@ impl fmt::Display for TopologyError {
             }
             Self::DuplicatePort(port) => write!(f, "port {port} is used by two listeners"),
             Self::ZeroCycle(key) => write!(f, "game.{key} must be at least 1 second"),
+            Self::ZeroLimit(key) => write!(f, "game.{key} must be at least 1"),
             Self::UnorderedItemIdRange { first, last } => write!(
                 f,
                 "game.item_id_range is [{first}, {last}]; the first id must be below the last"
@@ -782,6 +793,12 @@ impl ServerConfig {
         }
         if self.game.ping_event_second_cycle == 0 {
             return Err(TopologyError::ZeroCycle("ping_event_second_cycle"));
+        }
+        if self.game.login_deadline_seconds == 0 {
+            return Err(TopologyError::ZeroCycle("login_deadline_seconds"));
+        }
+        if self.game.max_client_outbox == 0 {
+            return Err(TopologyError::ZeroLimit("max_client_outbox"));
         }
         let span = self.game.item_id_range;
         if !span.is_ordered() {

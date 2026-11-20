@@ -23,6 +23,12 @@ pub use crate::game_loop_messages::{
 mod pulse_planner;
 pub use pulse_planner::{PulseBatch, PulsePlanner, MAX_CATCH_UP_PULSES, PULSE_PERIOD};
 
+/// One Pulse budget in microseconds (40 ms at 25 Pulses per second; Package C1).
+pub const PULSE_BUDGET_US: u64 = 40_000;
+
+/// Number of recent Pulse durations retained for the shutdown 99th-percentile summary.
+const PULSE_SAMPLE_CAPACITY: usize = 4096;
+
 /// Synchronous pulse work exclusively owned by the dedicated thread.
 pub trait PulseProcessor: Send + 'static {
     /// Processes one pulse without awaiting or performing asynchronous I/O.
@@ -190,11 +196,30 @@ where
     })
 }
 
-#[derive(Default)]
 struct LoopState {
     pulse: u64,
     dropped_effects: u64,
     capped_catch_up_batches: u64,
+    pulse_overruns: u64,
+    max_pulse_us: u64,
+    pulse_samples: u64,
+    sample_cursor: usize,
+    samples_us: Vec<u64>,
+}
+
+impl Default for LoopState {
+    fn default() -> Self {
+        Self {
+            pulse: 0,
+            dropped_effects: 0,
+            capped_catch_up_batches: 0,
+            pulse_overruns: 0,
+            max_pulse_us: 0,
+            pulse_samples: 0,
+            sample_cursor: 0,
+            samples_us: Vec::with_capacity(PULSE_SAMPLE_CAPACITY),
+        }
+    }
 }
 
 impl LoopState {
@@ -204,11 +229,49 @@ impl LoopState {
         }
     }
 
-    const fn summary(&self) -> GameLoopSummary {
+    /// Record one completed Pulse's work duration in microseconds and warn on budget overrun.
+    fn record_pulse(&mut self, duration_us: u64) {
+        self.pulse_samples = self.pulse_samples.saturating_add(1);
+        if duration_us > self.max_pulse_us {
+            self.max_pulse_us = duration_us;
+        }
+        if self.samples_us.len() < PULSE_SAMPLE_CAPACITY {
+            self.samples_us.push(duration_us);
+        } else {
+            self.samples_us[self.sample_cursor] = duration_us;
+            self.sample_cursor = (self.sample_cursor + 1) % PULSE_SAMPLE_CAPACITY;
+        }
+        if duration_us > PULSE_BUDGET_US {
+            self.pulse_overruns = self.pulse_overruns.saturating_add(1);
+            tracing::warn!(
+                pulse = self.pulse,
+                duration_us,
+                budget_us = PULSE_BUDGET_US,
+                overruns = self.pulse_overruns,
+                "Pulse exceeded budget"
+            );
+        }
+    }
+
+    fn p99_pulse_us(&self) -> u64 {
+        if self.samples_us.is_empty() {
+            return 0;
+        }
+        let mut sorted = self.samples_us.clone();
+        sorted.sort_unstable();
+        let index = (sorted.len() * 99).saturating_sub(1) / 100;
+        sorted[index]
+    }
+
+    fn summary(&self) -> GameLoopSummary {
         GameLoopSummary {
             final_pulse: self.pulse,
             dropped_effects: self.dropped_effects,
             capped_catch_up_batches: self.capped_catch_up_batches,
+            pulse_overruns: self.pulse_overruns,
+            max_pulse_us: self.max_pulse_us,
+            p99_pulse_us: self.p99_pulse_us(),
+            pulse_samples: self.pulse_samples,
         }
     }
 }
@@ -248,6 +311,7 @@ impl LoopRuntime {
                 if self.stop_requested.load(Ordering::SeqCst) {
                     return GameLoopTerminal::Stopped(self.state.summary());
                 }
+                let pulse_started = Instant::now();
                 match self.drain_commands::<P>(processor) {
                     LoopControl::Continue => {}
                     LoopControl::Stop => return GameLoopTerminal::Stopped(self.state.summary()),
@@ -257,6 +321,9 @@ impl LoopRuntime {
                 self.published_pulse
                     .store(self.state.pulse, Ordering::Release);
                 processor.process_pulse(self.state.pulse);
+                let duration_us =
+                    u64::try_from(pulse_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                self.state.record_pulse(duration_us);
             }
         }
     }

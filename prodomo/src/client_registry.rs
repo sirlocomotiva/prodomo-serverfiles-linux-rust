@@ -32,11 +32,11 @@
 #![warn(missing_docs)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use db::items::{AccountChange, RowChange};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::item_move::StoreOrder;
 
@@ -147,6 +147,62 @@ struct Member {
     orders: mpsc::UnboundedSender<ClientOrder>,
 }
 
+/// Default per-client outbox cap (Package C3): a slow client whose undelivered queue reaches
+/// this many records is closed so the game thread never accumulates unbounded memory for it.
+pub const DEFAULT_CLIENT_OUTBOX_CAPACITY: usize = 4096;
+
+#[derive(Debug)]
+struct OutboxQuota {
+    limit: usize,
+    queued: AtomicUsize,
+    overflowed: AtomicBool,
+    overflow_notify: Notify,
+}
+
+impl OutboxQuota {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            queued: AtomicUsize::new(0),
+            overflowed: AtomicBool::new(false),
+            overflow_notify: Notify::new(),
+        }
+    }
+}
+
+/// The descriptor side's handle on a client's outbox cap (Package C3).
+#[derive(Clone, Debug)]
+pub struct OutboxGuard {
+    quota: Arc<OutboxQuota>,
+}
+
+impl OutboxGuard {
+    /// Whether the outbox has already hit its capacity and marked the client for closure.
+    #[must_use]
+    pub fn is_overflowed(&self) -> bool {
+        self.quota.overflowed.load(Ordering::Acquire)
+    }
+
+    /// Wait until the outbox overflows. Resolves immediately if it already has.
+    pub async fn overflowed(&self) {
+        let notified = self.quota.overflow_notify.notified();
+        if self.is_overflowed() {
+            return;
+        }
+        notified.await;
+    }
+
+    /// Credit `count` records that have been written to the client socket.
+    pub fn account_written(&self, count: usize) {
+        let _ = self
+            .quota
+            .queued
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(count))
+            });
+    }
+}
+
 /// A sender the game thread writes records to for one client.
 ///
 /// The world has no socket, and giving it one would put a file descriptor on a
@@ -162,30 +218,59 @@ struct Member {
 #[derive(Clone, Debug)]
 pub struct ClientOutbox {
     tx: mpsc::UnboundedSender<Vec<u8>>,
+    quota: Option<Arc<OutboxQuota>>,
 }
 
 impl ClientOutbox {
-    /// Wraps a sender half.
+    /// Wraps a sender half with no outbox cap (for unit-test fixtures).
     #[must_use]
     pub const fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-        Self { tx }
+        Self { tx, quota: None }
+    }
+
+    fn with_quota(tx: mpsc::UnboundedSender<Vec<u8>>, quota: Arc<OutboxQuota>) -> Self {
+        Self {
+            tx,
+            quota: Some(quota),
+        }
     }
 
     /// Hands one record to the client.
     ///
-    /// Returns `false` when the descriptor is gone, which is the honest answer for a
-    /// world write to a departed client: the record was not delivered and cannot be.
-    /// A caller that needs to know the difference between "sent" and "sent and
-    /// buffered" cannot have it, and does not need to: the socket write is the
-    /// descriptor's, and it is the descriptor that will fail.
+    /// Returns `false` when the descriptor is gone or when the client's outbox has reached
+    /// its capacity (in which case the descriptor is notified to close the slow client).
     pub fn send(&self, record: Vec<u8>) -> bool {
-        self.tx.send(record).is_ok()
+        if let Some(quota) = &self.quota {
+            if quota.overflowed.load(Ordering::Acquire) {
+                return false;
+            }
+            let prev = quota.queued.fetch_add(1, Ordering::AcqRel);
+            if prev >= quota.limit {
+                quota.queued.fetch_sub(1, Ordering::Release);
+                if !quota.overflowed.swap(true, Ordering::SeqCst) {
+                    quota.overflow_notify.notify_waiters();
+                }
+                return false;
+            }
+        }
+        if self.tx.send(record).is_ok() {
+            true
+        } else {
+            if let Some(quota) = &self.quota {
+                quota.queued.fetch_sub(1, Ordering::Release);
+            }
+            false
+        }
     }
 
-    /// Whether the descriptor is still draining this queue.
+    /// Whether the descriptor is still draining this queue and has not overflowed.
     #[must_use]
     pub fn is_open(&self) -> bool {
         !self.tx.is_closed()
+            && !self
+                .quota
+                .as_ref()
+                .is_some_and(|quota| quota.overflowed.load(Ordering::Acquire))
     }
 }
 
@@ -194,20 +279,34 @@ impl ClientOutbox {
 /// One registry exists per process, held in an `Arc` inside `ConnectionContext`, and a
 /// lease hands a task its own `Arc` clone. That is what makes deregistration on drop work
 /// without a self-referential borrow: the registry outlives every descriptor task.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChannelClients {
     /// Keyed by Channel number, because legacy's scope is one process per Channel.
     inner: Mutex<HashMap<u8, Vec<Member>>>,
     next_id: AtomicU64,
+    outbox_capacity: usize,
+}
+
+impl Default for ChannelClients {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ChannelClients {
-    /// An empty registry.
+    /// An empty registry with [`DEFAULT_CLIENT_OUTBOX_CAPACITY`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_outbox_capacity(DEFAULT_CLIENT_OUTBOX_CAPACITY)
+    }
+
+    /// An empty registry whose per-client outboxes cap at `outbox_capacity` records.
+    #[must_use]
+    pub fn with_outbox_capacity(outbox_capacity: usize) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            outbox_capacity: outbox_capacity.max(1),
         }
     }
 
@@ -218,20 +317,23 @@ impl ChannelClients {
     pub fn join(self: &Arc<Self>, entry: ClientEntry) -> Lease {
         let (tx, inbox) = mpsc::unbounded_channel();
         let (orders, ordered) = mpsc::unbounded_channel();
+        let quota = Arc::new(OutboxQuota::new(self.outbox_capacity));
+        let outbox = ClientOutbox::with_quota(tx, Arc::clone(&quota));
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let channel = entry.channel;
         if let Ok(mut channels) = self.inner.lock() {
             channels.entry(channel).or_default().push(Member {
                 id,
                 entry,
-                outbox: ClientOutbox::new(tx.clone()),
+                outbox: outbox.clone(),
                 orders,
             });
         }
         Lease {
             id,
             channel,
-            outbox: ClientOutbox::new(tx),
+            outbox,
+            guard: OutboxGuard { quota },
             registry: Arc::clone(self),
             inbox: Some(inbox),
             orders: Some(ordered),
@@ -460,6 +562,7 @@ pub struct Lease {
     id: u64,
     channel: u8,
     outbox: ClientOutbox,
+    guard: OutboxGuard,
     registry: Arc<ChannelClients>,
     inbox: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     orders: Option<mpsc::UnboundedReceiver<ClientOrder>>,
@@ -542,6 +645,12 @@ impl Lease {
     #[must_use]
     pub const fn channel(&self) -> u8 {
         self.channel
+    }
+
+    /// The descriptor's handle on this lease's outbox cap (Package C3).
+    #[must_use]
+    pub fn outbox_guard(&self) -> OutboxGuard {
+        self.guard.clone()
     }
 
     /// `DESC::SetLanguage` (`G/char.cpp:11641`): the client switched its language, so every
@@ -808,5 +917,20 @@ mod tests {
         });
         assert_eq!(registry.who_counts(1), ([0, 1, 2, 0], 3));
         assert_eq!(registry.who_counts(99), ([0, 1, 2, 0], 1));
+    }
+
+    #[tokio::test]
+    async fn a_full_outbox_marks_overflow_and_notifies_the_descriptor() {
+        let registry = Arc::new(ChannelClients::with_outbox_capacity(2));
+        let lease = registry.join(entry(1, 100, "Slow"));
+        let outbox = lease.outbox();
+        let guard = lease.outbox_guard();
+        assert!(outbox.send(vec![1]));
+        assert!(outbox.send(vec![2]));
+        assert!(!guard.is_overflowed());
+        assert!(!outbox.send(vec![3]), "third record trips the cap of 2");
+        assert!(guard.is_overflowed());
+        assert!(!outbox.is_open(), "overflowed outbox reports closed");
+        guard.overflowed().await;
     }
 }

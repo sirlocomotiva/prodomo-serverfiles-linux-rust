@@ -8357,6 +8357,14 @@ pub struct GameLoopSummary {
     pub dropped_effects: u64,
     /// Catch-up batches that reached 750 pulses with backlog still remaining.
     pub capped_catch_up_batches: u64,
+    /// Pulses whose work took longer than one Pulse budget (`PULSE_BUDGET_US`, 40 ms).
+    pub pulse_overruns: u64,
+    /// Longest recorded Pulse duration, in microseconds.
+    pub max_pulse_us: u64,
+    /// 99th-percentile Pulse duration over the retained sample ring, in microseconds.
+    pub p99_pulse_us: u64,
+    /// Total Pulses timed.
+    pub pulse_samples: u64,
 }
 
 /// Failure propagated from the synchronous thread to the Tokio supervisor.

@@ -198,3 +198,8 @@ adminpage_password = ""
 # legacy CONFIG files never set either, so the compiled-in values applied.
 mall_url = "www.metin2galaxy.ro"
 server_id = 0
+# Per-client hardening bounds (Package C3). A slow client whose outbox reaches
+# max_client_outbox records is closed; an accepted connection that has not finished
+# the handshake and login within login_deadline_seconds is closed.
+max_client_outbox = 4096
+login_deadline_seconds = 30

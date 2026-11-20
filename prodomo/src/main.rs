@@ -338,6 +338,8 @@ struct ConnectionContext {
     ping_cycle: Duration,
     /// `[game] save_event_second_cycle` as an interval, from `prodomo::save::event_period`.
     save_cycle: Duration,
+    /// `[game] login_deadline_seconds`: deadline for completing handshake and login (Package C3).
+    login_deadline: Duration,
     state: Arc<ServerState>,
     channels: Arc<ChannelStatusBoard>,
     store: Store,
@@ -857,6 +859,8 @@ async fn pump_descriptor<S>(
     // The game thread's orders to this client are lent out the same way.
     let mut orders: Option<mpsc::UnboundedReceiver<ClientOrder>> = None;
     let mut pending: Vec<Vec<u8>> = Vec::new();
+    // Package C3: an accepted connection must finish handshake and login before this instant.
+    let login_deadline = tokio::time::Instant::now() + context.login_deadline;
 
     loop {
         lend_queues(held, &mut outbox, &mut orders);
@@ -892,6 +896,7 @@ async fn pump_descriptor<S>(
                 break;
             }
         }
+        let phase = session.phase();
         tokio::select! {
             read = session.read_input() => match read {
                 Ok(0) => {
@@ -905,16 +910,23 @@ async fn pump_descriptor<S>(
                 }
             },
             _ = descriptor.ping.tick() => {
-                if let Err(error) = session.tick(clock.now()).await {
-                    warn!(%addr, %error, "Client session stopped");
-                    break;
-                }
-                if session.phase() == ClientPhase::Close {
-                    info!(%addr, "Client did not answer the ping; closing");
+                if !handle_ping_tick(session, addr, clock.now()).await {
                     break;
                 }
             }
             () = save_tick(held.save.as_mut()) => save_on_tick(context, addr, held).await,
+            () = wait_login_deadline(phase, login_deadline) => {
+                info!(
+                    %addr,
+                    ?phase,
+                    "Client did not finish login before the deadline; closing"
+                );
+                break;
+            }
+            () = wait_presence_overflow(held.presence.as_ref()) => {
+                warn!(%addr, "Client outbox reached capacity; closing slow client");
+                break;
+            }
             _ = shutdown_rx.recv() => {
                 info!(%addr, "Client session stopping for shutdown");
                 break;
@@ -958,6 +970,21 @@ async fn pump_descriptor<S>(
             }
         }
     }
+}
+
+async fn handle_ping_tick<S>(session: &mut LiveClientSession<S>, addr: SocketAddr, now: u32) -> bool
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Err(error) = session.tick(now).await {
+        warn!(%addr, %error, "Client session stopped");
+        return false;
+    }
+    if session.phase() == ClientPhase::Close {
+        info!(%addr, "Client did not answer the ping; closing");
+        return false;
+    }
+    true
 }
 
 /// `CHARACTER::save_event` (`G/char.cpp:5070-5082`): the character is queued, and the row is
@@ -1015,16 +1042,21 @@ async fn flush_outbox<S>(
     addr: SocketAddr,
     outbox: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     pending: &mut Vec<Vec<u8>>,
+    guard: Option<&prodomo::client_registry::OutboxGuard>,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    if guard.is_some_and(prodomo::client_registry::OutboxGuard::is_overflowed) {
+        warn!(%addr, "Client outbox reached capacity; closing slow client");
+        return false;
+    }
     if let Some(queue) = outbox.as_mut() {
         while let Ok(record) = queue.try_recv() {
             pending.push(record);
         }
     }
-    write_pending(session, addr, pending).await
+    write_pending(session, addr, pending, guard).await
 }
 
 /// [`flush_outbox`], then stand the player up when a record it wrote changed the phase (a
@@ -1040,7 +1072,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let before = session.phase();
-    let written = flush_outbox(session, addr, outbox, pending).await;
+    let guard = held.presence.as_ref().map(Lease::outbox_guard);
+    let written = flush_outbox(session, addr, outbox, pending, guard.as_ref()).await;
     if written {
         stand_on_phase_change(held, before, session.phase());
     }
@@ -1065,11 +1098,41 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let before = session.phase();
-    if !flush_outbox(session, addr, outbox, pending).await || !follow(session, held).await {
+    let guard = held.presence.as_ref().map(Lease::outbox_guard);
+    if !flush_outbox(session, addr, outbox, pending, guard.as_ref()).await
+        || !follow(session, held).await
+    {
         return false;
     }
     stand_on_phase_change(held, before, session.phase());
     true
+}
+
+/// Wait for `deadline` while `phase` is still before login (`Handshake`, `Auth`, or `Login`).
+/// Once the client reaches `Select` or later, the login deadline disarms permanently.
+async fn wait_login_deadline(phase: ClientPhase, deadline: tokio::time::Instant) {
+    if matches!(
+        phase,
+        ClientPhase::Handshake | ClientPhase::Auth | ClientPhase::Login
+    ) {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn wait_guard_overflow(guard: Option<&prodomo::client_registry::OutboxGuard>) {
+    match guard {
+        Some(guard) => guard.overflowed().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn wait_presence_overflow(presence: Option<&Lease>) {
+    match presence {
+        Some(lease) => lease.outbox_guard().overflowed().await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Write the broadcast records queued during the last turn; `false` when the session stopped.
@@ -1081,18 +1144,36 @@ async fn write_pending<S>(
     session: &mut LiveClientSession<S>,
     addr: SocketAddr,
     pending: &mut Vec<Vec<u8>>,
+    guard: Option<&prodomo::client_registry::OutboxGuard>,
 ) -> bool
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     for record in pending.drain(..) {
-        let written = match phase_of_record(&record) {
-            Some(phase) => session.set_phase(phase).await.map(drop),
-            None => session.send(&record).await.map(drop),
+        if guard.is_some_and(prodomo::client_registry::OutboxGuard::is_overflowed) {
+            warn!(%addr, "Client outbox reached capacity; closing slow client");
+            return false;
+        }
+        let write_fut = async {
+            match phase_of_record(&record) {
+                Some(phase) => session.set_phase(phase).await.map(drop),
+                None => session.send(&record).await.map(drop),
+            }
+        };
+        let written = tokio::select! {
+            biased;
+            () = wait_guard_overflow(guard) => {
+                warn!(%addr, "Client outbox reached capacity; closing slow client");
+                return false;
+            }
+            result = write_fut => result,
         };
         if let Err(error) = written {
             warn!(%addr, %error, "Client session stopped while writing a broadcast");
             return false;
+        }
+        if let Some(guard) = guard {
+            guard.account_written(1);
         }
     }
     true
@@ -11705,6 +11786,7 @@ fn connection_context(
             prodomo::save::PASSES_PER_SEC,
         )
         .expect("[game] save_event_second_cycle was refused by validate"),
+        login_deadline: Duration::from_secs(config.game.login_deadline_seconds),
         state: Arc::clone(state),
         channels: Arc::new(ChannelStatusBoard::new(channel_ports, &config.game)),
         store: store.clone(),
@@ -12082,7 +12164,9 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
 
     // One client registry serves the descriptors and the world, which tells a map when an item
     // on its ground is destroyed.
-    let clients = Arc::new(ChannelClients::new());
+    let clients = Arc::new(ChannelClients::with_outbox_capacity(
+        config.game.max_client_outbox,
+    ));
     // One `get_dword_time()` for the process: the descriptors' handshakes and the world's
     // moves read the same clock.
     let clock = BootLiveClock::new();
@@ -12135,7 +12219,7 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
         }
         AcceptLoopExit::GameLoop(terminal) => terminal,
     };
-    info!(?terminal, "Game loop stop acknowledged");
+    log_game_loop_terminal(&terminal);
     let terminal = game_loop.join().await?;
     info!("Game loop thread joined");
     store.close().await;
@@ -12147,6 +12231,28 @@ async fn serve(config_path: &Path, verbose: bool) -> Result<(), Box<dyn Error>> 
         GameLoopTerminal::Failed { reason, .. } => {
             Err(format!("Game loop terminated with failure: {reason:?}").into())
         }
+    }
+}
+
+fn log_game_loop_terminal(terminal: &GameLoopTerminal) {
+    match terminal {
+        GameLoopTerminal::Stopped(summary) => info!(
+            final_pulse = summary.final_pulse,
+            pulse_samples = summary.pulse_samples,
+            p99_pulse_us = summary.p99_pulse_us,
+            max_pulse_us = summary.max_pulse_us,
+            pulse_overruns = summary.pulse_overruns,
+            "Game loop stop acknowledged"
+        ),
+        GameLoopTerminal::Failed { summary, reason } => warn!(
+            final_pulse = summary.final_pulse,
+            pulse_samples = summary.pulse_samples,
+            p99_pulse_us = summary.p99_pulse_us,
+            max_pulse_us = summary.max_pulse_us,
+            pulse_overruns = summary.pulse_overruns,
+            ?reason,
+            "Game loop stop acknowledged"
+        ),
     }
 }
 
@@ -17506,14 +17612,14 @@ mod tests {
         let (mut session, _client) = game_session();
         let header = HEADER_GC_PHASE.value();
         let mut pending = vec![vec![HEADER_GC_EMPIRE.value(), 1]];
-        assert!(write_pending(&mut session, addr(), &mut pending).await);
+        assert!(write_pending(&mut session, addr(), &mut pending, None).await);
         assert_eq!(session.phase(), ClientPhase::Game);
 
         let mut pending = vec![vec![header, PHASE_DEAD]];
-        assert!(write_pending(&mut session, addr(), &mut pending).await);
+        assert!(write_pending(&mut session, addr(), &mut pending, None).await);
         assert_eq!(session.phase(), ClientPhase::Dead);
         let mut pending = vec![vec![header, PHASE_GAME], vec![HEADER_GC_EMPIRE.value(), 1]];
-        assert!(write_pending(&mut session, addr(), &mut pending).await);
+        assert!(write_pending(&mut session, addr(), &mut pending, None).await);
         assert_eq!(session.phase(), ClientPhase::Game);
         assert!(pending.is_empty());
     }

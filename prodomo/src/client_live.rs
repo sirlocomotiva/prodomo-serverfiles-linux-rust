@@ -41,11 +41,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use protocol::cg_gaya_system::CG_GAYA_SYSTEM_WIRE_SIZE;
-use protocol::cg_handshake::CgHandshakeHeader;
+use protocol::cg_hack::CG_HACK_WIRE_SIZE;
+use protocol::cg_handshake::{CgHandshakeHeader, CG_HANDSHAKE_WIRE_SIZE};
 use protocol::cg_inventory::{CG_KEEP_ALIVE, HEADER_CG_GAYA_SYSTEM, HEADER_CG_PONG};
+use protocol::cg_login3::CG_LOGIN3_WIRE_SIZE;
 use protocol::cg_variable::VariableClientFrameDecoder;
 use protocol::cg_wire::{
     resolve_client_frame_size, ClientFrame, ClientFrameError, ClientFrameSize,
+    DEFAULT_MAX_CLIENT_FRAME_SIZE,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -359,12 +362,41 @@ pub enum LiveStep {
     Failed(LiveError),
 }
 
+/// The largest wire frame a descriptor may buffer in `phase` (Package C3).
+///
+/// Before login completes, each phase caps the frame decoder at the exact largest record
+/// that phase's analyzer accepts so an unauthenticated peer cannot force large buffers:
+/// - `Handshake`: `CG_HANDSHAKE` (13 bytes; other accepted headers are 1 or 9 bytes).
+/// - `Auth`: `CG_LOGIN3` (66 bytes; other accepted headers are 1 or 13 bytes).
+/// - `Login` (non-mark): `CG_HACK` (257 bytes, consumed by `CInputLogin`; login/version/select
+///   headers are 2 to 67 bytes).
+/// - `Login` (mark downloader via `CG_MARK_LOGIN`) and post-login phases (`Select`, `Loading`,
+///   `Game`, `Dead`): `DEFAULT_MAX_CLIENT_FRAME_SIZE` (for guild-symbol uploads and gameplay).
+#[must_use]
+pub const fn phase_max_frame_size(phase: ClientPhase, mark_session: bool) -> usize {
+    match phase {
+        ClientPhase::Handshake => CG_HANDSHAKE_WIRE_SIZE,
+        ClientPhase::Auth => CG_LOGIN3_WIRE_SIZE,
+        ClientPhase::Login if !mark_session => CG_HACK_WIRE_SIZE,
+        ClientPhase::Login
+        | ClientPhase::Select
+        | ClientPhase::Loading
+        | ClientPhase::Game
+        | ClientPhase::Dead
+        | ClientPhase::Close
+        | ClientPhase::ClientConnecting
+        | ClientPhase::DbClient
+        | ClientPhase::P2P => DEFAULT_MAX_CLIENT_FRAME_SIZE,
+    }
+}
+
 /// A live client descriptor that owns one client stream.
 pub struct LiveClientSession<S> {
     stream: S,
     crypto: DescriptorCrypto,
     decoder: VariableClientFrameDecoder,
     lifecycle: ClientLifecycle,
+    mark_session: bool,
 }
 
 impl<S> LiveClientSession<S> {
@@ -423,11 +455,13 @@ where
                 source: DescriptorCryptoError::KeyAlreadyInstalled,
             });
         }
+        let max_frame = phase_max_frame_size(lifecycle.phase(), false);
         Ok(Self {
             stream,
             crypto,
-            decoder: VariableClientFrameDecoder::new(),
+            decoder: VariableClientFrameDecoder::with_max_frame_size(max_frame),
             lifecycle,
+            mark_session: false,
         })
     }
 
@@ -691,6 +725,10 @@ where
         // Commit only after every record is on the wire, so a failed write
         // cannot leave the reducer ahead of the socket.
         self.lifecycle = reduction.state;
+        self.decoder.set_max_frame_size(phase_max_frame_size(
+            self.lifecycle.phase(),
+            self.mark_session,
+        ));
         Ok(written)
     }
 
@@ -754,6 +792,7 @@ where
     /// [`LiveError`] when the record cannot be written.
     pub async fn mark_login(&mut self) -> Result<Vec<Vec<u8>>, LiveError> {
         let reduction = self.lifecycle.on_mark_login().map_err(LiveError::Phase)?;
+        self.mark_session = true;
         self.apply(reduction).await
     }
 
@@ -1253,5 +1292,40 @@ mod tests {
             matches!(step, LiveStep::Handled(LiveOutcome::Handshake { .. })),
             "the retained tail completes the record, got {step:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn pre_login_frame_caps_reject_oversized_records_per_phase() {
+        // Handshake caps at 13 bytes (`CG_HANDSHAKE_WIRE_SIZE`): a 20-byte `CG_CHAT` is
+        // rejected immediately as `FrameTooLarge` before its payload is buffered.
+        let (mut handshake, mut peer) = session();
+        assert_eq!(handshake.decoder.max_frame_size(), CG_HANDSHAKE_WIRE_SIZE);
+        peer.write_all(&[0x03, 20, 0, 0]).await.unwrap();
+        let err = handshake
+            .step(NOW)
+            .await
+            .expect_err("oversized frame in Handshake must fail");
+        assert!(
+            matches!(
+                err,
+                LiveError::Frame(ClientFrameError::FrameTooLarge {
+                    size: 20,
+                    maximum: CG_HANDSHAKE_WIRE_SIZE,
+                })
+            ),
+            "got {err:?}"
+        );
+
+        // After Handshake -> Login (non-mark), the cap rises to 257 (`CG_HACK_WIRE_SIZE`),
+        // and after `mark_login()` it opens for symbol uploads.
+        let (mut login, mut peer) = session();
+        peer.write_all(&handshake_frame()).await.unwrap();
+        login.step(NOW).await.unwrap();
+        assert_eq!(login.phase(), ClientPhase::Login);
+        assert_eq!(login.decoder.max_frame_size(), CG_HACK_WIRE_SIZE);
+
+        let (mut mark, _peer) = session();
+        mark.mark_login().await.unwrap();
+        assert_eq!(mark.decoder.max_frame_size(), DEFAULT_MAX_CLIENT_FRAME_SIZE);
     }
 }

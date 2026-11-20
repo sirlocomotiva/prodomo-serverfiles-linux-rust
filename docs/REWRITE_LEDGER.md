@@ -58506,3 +58506,60 @@ guild_grade` helpers still passed `text` literals `'Leader'` / `'...'` into the 
 `bytea` column; updated all 13 raw SQL helpers to `bytea` literals.
 Run 2 passed 5,765/0. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
 of 2,332 rows (100% closed); 602 scenarios. ADR-0003 drift note marked closed.
+
+## 739. Package C1 (Pulse budget & load run), C2 (quest instruction limit), and C3 (slow/silent/oversized clients)
+
+Closes **Package C1**, **Package C2**, and **Package C3** from `docs/STATUS.md`:
+
+- **Package C1 (The Pulse budget):**
+  - `prodomo/src/game_loop.rs` & `prodomo/src/game_loop_messages.rs`: times every Pulse on the
+    dedicated game thread against the 40 ms budget (`PULSE_BUDGET_US = 40_000`), logs a `WARN`
+    whenever a Pulse overruns the budget (`Pulse exceeded 40 ms budget`), keeps a 4,096-sample
+    ring buffer of Pulse durations, and reports `pulse_samples`, `p99_pulse_us`, `max_pulse_us`,
+    and `pulse_overruns` in `GameLoopSummary` and the shutdown log line (`Game loop stop
+    acknowledged`).
+  - Unit tests (`prodomo::game_loop::tests`): `pulse_budget_records_overruns_and_p99_in_the_summary`
+    and `a_slow_pulse_counts_as_an_overrun_in_the_live_loop`.
+  - Scenario (`prodomo/tests/parity.rs`): `channel_one_load_run_keeps_p99_pulse_under_twenty_milliseconds`
+    drives 8 concurrent clients walking, swinging, and chatting on Channel 1 (`metin2_map_a1`),
+    stops gracefully with `SIGTERM` (`parity::Server::stop_gracefully`), and asserts at least 40
+    timed Pulses with `p99_pulse_us < 20_000`.
+- **Package C2 (The quest host's instruction limit, ADR-0006):**
+  - `quest/src/manager.rs`: installs an `mlua::HookTriggers::every_nth_instruction(10_000)` hook
+    around every quest script resume (`resume_with_limit`) and `when ... with <cond>` evaluation
+    (`eval_condition_with_limit`) with a per-step cap of `QUEST_INSTRUCTION_LIMIT = 1_000_000`
+    VM instructions; clears the hook via a drop guard (`HookReset`) on return or error. A runaway
+    `while true do end` aborts cleanly with `quest instruction limit exceeded` as a script error
+    without freezing the game thread.
+  - Unit test (`quest::manager::tests`): `a_runaway_quest_script_aborts_at_the_instruction_limit`.
+  - Scenario (`prodomo/tests/parity.rs`): `a_runaway_quest_script_stops_as_a_script_error_and_keeps_the_pulse_counting`.
+- **Package C3 (Slow, silent, and oversized clients):**
+  - `common/src/config.rs` & `config/prodomo.toml.example`: added `max_client_outbox` (default
+    `4096`, `>= 1`) and `login_deadline_seconds` (default `30`, `>= 1`) under `[game]` with
+    `ServerConfig::validate` checks.
+  - `prodomo/src/client_registry.rs` & `prodomo/src/main.rs`: `ClientOutbox` tracks in-flight
+    queued records against `max_client_outbox` without blocking the game thread; when reached,
+    it drops further writes, marks `OutboxGuard` overflowed, and wakes `pump_descriptor` (both
+    in its main `select!` and inside `write_pending` when stalled on a full TCP buffer) to close
+    the slow client while healthy clients stay open.
+  - `prodomo/src/main.rs`: arms `login_deadline` on every accepted connection and closes it if
+    it has not left `Handshake` / `Auth` / `Login` before `login_deadline_seconds`; disarms
+    permanently once `Select` or later is reached.
+  - `protocol/src/cg_variable.rs` & `prodomo/src/client_live.rs`: added
+    `VariableClientFrameDecoder::set_max_frame_size` and tightens the frame decoder cap by phase
+    before login: `Handshake` = 13 (`CG_HANDSHAKE_WIRE_SIZE`), `Auth` = 66 (`CG_LOGIN3_WIRE_SIZE`),
+    `Login` = 257 (`CG_HACK_WIRE_SIZE`, widened to `DEFAULT_MAX_CLIENT_FRAME_SIZE` once
+    `mark_login` marks a mark-downloader connection, or once `Select`/later is reached).
+  - Unit tests (`prodomo::client_registry::tests`, `prodomo::client_live::tests`): outbox quota
+    overflow/wake and per-phase frame-size cap enforcement.
+  - Scenarios (`prodomo/tests/parity.rs`): `a_slow_client_whose_outbox_reaches_capacity_is_closed`,
+    `a_silent_connection_that_never_finishes_login_is_closed_at_the_deadline`, and
+    `an_oversized_frame_before_login_closes_the_connection_immediately`. All 5 scenarios passed
+    8/8 in parallel.
+
+Gates (2026-11-20), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,775
+passed, 0 failed in 46 targets; with it 5,775 passed, 0 failed in 46 targets (493 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+No test failed on the first run. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`,
+0 `codec`, of 2,332 rows (100% closed); 607 scenarios. No ADR changed.
