@@ -14,11 +14,11 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 741 |
+| measure | value at ledger 742 |
 |---|---|
 | Parity inventory | 2,332 rows: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`; **Package B complete — all 12 inventory files closed** |
 | Scenarios | 607 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,781 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 741 has the receipt) |
+| Tests | 5,782 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 742 has the receipt) |
 | Client records | client to game: 91 of 92 registered headers; game to client: 126 of 134 (`protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 48 migrations |
 | Size | about 483,000 lines of Rust, tests included |
@@ -127,9 +127,10 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
    clients without blocking the game thread, `login_deadline_seconds` closes silent pre-login
    connections, and `LiveClientSession` caps pre-login frames per phase (13/66/257); all three
    have passing scenarios.
-4. **One meaning for the test-server mode** (ADR-0007): one function answers a character's GM
-   level; the scenarios move to the shipped mode package by package; the harness default and
-   `GameState`'s test default are removed with the last one.
+4. **One meaning for the test-server mode** (ADR-0007). **Done in ledger 742.** `command::effective_gm_level`
+   and `GameState::gm_level` answer every GM-level check across `prodomo/src/main.rs` and `game_state/*.rs`;
+   `GameState::new` and `parity::Server` default to `test_server = false` (shipped mode), and all 607
+   scenarios run in shipped mode (with explicit `test_server = true` only on the two tests that test the mode).
 5. **The two `text` columns** become `bytea` in a new migration (ADR-0003). **Done in ledger 738** (`db/migrations/0048_guild_free_text_bytea.sql`, `db/src/guilds.rs`, `prodomo`).
 6. **The harness leaves nothing behind.** Done in ledger 683. A killed test process runs no
    `Drop`; the next test process now drops its databases (an advisory lock per process says

@@ -110,7 +110,7 @@ impl GameState {
         if words[1] == b"rank" {
             return;
         }
-        if !self.dungeon_info_is_gm() {
+        if self.gm_level(vid) == crate::command::GM_PLAYER {
             return;
         }
         if words[1] == b"test_cooldown" {
@@ -119,13 +119,6 @@ impl GameState {
         } else if words[1] == b"update" {
             self.send_dungeon_cooldown(vid, mover, 0);
         }
-    }
-
-    /// `ch->IsGM()` for the `test_cooldown` and `update` arms (`G/char.cpp:6373-6380`):
-    /// a non-player GM level, or the test-server mode — which is always on in this
-    /// build (`GameState::test_server`), so both arms always run.
-    fn dungeon_info_is_gm(&self) -> bool {
-        self.test_server
     }
 
     /// The `test_cooldown` stamps (`G/cmd_general.cpp:4111-4113`): `jotun.cooldown` now

@@ -1025,11 +1025,7 @@ impl GameState {
     /// The `Enter` refusal: a player is `WarpSet` home (`G/input_login.cpp:868-873`), a
     /// GM stays put. A character with no loaded points refuses, as a player does.
     fn ox_refuses_player(&self, vid: Vid) -> bool {
-        self.characters
-            .find_by_vid(vid)
-            .ok()
-            .and_then(|character| character.points())
-            .is_none_or(|points| points.gm_level() == GM_PLAYER)
+        self.gm_level(vid) == GM_PLAYER
     }
 }
 

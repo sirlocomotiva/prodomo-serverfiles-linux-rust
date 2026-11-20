@@ -216,8 +216,9 @@ impl GameState {
         if points.level() < 50 {
             return;
         }
-        // `GetGMLevel() == GM_PLAYER || test_server` (`:1341-1343`): a GM loses nothing.
-        if points.gm_level() != GM_PLAYER {
+        // `GetGMLevel() == GM_PLAYER || test_server` (`:1341-1343`): a GM outside
+        // `test_server` loses nothing.
+        if self.gm_level(vid) != GM_PLAYER && !self.test_server {
             return;
         }
         // `GetMapIndex()` (`:1025` and `:1339`).

@@ -451,16 +451,7 @@ impl GameState {
             .find_by_vid(vid)
             .map_or(0, world::character::Character::player_id);
         let empire = actor.empire;
-        let caller =
-            self.characters
-                .find_by_vid(vid)
-                .map_or(crate::command::GM_PLAYER, |character| {
-                    character.points().map_or(
-                        crate::command::GM_PLAYER,
-                        world::character::Points::gm_level,
-                    )
-                });
-        let gm = self.test_server || caller != crate::command::GM_PLAYER;
+        let gm = self.gm_level(vid) != crate::command::GM_PLAYER;
         if !self.is_monarch(pid, empire) && !gm {
             self.tell(vid, actor, CHAT_TYPE_INFO, HEAL_NOT_MONARCH_LINE, &[]);
             warn!(pid, "No Monarch");

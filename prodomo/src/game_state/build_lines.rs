@@ -86,7 +86,7 @@ impl GameState {
             );
             return None;
         }
-        if self.build_level(vid) == GM_PLAYER && !self.build_master_of(vid, land_id) {
+        if self.gm_level(vid) == GM_PLAYER && !self.build_master_of(vid, land_id) {
             return None;
         }
         let place = (channel, map);
@@ -219,19 +219,6 @@ impl GameState {
         })
     }
 
-    /// The caller's GM level, silenced to implementor in test-server mode
-    /// (`CHARACTER::GetGMLevel`, `G/char.cpp:6355-6356`).
-    fn build_level(&self, vid: Vid) -> u8 {
-        if self.test_server {
-            return crate::command::GM_IMPLEMENTOR;
-        }
-        self.characters
-            .find_by_vid(vid)
-            .ok()
-            .and_then(|character| character.points().map(world::character::Points::gm_level))
-            .unwrap_or(GM_PLAYER)
-    }
-
     /// Whether the caller masters the guild owning `land` (`:3464-3476`).
     fn build_master_of(&self, vid: Vid, land: u32) -> bool {
         let Ok(character) = self.characters.find_by_vid(vid) else {
@@ -264,7 +251,7 @@ impl GameState {
         };
         let vnum = dword(&words[0]);
         let proto = self.build_proto_gated(vid, mover, place, land_id, vnum)?;
-        let spend = self.test_server || self.build_level(vid) == GM_PLAYER;
+        let spend = self.test_server || self.gm_level(vid) == GM_PLAYER;
         if spend {
             if proto.price > BUILDING_MAX_PRICE {
                 self.tell(
@@ -1034,7 +1021,7 @@ impl GameState {
     /// `w`) stands the four single walls facing it. A player is silent; an
     /// unknown direction tells `guild.wall.build unknown_direction[%s]`.
     fn build_walls(&mut self, vid: Vid, mover: Mover, place: (u8, i32), land_id: u32, line: &[u8]) {
-        if self.build_level(vid) == GM_PLAYER {
+        if self.gm_level(vid) == GM_PLAYER {
             return;
         }
         let (word, _) = one_argument(line);
@@ -1139,7 +1126,7 @@ impl GameState {
     /// The `build e` arm (`:3671-3676`): a GM knocks the four single walls
     /// down (plus the flags in test-server mode). A player is silent.
     fn build_unwall(&mut self, vid: Vid, place: (u8, i32), land_id: u32) {
-        if self.build_level(vid) == GM_PLAYER {
+        if self.gm_level(vid) == GM_PLAYER {
             return;
         }
         let targets: Vec<BuildingObject> =
@@ -1167,7 +1154,7 @@ impl GameState {
     /// the size as `str_to_number(char)` — the low byte, wrapping — and the
     /// doors as `str_to_number(bool)`: nonzero is open.
     fn build_wall_blocks(&mut self, vid: Vid, place: (u8, i32), land_id: u32, line: &[u8]) {
-        if self.build_level(vid) == GM_PLAYER {
+        if self.gm_level(vid) == GM_PLAYER {
             return;
         }
         let (set_word, rest) = one_argument(line);
@@ -1266,7 +1253,7 @@ impl GameState {
     /// The `build E` arm (`G/cmd_gm.cpp:3713-3723`): a GM's set id erases its
     /// wall blocks (corner, wall and door vnums). A player is silent.
     fn build_unwall_blocks(&mut self, vid: Vid, place: (u8, i32), land_id: u32, line: &[u8]) {
-        if self.build_level(vid) == GM_PLAYER {
+        if self.gm_level(vid) == GM_PLAYER {
             return;
         }
         let (word, _) = one_argument(line);
@@ -1462,6 +1449,19 @@ mod tests {
         (Vid::new(1), mover(), inbox)
     }
 
+    /// A guild master with `GM_IMPLEMENTOR` authority for the GM-only wall commands.
+    fn gm_master(
+        world: &mut GameState,
+    ) -> (Vid, Mover, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (vid, mover, inbox) = master(world);
+        if let Ok(character) = world.characters.find_by_vid_mut(vid) {
+            if let Some(points) = character.items_and_points_mut().1 {
+                points.set_gm_level(crate::command::GM_IMPLEMENTOR);
+            }
+        }
+        (vid, mover, inbox)
+    }
+
     /// The text of a `GC_CHAT` line.
     fn text_of(line: &[u8]) -> Vec<u8> {
         let size = usize::from(u16::from_le_bytes([line[1], line[2]]));
@@ -1478,7 +1478,7 @@ mod tests {
         // master gate and the spend gate both run on the player arms.
         world.test_server = false;
         let (vid, mover, mut inbox) = master(&mut world);
-        assert_eq!(world.build_level(vid), GM_PLAYER);
+        assert_eq!(world.gm_level(vid), GM_PLAYER);
         while inbox.try_recv().is_ok() {}
         let rows = world
             .run_build_line(vid, b"c 14043 200 200 0 0 0", mover)
@@ -1615,7 +1615,7 @@ mod tests {
     fn the_walls_stand_four_around_the_center() {
         let clock = TestClock::default();
         let mut world = built(&clock);
-        let (vid, mover, mut inbox) = master(&mut world);
+        let (vid, mover, mut inbox) = gm_master(&mut world);
         while inbox.try_recv().is_ok() {}
         world.run_build_line(vid, b"w s", mover);
         let objects = world.building_objects.get(&PLACE).expect("the walls stand");
@@ -1797,7 +1797,7 @@ mod tests {
     fn the_wall_blocks_stand_and_erase_by_set() {
         let clock = TestClock::default();
         let mut world = widened(&clock);
-        let (vid, mover, mut inbox) = master(&mut world);
+        let (vid, mover, mut inbox) = gm_master(&mut world);
         while inbox.try_recv().is_ok() {}
         world.run_build_line(vid, b"W 1 1 0 0 0 0", mover);
         assert!(!world.building_objects.contains_key(&PLACE));
@@ -1839,7 +1839,7 @@ mod tests {
     fn the_wall_size_wraps_as_char() {
         let clock = TestClock::default();
         let mut world = widened(&clock);
-        let (vid, mover, mut inbox) = master(&mut world);
+        let (vid, mover, mut inbox) = gm_master(&mut world);
         while inbox.try_recv().is_ok() {}
         world.run_build_line(vid, b"W 14105 1000 0 0 0 0", mover);
         let objects = world
@@ -1854,7 +1854,7 @@ mod tests {
     fn the_open_doors_split_the_sides() {
         let clock = TestClock::default();
         let mut world = widened(&clock);
-        let (vid, mover, mut inbox) = master(&mut world);
+        let (vid, mover, mut inbox) = gm_master(&mut world);
         while inbox.try_recv().is_ok() {}
         world.run_build_line(vid, b"W 14105 1 1 1 1 1", mover);
         let objects = world
@@ -1881,7 +1881,7 @@ mod tests {
     fn the_west_word_opens_side_zero() {
         let clock = TestClock::default();
         let mut world = widened(&clock);
-        let (vid, mover, mut inbox) = master(&mut world);
+        let (vid, mover, mut inbox) = gm_master(&mut world);
         while inbox.try_recv().is_ok() {}
         world.run_build_line(vid, b"W 14105 1 0 1 0 0", mover);
         let objects = world

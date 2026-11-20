@@ -105,9 +105,8 @@ impl GameState {
                 self.horse_unsummon(vid, false);
             }
             self.arena_leave_party(vid, false);
-        } else if self
-            .points_of(vid.raw())
-            .is_some_and(|points| points.gm_level() == crate::command::GM_PLAYER)
+        } else if self.points_of(vid.raw()).is_some()
+            && self.gm_level(vid) == crate::command::GM_PLAYER
         {
             // `MEMBER_NO`: a GM_PLAYER is sent to its empire start (`:834-838`). Legacy's
             // `WarpSet` resolves the target's address through the P2P map table, which no

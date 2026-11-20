@@ -6480,7 +6480,7 @@ mod tests {
             climbs: Vec::new(),
             guild_ops: Vec::new(),
             observes: Vec::new(),
-            test_server: true,
+            test_server: false,
             pcs: Vec::new(),
             online: std::collections::HashMap::new(),
             guilds: super::super::guild::GuildShadow::default(),

@@ -737,7 +737,7 @@ async fn handle_connection(
             "Character disconnected; wrote the row"
         );
     }
-    log_session_event(false, held.channel, addr, &held);
+    log_session_event(false, held.channel, addr, &held, context.modes.test_server);
     if let Some(lease) = held.presence.as_ref() {
         info!(%addr, presence = lease.id(), "Leaving the client set");
     }
@@ -746,7 +746,13 @@ async fn handle_connection(
 }
 
 /// Emit `LoginLog` and `DetailLoginLog` on the `gamelog` target for `held`.
-fn log_session_event(is_login: bool, channel: u8, addr: SocketAddr, held: &Held) {
+fn log_session_event(
+    is_login: bool,
+    channel: u8,
+    addr: SocketAddr,
+    held: &Held,
+    test_server: bool,
+) {
     if let (Some(account), Some(character)) = (held.account.as_ref(), held.character.as_ref()) {
         let ip = addr.ip().to_string();
         let ver = held
@@ -764,7 +770,7 @@ fn log_session_event(is_login: bool, channel: u8, addr: SocketAddr, held: &Held)
         );
         prodomo::gamelog::detail_login_log(
             is_login,
-            held.gm_level > 0,
+            prodomo::command::effective_gm_level(held.gm_level, test_server) > GM_PLAYER,
             channel,
             account.id.get(),
             character.id,
@@ -3854,14 +3860,16 @@ async fn whisper_line(
         warn!(%addr, "Whisper without a character; ignoring");
         return true;
     };
-    // `if (ch->IsGM())` (`G/input_main.cpp:619-620`): the type is the game master's when the
-    // sender is one, and the test-server mode makes every character one
-    // (`G/char.cpp:6373-6380`).
-    let whisper_type = if held.gm_level > GM_PLAYER || context.modes.test_server {
-        WHISPER_TYPE_GM
-    } else {
-        WHISPER_TYPE_NORMAL
-    };
+    // `if (ch->IsGM())` (`G/input_main.cpp:619-620`, ADR-0007): routed through
+    // `effective_gm_level`.
+    let whisper_type =
+        if prodomo::command::effective_gm_level(held.gm_level, context.modes.test_server)
+            > GM_PLAYER
+        {
+            WHISPER_TYPE_GM
+        } else {
+            WHISPER_TYPE_NORMAL
+        };
     let line = GcWhisper {
         whisper_type,
         name_from: name_field(&character.name),
@@ -8999,7 +9007,7 @@ where
         presence = lease.id(),
         "Character entered the game; registered on its map"
     );
-    log_session_event(true, seat.number, addr, held);
+    log_session_event(true, seat.number, addr, held, context.modes.test_server);
     let outbox = lease.outbox();
     held.presence = Some(lease);
     let show = prodomo::game_loop_messages::Showing {
@@ -12331,9 +12339,10 @@ where
     // The character's GM level, read at the character load and held for the
     // descriptor's life: it gates the GM commands and lifts the flood limit
     // (`interpret_command`, `G/cmd.cpp:611-616`).
+    let gm_level = prodomo::command::effective_gm_level(held.gm_level, context.modes.test_server);
     let caller = Caller {
         pulse: context.game.pulse(),
-        gm_level: held.gm_level,
+        gm_level,
         position: caller_position(session.phase(), held),
     };
     let (entry, rest) = match interpret(line, &mut held.command_flood, caller) {
@@ -12347,7 +12356,7 @@ where
         }
         Interpreted::Run { entry, rest } => (entry, rest),
     };
-    if held.gm_level > 0 {
+    if gm_level > GM_PLAYER {
         if let Some(character) = held.character.as_ref() {
             let ip = addr.ip().to_string();
             let cmd = String::from_utf8_lossy(line);

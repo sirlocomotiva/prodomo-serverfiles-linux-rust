@@ -39,7 +39,7 @@ use protocol::gc_guild::{
 };
 use protocol::gc_inventory::HEADER_GC_OWNERSHIP;
 use protocol::gc_mark::{HEADER_GC_MARK_BLOCK, HEADER_GC_MARK_IDXLIST, HEADER_GC_SYMBOL_DATA};
-use protocol::gc_whisper::{WHISPER_TYPE_GM, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SYSTEM};
+use protocol::gc_whisper::{WHISPER_TYPE_NORMAL, WHISPER_TYPE_OFFLINE, WHISPER_TYPE_SYSTEM};
 use protocol::tea::{decrypt_padded, encrypt_padded, TeaKey};
 use support::{execute, ScratchDatabase};
 
@@ -1384,7 +1384,12 @@ fn a_channel_password_login_is_refused_version_or_waits_silent() {
     assert_eq!(back.0, 0, "alice has no empire yet");
     drop(server);
 
-    let configured = Server::start(binary(), database.url());
+    let configured = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = true",
+    );
     let mut silent = Keyed::channel(configured.channel(1));
     silent.send_record(&client_login(b"alice", b"whatever"));
     silent.quiet("a test server answers a password login with nothing");
@@ -8081,7 +8086,7 @@ fn a_whisper_reaches_the_character_it_names() {
     alice.send_record(&client_whisper(b"Yankee", b"hello"));
     assert_eq!(
         yankee.read_game(),
-        whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"hello"),
+        whisper_packet(WHISPER_TYPE_NORMAL, b"Alpha", b"hello"),
         "the line reaches the character it names"
     );
     alice.quiet_allowing_farm("the sender hears nothing");
@@ -8090,7 +8095,7 @@ fn a_whisper_reaches_the_character_it_names() {
     alice.send_record(&client_whisper(b"yankee", b"again"));
     assert_eq!(
         yankee.read_game(),
-        whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"again"),
+        whisper_packet(WHISPER_TYPE_NORMAL, b"Alpha", b"again"),
         "the name is matched without regard to the case"
     );
     alice.quiet_allowing_farm("the sender hears nothing");
@@ -8100,7 +8105,7 @@ fn a_whisper_reaches_the_character_it_names() {
     alice.send_record(&client_whisper(b"Eagle", b"across"));
     assert_eq!(
         delta.read_game(),
-        whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"across"),
+        whisper_packet(WHISPER_TYPE_NORMAL, b"Alpha", b"across"),
         "the line crosses the Channel"
     );
     alice.quiet_allowing_farm("the sender hears nothing");
@@ -8167,7 +8172,7 @@ fn a_tenth_whisper_in_a_run_closes_the_connection() {
             let record = yankee
                 .read_game_raw_until(stray_deadline)
                 .expect("the nine lines arrive");
-            if record == whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"hello") {
+            if record == whisper_packet(WHISPER_TYPE_NORMAL, b"Alpha", b"hello") {
                 delivered += 1;
             } else {
                 assert!(
@@ -8182,7 +8187,7 @@ fn a_tenth_whisper_in_a_run_closes_the_connection() {
         let mut straddled = false;
         let quiet_deadline = std::time::Instant::now() + QUIET_WINDOW;
         while let Some(record) = yankee.read_game_raw_until(quiet_deadline) {
-            if record == whisper_packet(WHISPER_TYPE_GM, b"Alpha", b"one too many") {
+            if record == whisper_packet(WHISPER_TYPE_NORMAL, b"Alpha", b"one too many") {
                 straddled = true;
                 continue;
             }
@@ -21482,13 +21487,37 @@ fn a_guild_symbol_is_uploaded_and_served() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
+    // Shipped mode requires an owned guild land before a symbol upload lands
+    // (`G/input_login.cpp:1016-1021`), so seed guild 1 and land 1 before boot.
+    create_account_before_boot(&database, "alice");
+    add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO guild (id, name, master_pid, ladder_point) SELECT 1, 'MyGuild', id, 1000 \
+         FROM player WHERE name = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN \
+         grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         FROM generate_series(1, 15) grade",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_member (pid, guild_id, grade) SELECT id, 1, 1 FROM player WHERE name \
+         = 'Alpha'",
+    );
+    sql(
+        &database,
+        "INSERT INTO guild_land (land_id, guild_id) VALUES (1, 1)",
+    );
     let server = Server::start_configured(
         binary(),
         database.url(),
         &default_channels(),
         "guild_mark_min_level = 1",
     );
-    found_guild_for_marks(&server, &database);
     let mut downloader = mark_downloader(&server);
     let symbol = b"the-guild-symbol-bytes-01";
     assert_eq!(symbol.len() % 8, 1, "7 + 25 seals with no padding");
@@ -21598,7 +21627,14 @@ fn a_master_builds_on_its_land_and_clears_it() {
     };
     // Before the boot: the stored guild installs once, while the gate is closed.
     create_account_before_boot(&database, "alice");
+    create_account_before_boot(&database, "bob");
     add_characters(&database);
+    sql(&database, "UPDATE account SET empire = 1");
+    sql(
+        &database,
+        "INSERT INTO player (account_id, slot, name, job, x, y) SELECT id, 0, 'Yankee', 1, \
+         432600, 908500 FROM account WHERE login = 'bob'",
+    );
     sql(
         &database,
         "INSERT INTO guild (id, name, master_pid, ladder_point) SELECT 1, 'MyGuild', id, 1000          FROM player WHERE name = 'Alpha'",
@@ -21626,14 +21662,10 @@ fn a_master_builds_on_its_land_and_clears_it() {
         &database,
         "INSERT INTO item (id, owner_id, window_type, pos, count, vnum) SELECT 20, id, 1, 0, 5,          90010 FROM player WHERE name = 'Alpha'",
     );
-    // The master's GM grant: `/clear_land` sits behind `GM_HIGH_WIZARD` in the table.
-    sql(
-        &database,
-        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD'          FROM account WHERE login = 'alice'",
-    );
+    // Alpha builds as a mortal master so shipped mode spends gold and materials
+    // (`G/cmd_gm.cpp:3530`); Yankee receives `HIGH_WIZARD` below for `/clear_land`.
     let server = Server::start(binary(), database.url());
-    let (mut alice, _, entered) =
-        enter_world_seeing_guilded_with_team(&server, b"alice", 0, 1, None);
+    let (mut alice, _, entered) = enter_world_seeing_guilded(&server, b"alice", 0, 1, None);
     walk_info_names_the_land(&entered);
     // The enter names no guild — the walk already named MyGuild — and lists map 1's
     // 18 lands, land 1 first, owned by guild 1.
@@ -21681,29 +21713,42 @@ fn a_master_builds_on_its_land_and_clears_it() {
     // The clear wipes the land: the notice tells, the stood object's removal fans,
     // and the cleared land fans its one-element list with no owner and no NAME (the
     // guildless names none).
-    alice.send_record(&slash(b"/clear_land"));
-    let cleared = alice.read_game();
-    assert_eq!(
-        cleared,
-        an_info_line(b"Guild Land(1) Cleared"),
-        "the cleared notice"
-    );
-    let gone = alice.read_game();
-    assert_eq!(
-        gone,
-        [vec![GC_CHARACTER_DEL], object_vid.to_le_bytes().to_vec()].concat(),
-        "the object's removal"
-    );
-    let fan = alice.read_game();
-    assert_eq!(fan[0], GC_LAND_LIST, "the cleared land's list: {fan:02x?}");
-    assert_eq!(fan.len(), 3 + LAND_LIST_ELEMENT_LEN);
-    assert_eq!(&fan[3..7], &1u32.to_le_bytes(), "land 1");
-    assert_eq!(&fan[23..27], &0u32.to_le_bytes(), "no owner");
+    clear_land_as_gm(&server, &database, object_vid);
     wait_for(
         &database,
         "(SELECT count(*) FROM building_object WHERE land_id = 1) = 0 AND (SELECT count(*) FROM          guild_land WHERE land_id = 1) = 0",
     );
     master_disbands_and_its_land_clears(&database, alice, server);
+}
+
+/// Enters `bob` (`Yankee`, `HIGH_WIZARD`) on land 1 and runs `/clear_land`, asserting
+/// the cleared notice, object removal, and cleared land list.
+fn clear_land_as_gm(server: &Server, database: &ScratchDatabase, object_vid: u32) {
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Yankee', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'bob'",
+    );
+    let (mut bob, _, _) = load_character(server, b"bob", 0);
+    let _ = enter_game_shown(&mut bob);
+    read_login_event(&mut bob);
+    bob.send_record(&slash(b"/clear_land"));
+    assert_eq!(
+        bob.read_game(),
+        an_info_line(b"Guild Land(1) Cleared"),
+        "the cleared notice"
+    );
+    let gone = bob.read_game();
+    assert_eq!(
+        gone,
+        [vec![GC_CHARACTER_DEL], object_vid.to_le_bytes().to_vec()].concat(),
+        "the object's removal"
+    );
+    let fan = bob.read_game();
+    assert_eq!(fan[0], GC_LAND_LIST, "the cleared land's list: {fan:02x?}");
+    assert_eq!(fan.len(), 3 + LAND_LIST_ELEMENT_LEN);
+    assert_eq!(&fan[3..7], &1u32.to_le_bytes(), "land 1");
+    assert_eq!(&fan[23..27], &0u32.to_le_bytes(), "no owner");
 }
 
 /// The guilded walk's INFO names the owned land (`HasLand`).
@@ -21729,9 +21774,15 @@ fn master_disbands_and_its_land_clears(database: &ScratchDatabase, alice: Keyed,
     // The server goes first, so the master's session is never saved over the rows below.
     drop(server);
     drop(alice);
+    sql(database, "DELETE FROM gm_grant WHERE name = 'Yankee'");
     // The guild reclaims the land straight into the store, an object stands on it
     // again, and the disband clears it with the guild: the REMOVE rides first, then
     // the object's removal, then the cleared land's list with no owner.
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'HIGH_WIZARD' \
+         FROM account WHERE login = 'alice'",
+    );
     sql(
         database,
         "INSERT INTO guild_land (land_id, guild_id) VALUES (1, 1)",
@@ -24469,7 +24520,8 @@ fn a_gm_runs_the_world_boss_event() {
     };
     let mut channels = default_channels();
     channels[0].maps.push(61);
-    let server = Server::start_with(binary(), database.url(), &channels);
+    let server =
+        Server::start_configured(binary(), database.url(), &channels, "test_server = true");
     create_account(&server, "alice");
     add_characters(&database);
     sql(
@@ -30492,6 +30544,21 @@ fn enter_world_as_god(server: &Server) -> (Keyed, Listed) {
     enter_world_as_implementor(server)
 }
 
+/// The login event when `event_panel` fires (`pc.get_gm_level() >= GM_HIGH_WIZARD`,
+/// including any entrant on a `test_server = true` server).
+fn read_gm_login_event(keyed: &mut Keyed) {
+    read_rank_login(keyed, 0, &[], &[]);
+    assert_eq!(
+        keyed.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the login event"
+    );
+    read_letter(keyed, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(keyed, 1, 0, None, [false; 5], None);
+    let _marks = read_login_letters(keyed, true);
+    read_login_update(keyed);
+}
+
 /// Alice's Alpha as an `IMPLEMENTOR`: `load`, the enter-game burst, then the
 /// login event with `event_panel`'s GM-gated letter, which rides in quest
 /// order between `dungeon_info`'s line and `costume_option`'s hides.
@@ -33844,13 +33911,30 @@ fn a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit() {
     );
     sql(
         &database,
-        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
-         FROM account WHERE login = 'alice'",
-    );
-    sql(
-        &database,
         "INSERT INTO quest_flag (player_id, name, value) SELECT id, \
          'sash_mission.__status'::bytea, -830000308 FROM player WHERE name = 'Alpha'",
+    );
+    // Shipped mode refuses mortal `/monsterlog` and `/detaillog` (`GM_GOD` in `cmd.cpp`).
+    {
+        let shipped = Server::start(binary(), database.url());
+        let (mut yankee, _) = enter_world_on_with_team(&shipped, 1, b"bob", 0, GERMAN, None);
+        yankee.send_record(&client_chat(CHAT_TALKING, b"/monsterlog"));
+        assert_eq!(
+            yankee.read_game(),
+            an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+            "a player cannot monsterlog"
+        );
+        yankee.send_record(&client_chat(CHAT_TALKING, b"/detaillog"));
+        assert_eq!(
+            yankee.read_game(),
+            an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
+            "a player cannot detaillog"
+        );
+    }
+    sql(
+        &database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'GOD' \
+         FROM account WHERE login = 'alice'",
     );
     let thieves = "m\t605\t540\t0\t0\t0\t1\t1000s\t100\t1\t405\n";
     let server = Server::start_with_npcs_configured(
@@ -33858,7 +33942,7 @@ fn a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit() {
         database.url(),
         "metin2_map_a1",
         thieves,
-        "no_wander = true",
+        "no_wander = true\ntest_server = true",
     );
     let (mut alice, listed, _items) = load_character(&server, b"alice", 0);
     let entered = enter_game_shown(&mut alice);
@@ -33869,21 +33953,6 @@ fn a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit() {
         .map(|insert| u32::from_le_bytes(insert[1..5].try_into().expect("four bytes")))
         .expect("the one thief stands in view");
     read_god_login_event(&mut alice);
-    let (mut yankee, yankee_listed) =
-        enter_world_on_with_team(&server, 1, b"bob", 0, GERMAN, Some(b"Alpha"));
-    alice.sees_enter(yankee_listed.id, true, None);
-    yankee.send_record(&client_chat(CHAT_TALKING, b"/monsterlog"));
-    assert_eq!(
-        yankee.read_game(),
-        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
-        "a player cannot monsterlog"
-    );
-    yankee.send_record(&client_chat(CHAT_TALKING, b"/detaillog"));
-    assert_eq!(
-        yankee.read_game(),
-        an_info_line(prodomo::command::NO_SUCH_COMMAND.as_bytes()),
-        "a player cannot detaillog"
-    );
     alice.send_record(&client_target(thief));
     let _target = alice.read_game();
     alice.send_record(&client_chat(CHAT_TALKING, b"/monsterlog"));
@@ -33901,12 +33970,12 @@ fn a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit() {
     pulse.extend_from_slice(b"Let's go to the next state");
     pulse.push(0);
     assert_eq!(lines, vec![victim, stand, pulse], "the begin's three lines");
-    monsterlog_off_then_detaillog(&mut alice, yankee, thief, &listed);
+    monsterlog_off_then_detaillog(&mut alice, thief, &listed);
 }
 
 /// The off toggle's quiet and the detail line: split from the monsterlog scenario so
 /// neither trips the line lint.
-fn monsterlog_off_then_detaillog(alice: &mut Keyed, yankee: Keyed, thief: u32, listed: &Listed) {
+fn monsterlog_off_then_detaillog(alice: &mut Keyed, thief: u32, listed: &Listed) {
     alice.send_record(&client_chat(CHAT_TALKING, b"/monsterlog"));
     let (kept, quiet) = alice.drain_game(QUIET_WINDOW, |header| match header {
         GC_PING => 1,
@@ -33940,7 +34009,6 @@ fn monsterlog_off_then_detaillog(alice: &mut Keyed, yankee: Keyed, thief: u32, l
         expected_detail_line(b"Alpha", listed.id, ALPHA_ENTERS_AT.0, ALPHA_ENTERS_AT.1),
         "the detail names the hitter"
     );
-    drop(yankee);
 }
 /// The next `count` monster-log texts of `speaker`, past pings, refills and the fight's
 /// own records.
@@ -44149,9 +44217,13 @@ fn a_horse_is_named_bad_names_refused_and_the_mount_pays() {
         GC_AFFECT_ADD,
         "the month's add leads"
     );
-    // The parity server is a test server, so the month is five minutes, laid in Pulses
-    // where the affect counts seconds (`G/questlua_horse.cpp:252-255`).
-    assert_eq!(horse_name_add(&read), 60 * 5 * 25, "the month's duration");
+    // Shipped mode gives 30 days, laid in Pulses where the affect counts seconds
+    // (`G/questlua_horse.cpp:252-255`).
+    assert_eq!(
+        horse_name_add(&read),
+        60 * 60 * 24 * 30 * 25,
+        "the month's duration"
+    );
     assert_eq!(
         defence_of(&read, vid),
         154 + 40 * 4 / 5 + 54 + 20,
@@ -46802,9 +46874,9 @@ fn a_click_sees_the_new_state_at_once() {
 /// test mode on; on a `test_server = false` boot she hears it off.
 #[test]
 fn a_click_says_the_test_mode_on_both_boots() {
-    for (config, want) in [
-        ("no_wander = true", "test=true"),
-        ("no_wander = true\ntest_server = false", "test=false"),
+    for (config, want, is_test) in [
+        ("no_wander = true", "test=false", false),
+        ("no_wander = true\ntest_server = true", "test=true", true),
     ] {
         let Some(database) = ScratchDatabase::create() else {
             return;
@@ -46822,7 +46894,16 @@ fn a_click_says_the_test_mode_on_both_boots() {
             &default_channels(),
             config,
         );
-        let (mut alice, _beta, entered) = enter_world_seeing(&server, b"alice", 1);
+        let (mut alice, entered) = if is_test {
+            let (mut keyed, _, _, _) = load_with_quickslots_on(&server, 1, b"alice", 1, ENGLISH);
+            let entered = enter_game_shown(&mut keyed);
+            read_gm_login_event(&mut keyed);
+            keyed.still("nothing follows");
+            (keyed, entered)
+        } else {
+            let (keyed, _, entered) = enter_world_seeing(&server, b"alice", 1);
+            (keyed, entered)
+        };
         let teacher = shown_vid(&entered, 20_300, "map 1 shows one skill teacher");
         alice.send_record(&client_click(teacher));
         let mut page = want.as_bytes().to_vec();
@@ -48082,7 +48163,6 @@ fn a_masked_gift_lands_as_its_new_vnum() {
         "the start is noticed"
     );
     alice.send_record(&client_daily_gift(1, 0));
-    read_test_days(&mut alice);
     let week = read_gift_week(&mut alice);
     assert_eq!(
         week.vnums[0], 76002,
@@ -48091,7 +48171,6 @@ fn a_masked_gift_lands_as_its_new_vnum() {
     );
     assert_eq!(week.statuses[0], 1, "day 1 waits");
     alice.send_record(&client_daily_gift(2, 0));
-    guard_test_day(&mut alice, 1);
     assert_eq!(
         set_fields(&alice.read_game()),
         (1, 0, 76002, 1),
@@ -48745,42 +48824,6 @@ fn read_gift_week(keyed: &mut Keyed) -> GiftWeek {
     week
 }
 
-/// Read the seven `[TEST]` lines an open prints, one per day in day order.
-fn read_test_days(keyed: &mut Keyed) {
-    for day in 1..=7u8 {
-        let line = keyed.read_game();
-        let head = format!("[TEST] You can collect day {day} at ");
-        assert_eq!(line[0], GC_CHAT, "day {day} rides a chat line");
-        assert_eq!(
-            line.len(),
-            10 + head.len() + 25,
-            "day {day} carries a ctime and its newline"
-        );
-        assert_eq!(
-            &line[10..10 + head.len()],
-            head.as_bytes(),
-            "day {day} names itself"
-        );
-        assert_eq!(
-            line[line.len() - 1],
-            b'\n',
-            "day {day} keeps ctime's newline"
-        );
-    }
-}
-
-/// The guard's `[TEST]` line a collect of day `day` prints before anything else:
-/// the status call carries collect time 0, so the date is the epoch.
-fn guard_test_day(alice: &mut Keyed, day: u8) {
-    assert_eq!(
-        alice.read_game(),
-        an_info_line(
-            format!("[TEST] You can collect day {day} at Thu Jan  1 00:00:00 1970\n").as_bytes()
-        ),
-        "the guard names day {day} at the epoch"
-    );
-}
-
 /// Stage the daily-gift scenario: Alpha an `IMPLEMENTOR` with 1000 cash and a ticket
 /// in cell 4, and Yankee at level 1, both in empire 1 where Alpha stands.
 fn stage_daily_gifts(database: &ScratchDatabase) {
@@ -48843,13 +48886,11 @@ fn a_daily_gift_close_clears_the_open_week() {
     // Open: the week loads. Close: silent. Open again: the week reloads, with the
     // same cash and week.
     alice.send_record(&client_daily_gift(1, 0));
-    read_test_days(&mut alice);
     let first = read_gift_week(&mut alice);
     assert_eq!((first.cash, first.week), (1000, 3), "the loaded week");
     alice.send_record(&client_daily_gift(0, 0));
     alice.quiet("the close answers nothing");
     alice.send_record(&client_daily_gift(1, 0));
-    read_test_days(&mut alice);
     let second = read_gift_week(&mut alice);
     assert_eq!(
         (second.cash, second.week),
@@ -49004,7 +49045,6 @@ fn unix_secs() -> u32 {
 /// spent ticket — and the silent close and unknown action.
 fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
     alice.send_record(&client_daily_gift(1, 0));
-    read_test_days(alice);
     let week = read_gift_week(alice);
     assert_eq!(
         (week.cash, week.week),
@@ -49037,13 +49077,11 @@ fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
     }
     // Day 1 collects free, with no line: the gift is set, then the week resends.
     alice.send_record(&client_daily_gift(2, 0));
-    guard_test_day(alice, 1);
     assert_eq!(
         set_fields(&alice.read_game()),
         (1, 0, 53006, 1),
         "the free gift lands in the first cell"
     );
-    read_test_days(alice);
     assert_eq!(
         read_gift_week(alice).statuses,
         [2, 0, 0, 0, 0, 0, 0],
@@ -49052,7 +49090,6 @@ fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
     // Day 3 for the ticket, although the 1000 cash would cover its 900: the ticket
     // arm spends the ticket, and the gift lands silent.
     alice.send_record(&client_daily_gift(3, 2));
-    guard_test_day(alice, 3);
     assert_eq!(
         set_fields(&alice.read_game()),
         (1, 4, 0, 0),
@@ -49063,7 +49100,6 @@ fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
         (1, 1, 53219, 1),
         "the ticket's gift lands next"
     );
-    read_test_days(alice);
     let week = read_gift_week(alice);
     assert_eq!(week.cash, 1000, "the ticket spends no cash");
     assert_eq!(
@@ -49073,7 +49109,6 @@ fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
     );
     // Day 2 for cash: the line, the gift, and the week with 400 left.
     alice.send_record(&client_daily_gift(2, 1));
-    guard_test_day(alice, 2);
     assert_eq!(
         alice.read_game(),
         an_info_line(b"You have unlocked the item successfully."),
@@ -49084,7 +49119,6 @@ fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
         (1, 2, 53015, 1),
         "the bought gift lands next"
     );
-    read_test_days(alice);
     let week = read_gift_week(alice);
     assert_eq!(week.cash, 400, "600 spent");
     assert_eq!(week.statuses, [2, 2, 2, 0, 0, 0, 0], "three days collected");
@@ -49095,21 +49129,18 @@ fn collect_the_week(alice: &mut Keyed, before: u32, after: u32) {
 /// the silent close and unknown action, then the reopen that resends the week.
 fn refuse_the_week(alice: &mut Keyed) {
     alice.send_record(&client_daily_gift(2, 1));
-    guard_test_day(alice, 2);
     assert_eq!(
         alice.read_game(),
         an_info_line(b"You have already recieved this reward."),
         "the double collect refuses"
     );
     alice.send_record(&client_daily_gift(2, 3));
-    guard_test_day(alice, 4);
     assert_eq!(
         alice.read_game(),
         an_info_line(b"Unfortunately you don't have enough cash."),
         "1200 costs more than the 400 left"
     );
     alice.send_record(&client_daily_gift(3, 4));
-    guard_test_day(alice, 5);
     assert_eq!(
         alice.read_game(),
         an_info_line(b"You don't have the ticket."),
@@ -49120,7 +49151,6 @@ fn refuse_the_week(alice: &mut Keyed) {
     alice.send_record(&client_daily_gift(0, 0));
     alice.quiet("the close answers nothing");
     alice.send_record(&client_daily_gift(1, 0));
-    read_test_days(alice);
     assert_eq!(
         read_gift_week(alice).statuses,
         [2, 2, 2, 0, 0, 0, 0],
@@ -49174,7 +49204,6 @@ fn renew_the_week(server: &Server, database: &ScratchDatabase, alice: Keyed) {
     let (mut alice, _) = enter_world_as_implementor(server);
     let before = unix_secs();
     alice.send_record(&client_daily_gift(1, 0));
-    read_test_days(&mut alice);
     let week = read_gift_week(&mut alice);
     let after = unix_secs();
     assert_eq!(
@@ -52718,7 +52747,12 @@ fn a_temp_moves_a_treasury_and_a_check_names_it() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = true",
+    );
     create_account(&server, "alice");
     add_characters(&database);
     sql(
@@ -52976,7 +53010,12 @@ fn a_monarch_warps_summons_and_taxes() {
     let Some(database) = ScratchDatabase::create() else {
         return;
     };
-    let server = Server::start(binary(), database.url());
+    let server = Server::start_configured(
+        binary(),
+        database.url(),
+        &default_channels(),
+        "test_server = true",
+    );
     create_account(&server, "alice");
     create_account(&server, "bob");
     add_characters(&database);
@@ -52996,8 +53035,11 @@ fn a_monarch_warps_summons_and_taxes() {
         "UPDATE player SET gold = 6000000 WHERE name = 'Alpha'",
     );
     let (mut alice, _) = enter_world_as_implementor(&server);
-    let (mut yankee, subject) =
-        enter_world_on_with_team(&server, 1, b"bob", 0, ENGLISH, Some(b"Alpha"));
+    let (mut yankee, subject, _, _) = load_with_quickslots_on(&server, 1, b"bob", 0, ENGLISH);
+    let _ = enter_game_shown(&mut yankee);
+    assert_eq!(yankee.read_game(), messenger_team_list(b"Alpha"));
+    read_gm_login_event(&mut yankee);
+    yankee.still("nothing follows");
     yankee.send_record(&client_chat(CHAT_TALKING, b"/mto Alpha"));
     assert_eq!(
         yankee.read_game(),
@@ -53059,11 +53101,15 @@ fn a_monarch_warps_summons_and_taxes() {
         &database,
         "(SELECT money FROM monarch_money WHERE empire = 1) = 0",
     );
+    monarch_refill_and_cooldown(&mut alice, &database);
+}
+
+fn monarch_refill_and_cooldown(alice: &mut Keyed, database: &ScratchDatabase) {
     alice.send_record(&client_chat(CHAT_TALKING, b"/temp 1 6000000"));
     alice.still_allowing_farm("refilling lands silently");
-    monarch_taxes(&mut alice);
+    monarch_taxes(alice);
     alice.send_record(&client_chat(CHAT_TALKING, b"/mmob 101"));
-    let wait = read_info_past_ambient(&mut alice);
+    let wait = read_info_past_ambient(alice);
     // The wait counts whole seconds from the summon, and the steps since took one or two
     // of them, three in a full run.
     let waits = [&b"[LS;551;3600]"[..], b"[LS;551;3599]", b"[LS;551;3598]"];
@@ -53072,7 +53118,7 @@ fn a_monarch_warps_summons_and_taxes() {
         "{wait:02x?}"
     );
     check(
-        &database,
+        database,
         "(SELECT money FROM monarch_money WHERE empire = 1) = 6000000",
     );
 }
@@ -53364,6 +53410,8 @@ fn a_dungeon_info_rank_cooldown_and_update_fan_their_lines() {
         a_command_line(b"dungeon_log_info 1092 0 Alpha|5|70#"),
         "the stored flag ranks its writer"
     );
+    // Shipped mode: a mortal's `test_cooldown` and `update` stay silent (`G/cmd_general.cpp:4110`).
+    let mut alpha = reenter_dungeon_info_gm(&server, &database, alpha);
     alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info test_cooldown"));
     let stamped = read_chat_past_ambient(&mut alpha);
     let text = &stamped[GC_CHAT_WIRE_SIZE..];
@@ -53419,6 +53467,35 @@ fn a_dungeon_info_rank_cooldown_and_update_fan_their_lines() {
             }
         }
     }
+}
+
+/// Grants `Alpha` `IMPLEMENTOR` after verifying mortal silence on `/dungeon_info
+/// test_cooldown` and `/dungeon_info update`, then re-enters and drains the GM login.
+fn reenter_dungeon_info_gm(server: &Server, database: &ScratchDatabase, mut alpha: Keyed) -> Keyed {
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info test_cooldown"));
+    alpha.still("a mortal's test_cooldown stays silent");
+    alpha.send_record(&client_chat(CHAT_TALKING, b"/dungeon_info update"));
+    alpha.still("a mortal's update stays silent");
+    drop(alpha);
+    sql(
+        database,
+        "INSERT INTO gm_grant (account_id, name, authority) SELECT id, 'Alpha', 'IMPLEMENTOR' \
+         FROM account WHERE login = 'alice'",
+    );
+    let (mut alpha, _listed, _items) = load_character(server, b"alice", 0);
+    let _entered = enter_game_shown(&mut alpha);
+    let _ = read_dungeon_cooldown_cells(&mut alpha);
+    read_rank_login_raw(&mut alpha, 0, &[], &[]);
+    assert_eq!(
+        alpha.read_game(),
+        chat_packet(CHAT_TYPE_COMMAND, 1, b"dungeon_info_qid 1"),
+        "dungeoninfo's line leads the login event"
+    );
+    read_letter(&mut alpha, 5, b"GM: Event Panel", "event_panel");
+    read_login_lines_hiding_after_dungeon(&mut alpha, 1, 0, None, [false; 5], None);
+    let _marks = read_login_letters(&mut alpha, true);
+    read_login_update(&mut alpha);
+    alpha
 }
 
 /// Ledger 467: the GM arena commands (`G/cmd_gm.cpp:3957-4064`) list the four
@@ -66494,7 +66571,11 @@ fn peach_gives_alignment(vnum: u32) -> bool {
             break record;
         }
     };
-    assert_eq!(refused, an_info_line(b"[LS;1034]"), "the throttle refuses");
+    assert_eq!(
+        refused,
+        an_info_line(b"[#Unk]You cannot use this item yet."),
+        "the throttle refuses"
+    );
     check(&database, "(SELECT count = 1 FROM item WHERE id = 30)");
     drop(alpha);
     drop(server);

@@ -1278,6 +1278,21 @@ mod tests {
         (world, inbox, dice)
     }
 
+    /// As [`first_idle`], in the test-server mode (`test_server = true`).
+    fn first_idle_test_server(
+        npc: Npc,
+        seed: u64,
+    ) -> (GameState, UnboundedReceiver<Vec<u8>>, Pcg32) {
+        let clock = TestClock::default();
+        clock.set(T0);
+        let mut world = a_map_on(&clock, vec![npc], open_cells()).with_test_server(true);
+        let inbox = a_player(&mut world);
+        world.dice = Pcg32::new(seed, 0);
+        let dice = world.dice.clone();
+        world.process_pulse(1);
+        (world, inbox, dice)
+    }
+
     /// The first seed whose dice `holds`.
     fn a_seed(holds: impl Fn(&mut Pcg32) -> bool) -> u64 {
         (0..10_000)
@@ -1571,7 +1586,7 @@ mod tests {
         assert_eq!(armed.len(), 1, "one respawn stands armed");
         let (when, map) = armed[0];
         assert!(SANTA_HOP_MAPS.contains(&map));
-        assert_eq!(when, 126 + pulses(50), "50 s on the test server");
+        assert_eq!(when, 126 + pulses(50 * 60), "50 minutes in shipped mode");
         assert!(world.npc_by_vid(ME).is_none(), "Santa leaves");
         let _ = &mut npc;
     }
@@ -1592,8 +1607,10 @@ mod tests {
         assert_eq!(number(&mut dice, 0, 6), 0);
         let degrees = number(&mut dice, 0, 359);
         let target = ahead(degrees, number(&mut dice, 300, 700));
-        let walks = number(&mut dice, 0, 100) >= 60;
-        assert_eq!(world.dice, dice, "a walk draws no chat");
+        assert_eq!(
+            world.dice, dice,
+            "a walk draws no chat or test-server walk toggle"
+        );
         let walk = mind(&world);
         assert_eq!(walk.rotation.to_bits(), i32_to_f32(degrees).to_bits());
         assert_eq!(walk.motion.start, SPOT);
@@ -1609,14 +1626,8 @@ mod tests {
             1 + MOVE_STEP_PULSES,
             "not the drawn {wait} seconds"
         );
-        assert_eq!(walk.walking, walks);
-        let mut told = if walks {
-            vec![walk_mode(ME, WALKMODE_WALK)]
-        } else {
-            Vec::new()
-        };
-        told.push(move_wait(&walk, T0));
-        assert_eq!(drained(&mut inbox), told);
+        assert!(!walk.walking);
+        assert_eq!(drained(&mut inbox), [move_wait(&walk, T0)]);
         let clock = TestClock::default();
         world.clock = super::super::motion::WorldClock::new(Box::new(clock.clone()));
         let half = T0 + walk.motion.duration_ms / 2;
@@ -1901,7 +1912,7 @@ mod tests {
             number(dice, 0, 100) >= 60
         });
         let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
-        let (world, mut inbox, mut dice) = first_idle(monster, walking);
+        let (world, mut inbox, mut dice) = first_idle_test_server(monster, walking);
         let _wait = number(&mut dice, 3, 5);
         let _walks = number(&mut dice, 0, 6);
         let degrees = number(&mut dice, 0, 359);
@@ -1926,7 +1937,7 @@ mod tests {
                 number(dice, 0, 100) == draw
             });
             let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
-            let (edged_world, _, _) = first_idle(monster, edged);
+            let (edged_world, _, _) = first_idle_test_server(monster, edged);
             assert_eq!(mind(&edged_world).walking, walks, "draw {draw}");
         }
         let running = a_seed(|dice| {
@@ -1939,7 +1950,7 @@ mod tests {
             number(dice, 0, 100) < 60
         });
         let monster = an_npc(ME, CHAR_TYPE_MONSTER, 101, 0);
-        let (world, mut inbox, _) = first_idle(monster, running);
+        let (world, mut inbox, _) = first_idle_test_server(monster, running);
         let walk = mind(&world);
         assert!(!walk.walking);
         assert_eq!(

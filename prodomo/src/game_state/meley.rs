@@ -1592,16 +1592,7 @@ impl GameState {
             .meley
             .of(id)
             .is_some_and(|run| run.sealers.contains(&pid));
-        let gm = self
-            .characters
-            .find_by_vid(giver)
-            .ok()
-            .and_then(|giver| giver.points())
-            .map_or(
-                crate::command::GM_PLAYER,
-                world::character::Points::gm_level,
-            );
-        if sealed && gm == crate::command::GM_PLAYER {
+        if sealed && self.gm_level(giver) == crate::command::GM_PLAYER {
             return false;
         }
         if !sealed {

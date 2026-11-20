@@ -170,12 +170,8 @@ impl GameState {
             return;
         };
         let pid = character.player_id();
-        let gm = character.points().map_or(
-            crate::command::GM_PLAYER,
-            world::character::Points::gm_level,
-        );
         // `GM_PLAYER != GetGMLevel() && false == test_server` (`:295-296`).
-        if gm != crate::command::GM_PLAYER && !self.test_server {
+        if self.gm_level(vid) != crate::command::GM_PLAYER && !self.test_server {
             return;
         }
         // `-1 == GetRegenFlag()` (`:298-299`): the war is over.
@@ -418,7 +414,7 @@ mod tests {
     #[test]
     fn a_forked_death_spends_a_token_and_scores_the_killer() {
         let clock = TestClock::default();
-        let mut world = threeway_world(&clock);
+        let mut world = threeway_world(&clock).with_test_server(true);
         let mut victim = enter_on(&mut world, (1, 114), 7, (3200, 3200), 820);
         while victim.try_recv().is_ok() {}
         let mut killer = enter_on(&mut world, (1, 114), 8, (3300, 3200), 820);

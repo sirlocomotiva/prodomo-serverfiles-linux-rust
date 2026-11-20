@@ -3181,13 +3181,11 @@ impl Game for Session<'_> {
         self.account_id
     }
     fn gm_level(&self) -> u8 {
-        // `m_pointsInstant.gm_level` (`G/char.cpp:6358`), which rode the admission: the
-        // test-server silence (`:6355-6356`) is the audit's (V26), so the production arm
-        // answers here, as the death penalty's does.
-        self.points.as_deref().map_or(
+        let stored = self.points.as_deref().map_or(
             crate::command::GM_PLAYER,
             world::character::Points::gm_level,
-        )
+        );
+        crate::command::effective_gm_level(stored, self.test_server)
     }
 
     fn has_empty_inventory(&self, vnum: u32) -> bool {
@@ -6569,7 +6567,7 @@ mod tests {
             climbs: Vec::new(),
             guild_ops: Vec::new(),
             observes: Vec::new(),
-            test_server: true,
+            test_server: false,
             pcs: Vec::new(),
             online: std::collections::HashMap::new(),
             guilds: super::super::guild::GuildShadow::default(),
@@ -6926,6 +6924,8 @@ mod tests {
         let (items, item_names) = (ItemProtos::default(), ItemNamesByLanguage::default());
         with_session((&protos, &names), (&items, &item_names), |session| {
             use quest::manager::Game;
+            assert!(!session.test_server());
+            session.test_server = true;
             assert!(session.test_server());
             session.pcs = vec![(b"Yankee".to_vec(), 77)];
             assert_eq!(session.find_pc_vid(b"yankee"), 77);

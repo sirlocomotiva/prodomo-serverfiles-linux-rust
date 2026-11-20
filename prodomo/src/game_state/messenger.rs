@@ -51,7 +51,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::command::{GM_IMPLEMENTOR, GM_PLAYER};
+use crate::command::GM_PLAYER;
 use protocol::gc_chat::{CHAT_TYPE_COMMAND, CHAT_TYPE_INFO};
 use protocol::gc_messenger::{encode, GcMessenger, GcMessengerEntry, GC_MESSENGER_NAME_MAX};
 #[cfg(test)]
@@ -488,39 +488,18 @@ impl Relations {
 /// (`G/messenger_manager.cpp:554-566`). The test-server mode makes every level
 /// `GM_IMPLEMENTOR` (`G/gm.cpp:14`), which silences the gate in it.
 fn gm_gate(state: &GameState, owner: &[u8], companion_level: Option<u8>) -> bool {
-    let owner_level = match vid_of(state, owner) {
-        Some(owner_vid) => state
-            .characters
-            .find_by_vid(owner_vid)
-            .ok()
-            .and_then(|character| character.points().map(world::character::Points::gm_level)),
-        None => Some(GM_PLAYER),
-    };
-    let owner_level = if state.test_server {
-        GM_IMPLEMENTOR
-    } else {
-        owner_level.unwrap_or(GM_PLAYER)
-    };
-    let companion_level = if state.test_server {
-        Some(GM_IMPLEMENTOR)
-    } else {
-        companion_level
-    };
+    let owner_level = vid_of(state, owner).map_or_else(
+        || crate::command::effective_gm_level(GM_PLAYER, state.test_server),
+        |owner_vid| state.gm_level(owner_vid),
+    );
+    let companion_level =
+        companion_level.map(|level| crate::command::effective_gm_level(level, state.test_server));
     owner_level == GM_PLAYER && companion_level.is_some_and(|level| level != GM_PLAYER)
 }
 
-/// The GM level of the character under `vid`, silenced to `GM_IMPLEMENTOR` in the
-/// test-server mode (`G/gm.cpp:12-14`), and `GM_PLAYER` for a VID nobody holds.
+/// The GM level of the character under `vid`, routed through [`GameState::gm_level`].
 fn gm_level_of(state: &GameState, vid: Vid) -> u8 {
-    if state.test_server {
-        return GM_IMPLEMENTOR;
-    }
-    state
-        .characters
-        .find_by_vid(vid)
-        .ok()
-        .and_then(|character| character.points().map(world::character::Points::gm_level))
-        .unwrap_or(GM_PLAYER)
+    state.gm_level(vid)
 }
 
 /// The companion's level for a GM gate (`gm_get_level`, `G/gm.cpp:110-113`): the points'
@@ -688,12 +667,9 @@ impl GameState {
         // (`G/input_main.cpp:1186-1191`): the caller's own level is the points', and the
         // name's comes from the caller's store read; the test-server mode silences the
         // gate (`G/gm.cpp:12-14`).
-        let caller_level = gm_level_of(self, caller);
-        let companion_level = if self.test_server {
-            Some(GM_IMPLEMENTOR)
-        } else {
-            companion_level
-        };
+        let caller_level = self.gm_level(caller);
+        let companion_level = companion_level
+            .map(|level| crate::command::effective_gm_level(level, self.test_server));
         if caller_level == GM_PLAYER && companion_level.is_some_and(|level| level != GM_PLAYER) {
             if let Some(mover) = self.own_mover(caller) {
                 let line = chat_packet(
@@ -1016,6 +992,7 @@ mod tests {
     #[test]
     fn an_add_by_vid_for_a_gm_passes_in_the_test_server_mode() {
         let (mut world, _clock, _caller) = a_world_with_one();
+        world.test_server = true;
         a_second(&mut world);
         let mut companion_points = world
             .characters
@@ -1162,7 +1139,7 @@ mod tests {
             .points()
             .expect("the companion has points")
             .clone();
-        companion_points.set_gm_level(GM_IMPLEMENTOR);
+        companion_points.set_gm_level(crate::command::GM_IMPLEMENTOR);
         world
             .characters
             .find_by_vid_mut(Vid::new(OTHER))

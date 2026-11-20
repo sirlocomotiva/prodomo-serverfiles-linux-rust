@@ -72,7 +72,7 @@ use world::item::{ItemId, ITEM_ANTIFLAG_GIVE, ITEM_ANTIFLAG_MYSHOP};
 
 use super::view::EntityKey;
 use super::GameState;
-use crate::command::{GM_IMPLEMENTOR, GM_PLAYER};
+use crate::command::GM_PLAYER;
 use crate::item_move::{MoveItemRefused, MovedItems, Mover};
 
 /// `IS_BOTARYABLE_ZONE` (`G/char_item.cpp:153-169`): the maps the silk botary opens on
@@ -543,11 +543,7 @@ impl GameState {
         let part = points.map_or(0, |points| {
             points.parts()[common::enums::EParts::Main as usize]
         });
-        let gm_level = if self.test_server {
-            GM_IMPLEMENTOR
-        } else {
-            points.map_or(GM_PLAYER, Points::gm_level)
-        };
+        let gm_level = self.gm_level(vid);
         let (chat_type, line): (u8, &[u8]) = match part {
             0..=2 if gm_level > GM_PLAYER => (
                 CHAT_TYPE_INFO,

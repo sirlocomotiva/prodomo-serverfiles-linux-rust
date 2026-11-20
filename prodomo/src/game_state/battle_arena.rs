@@ -479,13 +479,7 @@ impl GameState {
             let Some(body) = self.bodies.get(&vid) else {
                 continue;
             };
-            let gm = self
-                .characters
-                .find_by_vid(vid)
-                .ok()
-                .and_then(|character| character.points().map(world::character::Points::gm_level))
-                .unwrap_or(GM_PLAYER);
-            if gm != GM_PLAYER && !self.test_server {
+            if self.gm_level(vid) != GM_PLAYER && !self.test_server {
                 continue;
             }
             let empire = body.card.empire;

@@ -211,7 +211,7 @@ mod tests {
         let clock = TestClock::default();
         clock.set(1_000);
         let npc = a_fighter(ME, 101, 0, (175, 2000), 0, SPOT, 10_000);
-        let mut world = stand_field(&clock, vec![npc], open_cells(), true);
+        let mut world = stand_field(&clock, vec![npc], open_cells(), true).with_test_server(true);
         let mut inbox = enter(&mut world, 1, NEAR, 12_345);
         world.process_pulse(1);
         world.toggle_monster_log(Vid::new(1));

@@ -91,13 +91,7 @@ impl GameState {
         let mut vids: Vec<Vid> = self.outboxes.keys().copied().collect();
         vids.sort_by_key(|vid| vid.raw());
         for vid in vids {
-            let is_player = self
-                .characters
-                .find_by_vid(vid)
-                .ok()
-                .and_then(|character| character.points())
-                .is_some_and(|points| points.gm_level() == GM_PLAYER);
-            if is_player {
+            if self.points_of(vid.raw()).is_some() && self.gm_level(vid) == GM_PLAYER {
                 if let Some(mover) = self.own_mover(vid) {
                     self.tell(vid, mover, CHAT_TYPE_COMMAND, QUIT_SHUTDOWN, &[]);
                 }

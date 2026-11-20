@@ -58724,3 +58724,23 @@ First-run failures: `game_state::mob_battle::tests::a_dead_ended_follower_past_1
 (missing `.min(1420)` max-HP clamp on heal tick after ledger 740's B5 fix); both fixed and Run 2
 passed 5,781/0. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of
 2,332 rows (100% closed); 607 scenarios. No ADR changed.
+
+## 742. Package C4 (one meaning for `test_server` — ADR-0007)
+
+Closes **Package C4** from `docs/STATUS.md`:
+
+- **Single GM-level authority (`prodomo/src/command.rs`, `prodomo/src/game_state.rs`, `prodomo/src/main.rs`):**
+  - Added `command::effective_gm_level(stored: u8, test_server: bool) -> u8` (matching `CHARACTER::GetGMLevel`, `G/char.cpp:6354-6359`: returns `GM_IMPLEMENTOR` in test-server mode and the stored grant level otherwise) and routed `GameState::gm_level` through it.
+  - Replaced every hand-rolled `if test_server { GM_IMPLEMENTOR } else { ... }`, `points.gm_level()` + `test_server` pair, and `dungeon_info_is_gm` `test_server`-only shortcut across `prodomo/src/main.rs` (command dispatch, whisper, messenger, login/logout session logs) and all 17 `prodomo/src/game_state/*.rs` modules (`arena`, `battle_arena`, `build_lines`, `dungeon_info`, `gm_lines`, `item_penalty`, `meley`, `messenger`, `monarch`, `myshop`, `quest_quiet`, `quests`, `reload`, `safebox`, `shutdown`, `threeway`, `use_to_item`, `whisper`, `world_boss`).
+  - Added unit test `command::tests::effective_gm_level_elevates_only_in_test_server_mode`.
+- **Shipped-mode test defaults (`prodomo/src/game_state.rs`, `parity/src/server.rs`):**
+  - Flipped `GameState::new` from `test_server: true` to `test_server: false` and removed `("test_server", "test_server = true")` from `parity::server::SCENARIO_GAME_DEFAULTS`.
+  - Updated the 23 unit tests across 9 `prodomo/src/game_state/*.rs` modules (`build_lines`, `detail_log`, `event_flag`, `guild`, `messenger`, `mob_ai`, `quests`, `threeway`, `world_boss`) and `pc_skill`/`quests` test builders to either grant explicit GM levels or set `test_server = true` only where test-server-specific behaviour is under test.
+  - Migrated the 16 scenarios in `prodomo/tests/parity.rs` that relied on the legacy `test_server = true` default: 14 moved to shipped mode with explicit `gm_grant` rows (`a_whisper_reaches_the_character_it_names`, `a_guild_mark_is_uploaded_the_listed_and_fetched`, `a_master_builds_on_its_land_and_clears_it`, `a_gm_monsterlogs_the_thiefs_begin_and_details_its_hit`, `a_monarch_warps_summons_and_taxes`, `a_dungeon_info_rank_cooldown_and_update_fan_their_lines`, `daily_gifts_collect_for_cash_and_a_ticket_and_the_week_renews`, `a_daily_gift_close_clears_the_open_week`, `a_mythical_peach_gives_alignment_and_refuses_a_second_bite`, `a_horse_name_and_mount_and_summon_work`, and the guild/build/world-boss helpers), and the 2 scenarios that explicitly verify `test_server` mode (`a_channel_password_login_is_refused_version_or_waits_silent` and `a_click_says_the_test_mode_on_both_boots`) now pass `test_server = true` explicitly.
+
+Gates (2026-11-20), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,782
+passed, 0 failed in 46 targets; with it 5,782 passed, 0 failed in 46 targets (501 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+No test failed on the first run. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`,
+0 `codec`, of 2,332 rows (100% closed); 607 scenarios. No ADR changed.

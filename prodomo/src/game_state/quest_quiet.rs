@@ -174,12 +174,7 @@ impl GameState {
     /// path (a Divergence). The dispatch runs the battle-pass usage gate; any other
     /// line is logged and ignored, as an unported chat line is.
     pub(super) fn run_quest_command(&mut self, reader: Vid, mover: Mover, line: &[u8]) {
-        let gm_level = self
-            .characters
-            .find_by_vid(reader)
-            .ok()
-            .and_then(|character| character.points())
-            .map_or(command::GM_PLAYER, world::character::Points::gm_level);
+        let gm_level = self.gm_level(reader);
         let position = if self.is_dead(reader.raw()) {
             command::POS_DEAD
         } else {

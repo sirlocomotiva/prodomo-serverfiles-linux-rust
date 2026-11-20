@@ -770,14 +770,11 @@ fn config_text_on(
 
 /// The `[game]` keys every scenario starts from unless its own `game` text names the key.
 ///
-/// The scenarios were written while the binary shipped legacy's defaults: the test-server mode,
-/// where every character passes a game-master gate, and the 120-second save event. Ledger 679
-/// changed both shipped defaults; the scenarios keep the old ones here until each is moved to
-/// the shipped mode (`docs/STATUS.md`, next steps), so no scenario changed meaning silently.
-const SCENARIO_GAME_DEFAULTS: [(&str, &str); 2] = [
-    ("test_server", "test_server = true\n"),
-    ("save_event_second_cycle", "save_event_second_cycle = 120\n"),
-];
+/// Scenarios run in the shipped `test_server = false` mode (ADR-0007, Package C4) unless a
+/// scenario explicitly enables `test_server = true` to test the mode itself. The 120-second
+/// save event keeps periodic saves quiet during short scenarios unless overridden.
+const SCENARIO_GAME_DEFAULTS: [(&str, &str); 1] =
+    [("save_event_second_cycle", "save_event_second_cycle = 120\n")];
 
 /// [`config_text`] with `game_data` as the Game data folder and `game_tables` as the
 /// table dumps.
@@ -849,7 +846,7 @@ mod tests {
             format!(
                 "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"postgres://h/db\"\n\
                  \n[auth]\nport = 0\n\
-                 \n[game]\ntest_server = true\nsave_event_second_cycle = 120\n\
+                 \n[game]\nsave_event_second_cycle = 120\n\
                  \n[[channel]]\nnumber = 1\nports = [0, 0]\nmaps = [1, 3]\n\
                  \n[[channel]]\nnumber = 99\nports = [0]\nmaps = [72]\n",
                 data_keys()
@@ -862,14 +859,14 @@ mod tests {
         let text = config_text(
             "postgres://h/db",
             &[],
-            "test_server = false\nping_event_second_cycle = 1",
+            "test_server = true\nping_event_second_cycle = 1",
         );
         assert_eq!(
             text,
             format!(
                 "bind_ip = \"127.0.0.1\"\n{}\n[store]\nurl = \"postgres://h/db\"\n\
                  \n[auth]\nport = 0\n\
-                 \n[game]\nsave_event_second_cycle = 120\ntest_server = false\n\
+                 \n[game]\nsave_event_second_cycle = 120\ntest_server = true\n\
                  ping_event_second_cycle = 1\n",
                 data_keys()
             )

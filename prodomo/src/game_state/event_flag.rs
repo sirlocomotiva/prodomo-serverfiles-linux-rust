@@ -953,6 +953,7 @@ mod tests {
         use crate::game_state::regen::Due;
         let clock = TestClock::default();
         let (mut world, _clients) = event_world_on(&clock, 61, (358_400, 153_600));
+        world.test_server = true;
         let seohan = (PLACE.0, 61);
         // At the flag 0 nothing comes.
         world.spawn_santa(61, 50 * 60, 0);

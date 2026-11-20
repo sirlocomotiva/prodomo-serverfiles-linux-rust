@@ -873,14 +873,7 @@ impl GameState {
     /// `IsGM` (`G/char.cpp:6373-6380`): any GM level, or anyone while the
     /// test server is on (the throttle skips GMs, `:708`, `:826`).
     fn is_gm(&self, asker: Vid) -> bool {
-        if self.test_server {
-            return true;
-        }
-        self.characters
-            .find_by_vid(asker)
-            .ok()
-            .and_then(|character| character.points())
-            .is_some_and(|points| points.gm_level() != GM_PLAYER)
+        self.gm_level(asker) != GM_PLAYER
     }
 
     /// One PC quest flag (`GetQuestFlag("world_boss_reward")`).
@@ -1038,6 +1031,7 @@ mod tests {
     fn the_cooldown_runs_the_run_time_and_the_seconds_count() {
         let clock = TestClock::default();
         let (mut world, mut caller) = boss_world(&clock);
+        world.test_server = true;
         drained(&mut caller);
         world.run_worldboss_line(Vid::new(7), b"start", mover());
         drained(&mut caller);
@@ -1116,6 +1110,7 @@ mod tests {
     fn the_spawn_needs_a_channel_one_map_and_stands_the_boss() {
         let clock = TestClock::default();
         let (mut world, mut caller) = boss_world(&clock);
+        world.test_server = true;
         drained(&mut caller);
         assert!(!world.world_boss_spawn(), "map 61 hosts nowhere");
         assert!(!world.world_boss_marks.spawned);

@@ -56,6 +56,18 @@ pub const GM_IMPLEMENTOR: u8 = 5;
 /// `GM_DISABLE`: no level runs the entry.
 pub const GM_DISABLE: u8 = 6;
 
+/// `CHARACTER::GetGMLevel` (`G/char.cpp:6354-6359`): the character's effective GM level,
+/// returning `GM_IMPLEMENTOR` in test-server mode and the stored grant level otherwise
+/// (ADR-0007).
+#[must_use]
+pub const fn effective_gm_level(stored: u8, test_server: bool) -> u8 {
+    if test_server {
+        GM_IMPLEMENTOR
+    } else {
+        stored
+    }
+}
+
 /// The line for a word that names no command, or a command above the character's level.
 pub const NO_SUCH_COMMAND: &str = "@@(cmd.cpp)tradus:This command does not exist.";
 
@@ -1525,5 +1537,14 @@ mod tests {
         assert_eq!(one_argument(b""), (Vec::new(), &b""[..]));
         let (argument, rest) = one_argument(&[b'z'; 300]);
         assert_eq!((argument.len(), rest.len()), (ARGUMENT_MAX, 45));
+    }
+
+    #[test]
+    fn effective_gm_level_elevates_only_in_test_server_mode() {
+        assert_eq!(effective_gm_level(GM_PLAYER, false), GM_PLAYER);
+        assert_eq!(effective_gm_level(GM_HIGH_WIZARD, false), GM_HIGH_WIZARD);
+        assert_eq!(effective_gm_level(GM_IMPLEMENTOR, false), GM_IMPLEMENTOR);
+        assert_eq!(effective_gm_level(GM_PLAYER, true), GM_IMPLEMENTOR);
+        assert_eq!(effective_gm_level(GM_LOW_WIZARD, true), GM_IMPLEMENTOR);
     }
 }

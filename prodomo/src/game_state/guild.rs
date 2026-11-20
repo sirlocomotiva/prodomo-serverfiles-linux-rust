@@ -8817,6 +8817,7 @@ mod tests {
         // `DeleteMark` zeroes the tile and returns the id to the free set, so the
         // next save reuses it; the symbol row goes with the mark.
         let (_clock, mut world, _, _) = a_guilded_pair();
+        world.install_land_owners(&vec![(1, GUILD_ID)]);
         raise_guild(&mut world, 3);
         let mut image = [0_u32; MARK_PIXELS];
         image[0] = 1;
@@ -8843,13 +8844,14 @@ mod tests {
         use quest::manager::GuildAnswer;
         // `GuildSymbolUpload`'s land gate (`G/input_login.cpp:1016-1021`): a guild
         // owning no land is refused off a test server, and held on one. An unknown
-        // guild is refused either way. The fixture's `a_world` stands in test mode.
+        // guild is refused either way. The fixture's `a_world` stands in shipped mode.
         let (_clock, mut world, _, _) = a_guilded_pair();
-        assert!(world.test_server);
-        assert!(world.commit_symbol_upload(GUILD_ID, &[9; 16]));
-        world.test_server = false;
+        assert!(!world.test_server);
         assert!(!world.commit_symbol_upload(GUILD_ID, &[9; 16]));
         assert!(!world.commit_symbol_upload(4242, &[9; 16]));
+        world.test_server = true;
+        assert!(world.commit_symbol_upload(GUILD_ID, &[9; 16]));
+        world.test_server = false;
         world.install_land_owners(&vec![(1, GUILD_ID)]);
         assert!(world.commit_symbol_upload(GUILD_ID, &[9; 16]));
         assert_eq!(world.guilds.first_owned_land(GUILD_ID), Some(1));
@@ -8877,6 +8879,7 @@ mod tests {
         // `GuildSymbolCRC` serves the bytes on a size or CRC miss and sends nothing
         // on a hit or an unknown guild; an upload to an unknown guild is refused.
         let (_clock, mut world, _, _) = a_guilded_pair();
+        world.install_land_owners(&vec![(1, GUILD_ID)]);
         assert!(!world.commit_symbol_upload(4242, &[9; 16]));
         assert!(world.commit_symbol_upload(GUILD_ID, &[9; 16]));
         let crc = guild_mark::crc32(&[9_u8; 16]);
@@ -12481,21 +12484,24 @@ mod tests {
         );
         // The war is a minute old, so a score may end it.
         world.last_pulse = 1_000;
-        // One point short of the end score, which is ten in the test-server mode the
-        // world runs in (`G/war_map.cpp:700`).
+        // One point short of the end score, which is 100 in shipped mode
+        // (`G/war_map.cpp:700`).
         world
             .guilds
             .by_id
             .get_mut(&GUILD_ID)
             .and_then(|guild| guild.enemies.get_mut(&SECOND_ID))
             .expect("the enemy entry")
-            .score = 9;
+            .score = 99;
         world.guild_war_kill(Vid::new(MASTER_VID), Vid::new(200));
         // The score reached the end score, so the war ended and the pair's entry is
         // gone with it.
         let war = world.war_maps.get(&map_index).expect("the war's map");
         let team = war.team_of(GUILD_ID).expect("the guild's team");
-        assert_eq!(war.teams[team].score, 10, "the score reached the end score");
+        assert_eq!(
+            war.teams[team].score, 100,
+            "the score reached the end score"
+        );
         assert!(
             !world.guilds.wars.contains(&(GUILD_ID, SECOND_ID)),
             "the war ended on the score"
@@ -12511,14 +12517,14 @@ mod tests {
         let (world, _master, _rival) = a_flag_war(FLAG_SPOTS[0], FLAG_SPOTS[1]);
         assert_eq!(
             world.war_end_score(GUILD_ID, SECOND_ID),
-            Some(1),
-            "the flag war ends at one point in the test-server mode"
+            Some(10),
+            "the flag war ends at ten points in shipped mode"
         );
-        let world = world.with_test_server(false);
+        let world = world.with_test_server(true);
         assert_eq!(
             world.war_end_score(GUILD_ID, SECOND_ID),
-            Some(10),
-            "and at ten out of it"
+            Some(1),
+            "and at one point in the test-server mode"
         );
     }
 

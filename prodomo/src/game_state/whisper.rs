@@ -1026,15 +1026,7 @@ impl GameState {
     /// (`ChatPacket`'s locale lookup, `G/char.cpp:5147-5154`). Runs before the
     /// usage and format checks, as the legacy runs it before it splits the line.
     pub(super) fn block_chat_allowed(&mut self, vid: Vid) -> bool {
-        let gm = self
-            .characters
-            .find_by_vid(vid)
-            .ok()
-            .and_then(world::character::Character::points)
-            .map_or(
-                crate::command::GM_PLAYER,
-                world::character::Points::gm_level,
-            );
+        let gm = self.gm_level(vid);
         let privileged = gm < crate::command::GM_HIGH_WIZARD && {
             let pid = self
                 .characters
@@ -1751,13 +1743,7 @@ impl GameState {
             );
             return QfOutcome::Landed(vid);
         }
-        let target_gm = self
-            .characters
-            .find_by_vid(target)
-            .ok()
-            .and_then(|character| character.points())
-            .is_some_and(|points| points.gm_level() != crate::command::GM_PLAYER)
-            || self.test_server;
+        let target_gm = self.gm_level(target) != crate::command::GM_PLAYER;
         if target_gm {
             self.tell(
                 vid,

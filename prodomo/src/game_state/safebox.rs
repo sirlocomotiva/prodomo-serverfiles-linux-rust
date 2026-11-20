@@ -322,16 +322,7 @@ impl GameState {
     /// `do_click_safebox` (`G/cmd_general.cpp:3492-3502`): refuses a non-GM inside a dungeon or
     /// war map, otherwise asks the client for the safebox password.
     fn click_safebox(&self, vid: Vid, mover: Mover) -> SafeboxAnswer {
-        let gm = if self.test_server {
-            crate::command::GM_IMPLEMENTOR
-        } else {
-            self.characters
-                .find_by_vid(vid)
-                .ok()
-                .and_then(|c| c.points().map(world::character::Points::gm_level))
-                .unwrap_or(crate::command::GM_PLAYER)
-        };
-        let blocked = gm == crate::command::GM_PLAYER
+        let blocked = self.gm_level(vid) == crate::command::GM_PLAYER
             && self.place_of(vid.raw()).is_some_and(|(_, map)| {
                 self.dungeons.get(map).is_some() || super::war_map::war_map_of(map).is_some()
             });

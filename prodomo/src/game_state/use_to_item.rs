@@ -1483,19 +1483,15 @@ impl GameState {
                 changes: Vec::new(),
             })
         })?;
-        let (pid, mortal) = self
+        let pid = self
             .characters
             .find_by_vid(vid)
-            .map_or((0, true), |character| {
-                let mortal = character
-                    .points()
-                    .is_none_or(|points| points.gm_level() == crate::command::GM_PLAYER);
-                (character.player_id(), mortal)
-            });
+            .map_or(0, world::character::Character::player_id);
+        let mortal = self.gm_level(vid) == crate::command::GM_PLAYER;
         let cycle = self.item_bonus_change_time;
         let mut cooldown = (0, 0);
         let mut stamp = None;
-        if kind == USE_CHANGE_ATTRIBUTE && mortal && !self.test_server && cycle > 0 {
+        if kind == USE_CHANGE_ATTRIBUTE && mortal && cycle > 0 {
             let now = Self::global_time();
             let last = self
                 .quests

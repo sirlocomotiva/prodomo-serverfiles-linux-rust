@@ -58,7 +58,7 @@ use common::vid::Vid;
 use protocol::gc_chat::{CHAT_TYPE_INFO, CHAT_TYPE_NOTICE};
 
 use super::GameState;
-use crate::command::{GM_IMPLEMENTOR, GM_PLAYER};
+use crate::command::GM_PLAYER;
 use crate::item_move::Mover;
 
 /// What the descriptor read for one `/reload` line: each file's bytes, or `None` when the
@@ -236,18 +236,7 @@ impl GameState {
         let mut vids: Vec<Vid> = self.outboxes.keys().copied().collect();
         vids.sort_by_key(|vid| vid.raw());
         for vid in vids {
-            let level = if self.test_server {
-                GM_IMPLEMENTOR
-            } else {
-                self.characters
-                    .find_by_vid(vid)
-                    .ok()
-                    .and_then(|character| {
-                        character.points().map(world::character::Points::gm_level)
-                    })
-                    .unwrap_or(GM_PLAYER)
-            };
-            if level != GM_PLAYER {
+            if self.gm_level(vid) != GM_PLAYER {
                 if let Some(mover) = self.own_mover(vid) {
                     self.tell(vid, mover, CHAT_TYPE_NOTICE, text, &[]);
                 }

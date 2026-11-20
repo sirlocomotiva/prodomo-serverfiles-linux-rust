@@ -920,14 +920,9 @@ pub struct GameState {
     /// `g_NoMountAtGuildWar` (`G/questmanager.cpp:1618-1621`), set by the event flag of
     /// the same name.
     no_mount_at_guild_war: bool,
-    /// `test_server` (`G/config.cpp:72`): the test-server mode, on unless the
-    /// configuration turns it off.
-    ///
-    /// Legacy's defaults are on (`G/config.cpp:72`), and the owner's `CONFIG` files do
-    /// not turn it off, so the deployment ran in it. The war's end score is divided by
-    /// ten in it (`G/war_map.cpp:700`), and a bonus change runs free in it
-    /// (`G/char_item.cpp:6401`); the other rules wait for the `test_server` audit
-    /// (owner question 5).
+    /// `test_server` (`G/config.cpp:72`): the test-server mode, off by default (ADR-0007).
+    /// When on, [`Self::gm_level`] elevates every character to `GM_IMPLEMENTOR` and the
+    /// test-server timing/logging hooks activate.
     test_server: bool,
     /// `g_dwItemBonusChangeTime` (`G/config.cpp:42`): the seconds between a mortal's
     /// bonus changes, from `[game] item_bonus_change_time` (60 both sides).
@@ -1247,7 +1242,7 @@ impl GameState {
             drop_lifetime: drop_lifetime_pulses(DEFAULT_DROP_LIFETIME_SECS),
             gold_lifetime: drop_lifetime_pulses(DEFAULT_GOLD_LIFETIME_SECS),
             autogive_lifetime: drop_lifetime_pulses(DEFAULT_AUTOGIVE_LIFETIME_SECS),
-            test_server: true,
+            test_server: false,
             item_bonus_change_time: 60,
             permanent_scrolls: PermanentScrolls::default(),
             view_radius: view_radius_of(DEFAULT_VIEW_RANGE),
@@ -1390,6 +1385,19 @@ impl GameState {
     pub fn with_blend_table(mut self, table: Arc<gamedata::blend::BlendTable>) -> Self {
         self.blend_table = table;
         self
+    }
+
+    /// `CHARACTER::GetGMLevel` (`G/char.cpp:6354-6359`): the effective GM level of `vid`,
+    /// routed through [`crate::command::effective_gm_level`] (ADR-0007).
+    #[must_use]
+    pub(super) fn gm_level(&self, vid: common::vid::Vid) -> u8 {
+        let stored = self
+            .characters
+            .find_by_vid(vid)
+            .ok()
+            .and_then(|character| character.points().map(world::character::Points::gm_level))
+            .unwrap_or(crate::command::GM_PLAYER);
+        crate::command::effective_gm_level(stored, self.test_server)
     }
 
     /// Share the guild lands, which the `building.*` calls read owners from.
