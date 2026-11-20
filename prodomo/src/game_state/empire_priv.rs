@@ -697,7 +697,7 @@ mod tests {
                 grades: vec![db::guilds::StoredGrade {
                     guild_id: 7,
                     grade: 1,
-                    name: "Leader".to_owned(),
+                    name: b"Leader".to_vec(),
                     auth: 15,
                 }],
                 members: vec![db::guilds::StoredMember {

@@ -53,12 +53,12 @@ async fn created(store: &Store, account: AccountId, slot: u8, name: &str) -> u32
     }
 }
 
-fn grades() -> [(&'static str, u8); 15] {
+fn grades() -> [(&'static [u8], u8); 15] {
     std::array::from_fn(|index| {
         if index == 0 {
-            ("Leader", 15)
+            (b"Leader".as_slice(), 15)
         } else {
-            ("...", 0)
+            (b"...".as_slice(), 0)
         }
     })
 }
@@ -189,7 +189,7 @@ async fn a_guild_row_cascades_and_stamps_through_disband() {
     add_member(store, id, guest_pid, 15)
         .await
         .expect("the join should store");
-    post_comment(store, id, "BandMaster", "hello")
+    post_comment(store, id, "BandMaster", b"hello")
         .await
         .expect("the comment should store");
     save_mark(store, id, 9, &[1; 768])
@@ -249,7 +249,7 @@ async fn grade_and_member_rows_round_trip_through_the_setters() {
         .await
         .expect("the join should store");
     assert!(
-        set_grade_name(store, id, 15, "Veteran")
+        set_grade_name(store, id, 15, b"Veteran")
             .await
             .expect("the rename runs"),
         "the grade row is there"
@@ -278,7 +278,7 @@ async fn grade_and_member_rows_round_trip_through_the_setters() {
         .iter()
         .find(|grade| grade.grade == 15)
         .expect("the grade row");
-    assert_eq!(grade.name, "Veteran", "the name lands");
+    assert_eq!(grade.name, b"Veteran", "the name lands");
     assert_eq!(grade.auth, 7, "the auth lands");
     let member = stored
         .members
@@ -335,10 +335,10 @@ async fn an_offer_charges_and_comments_round_trip_through_their_writers() {
             .expect("the charge runs"),
         "the guild row is there"
     );
-    let first = post_comment(store, id, "OfferBoard", "hello all")
+    let first = post_comment(store, id, "OfferBoard", b"hello all")
         .await
         .expect("the post runs");
-    let second = post_comment(store, id, "OfferBoard", "!war at nine")
+    let second = post_comment(store, id, "OfferBoard", b"!war at nine")
         .await
         .expect("the notice runs");
     assert!(second > first, "the ids rise");
@@ -380,6 +380,60 @@ async fn an_offer_charges_and_comments_round_trip_through_their_writers() {
     assert_eq!(held, (39_600, 45_000), "the player row keeps the debits");
     let comments = board(store, id, 12).await.expect("the board reads again");
     assert_eq!(comments.len(), 1, "the delete lands");
+}
+
+#[tokio::test]
+async fn non_utf8_grade_names_and_comments_round_trip_byte_exact_and_enforce_byte_bounds() {
+    let Some(scratch) = ScratchDatabase::create().await else {
+        return;
+    };
+    let store = &scratch.store;
+    let master = account(store, "byteaboard").await;
+    let master_pid = created(store, master, 0, "ByteaBoard").await;
+    let id = create_guild(store, "ByteaGuild", master_pid, &grades())
+        .await
+        .expect("the creation should store");
+    // Windows-1252 / Latin-1 bytes that are invalid UTF-8 must round-trip untouched (ADR-0003).
+    let raw_grade = b"W\xe4chter";
+    assert!(
+        set_grade_name(store, id, 15, raw_grade)
+            .await
+            .expect("the bytea rename runs"),
+        "the grade row is there"
+    );
+    let raw_comment = b"!\xe4\xf6\xfc \xdf\xff";
+    let cid = post_comment(store, id, "ByteaBoard", raw_comment)
+        .await
+        .expect("the bytea post runs");
+    let stored = load_all(store).await.expect("the load reads");
+    let grade = stored
+        .grades
+        .iter()
+        .find(|grade| grade.guild_id == id && grade.grade == 15)
+        .expect("grade 15");
+    assert_eq!(grade.name, raw_grade, "grade name round-trips byte-exact");
+    let comments = board(store, id, 12).await.expect("the board reads");
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].id, cid);
+    assert_eq!(
+        comments[0].content, raw_comment,
+        "comment content round-trips byte-exact"
+    );
+    // CHECK constraints enforce byte lengths (<= 9 for grade name, 1..=50 for comment content).
+    assert!(
+        set_grade_name(store, id, 15, &[b'x'; 10]).await.is_err(),
+        "10-byte grade name violates octet_length <= 9"
+    );
+    assert!(
+        post_comment(store, id, "ByteaBoard", b"").await.is_err(),
+        "empty comment violates octet_length BETWEEN 1 AND 50"
+    );
+    assert!(
+        post_comment(store, id, "ByteaBoard", &[b'x'; 51])
+            .await
+            .is_err(),
+        "51-byte comment violates octet_length BETWEEN 1 AND 50"
+    );
 }
 
 /// `set_skills` and `spend_power`: the `/gskillup` climb and the cast's consume.

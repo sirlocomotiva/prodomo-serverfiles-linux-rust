@@ -14,6 +14,7 @@ ledger section that wrote the probe.
 | `193/width.cpp` | the item-window records, on the host with a 4-byte stand-in for `long` | ledger 193 |
 | `194/slot_space.cpp` | the `EMisc2` inventory slot space and the `EWindows` numbering | `common/src/item_slots.rs` |
 | `475/land.cpp` | `TPacketGCLandList` and its element | `protocol/src/gc_land_list.rs` |
+| `738/gc_widths.cpp` | all 145 game-to-client record headers and dynamic sub-structs compiled directly from `server/server/game/packet.h` for i686 (Package C8) | `protocol/src/gc_inventory.rs` (`probed_i686_widths_match_every_rust_codec`) |
 
 The probes up to 475 were built with `g++ -m32` or on the host. A new probe is built for the legacy
 target with the cross compiler (installed since ledger 680):

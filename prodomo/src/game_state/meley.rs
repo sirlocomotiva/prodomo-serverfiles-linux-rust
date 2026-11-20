@@ -1884,9 +1884,9 @@ mod tests {
                 guild_id: GUILD_ID,
                 grade,
                 name: if grade == 1 {
-                    "Leader".to_owned()
+                    b"Leader".to_vec()
                 } else {
-                    "...".to_owned()
+                    b"...".to_vec()
                 },
                 auth: if grade == 1 { 15 } else { 0 },
             })

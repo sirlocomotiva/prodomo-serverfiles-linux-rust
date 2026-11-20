@@ -14,13 +14,13 @@ Steps 1 to 3 are done. Step 4 (game systems) is in its tail. Step 5 (the owner's
 the Reference client) has not started, and by the owner's decision of 2026-11-15 it starts when
 the tail is closed.
 
-| measure | value at ledger 737 |
+| measure | value at ledger 738 |
 |---|---|
 | Parity inventory | 2,332 rows: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`; **Package B complete — all 12 inventory files closed** |
 | Scenarios | 602 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,763 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 737 has the receipt) |
-| Client records | client to game: 91 of 92 registered headers; game to client: 125 of 134 (`protocol/src/*_inventory.rs`) |
-| Store | PostgreSQL 18, 47 migrations |
+| Tests | 5,765 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 738 has the receipt) |
+| Client records | client to game: 91 of 92 registered headers; game to client: 126 of 134 (`protocol/src/*_inventory.rs`) |
+| Store | PostgreSQL 18, 48 migrations |
 | Size | about 483,000 lines of Rust, tests included |
 | Idle cost | release build, Channel 1 and the Shared Channel, 65,604 NPCs and monsters, no player: 0.05 ms of each 40 ms Pulse, 595 MB |
 
@@ -128,7 +128,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 4. **One meaning for the test-server mode** (ADR-0007): one function answers a character's GM
    level; the scenarios move to the shipped mode package by package; the harness default and
    `GameState`'s test default are removed with the last one.
-5. **The two `text` columns** become `bytea` in a new migration (ADR-0003).
+5. **The two `text` columns** become `bytea` in a new migration (ADR-0003). **Done in ledger 738** (`db/migrations/0048_guild_free_text_bytea.sql`, `db/src/guilds.rs`, `prodomo`).
 6. **The harness leaves nothing behind.** Done in ledger 683. A killed test process runs no
    `Drop`; the next test process now drops its databases (an advisory lock per process says
    whose owner is gone) and removes its directories and servers (`parity::scratch`), and
@@ -140,13 +140,13 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
    The owner confirmed on 2026-11-15 that this machine is the one to use, so nothing blocks it.
    The driver is `tools/mutate.py` (the one the sweeps up to ledger 229k used, rescued in ledger
    683); it runs on a copy of the tree, never in the working tree.
-8. **Widths.** `i686-linux-gnu-g++-12` is installed (ledger 680: the packed two-`long` control
-   reads 8, and `TPacketGCPhase`, `TPacketGCHandshake` and `TPacketGCLoginFailure` read 2, 13
-   and 10, as their codecs do). Probe every game-to-client record the Rewrite sends, and
-   reconcile `gc_inventory.rs` with the codecs (`REFINE_INFORMATION` and `SYNC_POSITION` are
-   flagged missing but have codecs). *Exit:* a table of record, source struct, probed width and
-   codec width with no difference. The probe goes in `.scratch/probes/`, beside the earlier
-   ones.
+8. **Widths.** **Done in ledger 738.** `.scratch/probes/738/gc_widths.cpp` compiles verbatim
+   `server/server/game/packet.h` with `i686-linux-gnu-g++-12 -static` and verifies all 145
+   game-to-client headers and dynamic sub-structs against Rust codecs with zero differences
+   (`protocol/src/gc_inventory.rs::probed_i686_widths_match_every_rust_codec`). Reconciled
+   `gc_inventory.rs`: `HEADER_GC_SYNC_POSITION` (`0x05`) flipped to `true` (126 of 134);
+   `0x5f` (`HEADER_GC_REFINE_INFORMATION_OLD`) has no send site and stays `false` (`0x77`
+   `HEADER_GC_REFINE_INFORMATION_NEW` is `true`).
 9. **A quest step's send order.** A step's world moves run after its script, kind by kind
    (`apply_world_moves`, `prodomo/src/game_state/quests.rs`), so a record a legacy call writes
    as it is called can leave behind the step's page. Found in ledger 680: `pc.change_empire`'s

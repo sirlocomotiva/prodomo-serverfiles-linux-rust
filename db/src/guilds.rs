@@ -55,8 +55,8 @@ pub struct StoredGrade {
     pub guild_id: u32,
     /// The grade, 1 to 15.
     pub grade: u8,
-    /// `TGuildGrade::grade_name`.
-    pub name: String,
+    /// `TGuildGrade::grade_name`: raw client bytes (`bytea`, up to 9 bytes; ADR-0003).
+    pub name: Vec<u8>,
     /// `TGuildGrade::auth_flag`.
     pub auth: u8,
 }
@@ -102,8 +102,8 @@ pub struct StoredComment {
     pub id: u32,
     /// The poster's name.
     pub name: String,
-    /// The content.
-    pub content: String,
+    /// The content: raw client bytes (`bytea`, 1 to 50 bytes; ADR-0003).
+    pub content: Vec<u8>,
 }
 
 /// Load every guild with its grades and members, as `CGuildManager::Initialize` loads them
@@ -261,7 +261,7 @@ pub async fn create_guild(
     store: &Store,
     name: &str,
     master_pid: u32,
-    grades: &[(&str, u8); 15],
+    grades: &[(&[u8], u8); 15],
 ) -> Result<u32, CreateGuildError> {
     let master = i32::try_from(master_pid)
         .map_err(|_| CreateGuildError::Account(AccountError::NoSuchPlayer(master_pid)))?;
@@ -391,7 +391,7 @@ pub async fn set_grade_name(
     store: &Store,
     guild_id: u32,
     grade: u8,
-    name: &str,
+    name: &[u8],
 ) -> Result<bool, AccountError> {
     let id = i32::try_from(guild_id).map_err(|_| AccountError::NoSuchPlayer(guild_id))?;
     let done = sqlx::query("UPDATE guild_grade SET name = $1 WHERE guild_id = $2 AND grade = $3")
@@ -735,10 +735,10 @@ pub async fn post_comment(
     store: &Store,
     guild_id: u32,
     name: &str,
-    content: &str,
+    content: &[u8],
 ) -> Result<u32, AccountError> {
     let id = i32::try_from(guild_id).map_err(|_| AccountError::NoSuchPlayer(guild_id))?;
-    let notice = content.as_bytes().first() == Some(&b'!');
+    let notice = content.first() == Some(&b'!');
     let row = sqlx::query(
         "INSERT INTO guild_comment (guild_id, name, notice, content) VALUES ($1, $2, $3, $4)          RETURNING id",
     )

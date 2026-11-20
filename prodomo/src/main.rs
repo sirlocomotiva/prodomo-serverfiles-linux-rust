@@ -4100,11 +4100,11 @@ async fn store_make_guild(
     name: &str,
     pid: u32,
 ) -> Result<u32, Option<String>> {
-    let grades: [(&str, u8); 15] = std::array::from_fn(|index| {
+    let grades: [(&[u8], u8); 15] = std::array::from_fn(|index| {
         if index == 0 {
-            ("Leader", 15)
+            (b"Leader".as_slice(), 15)
         } else {
-            ("...", 0)
+            (b"...".as_slice(), 0)
         }
     });
     match db::guilds::create_guild(&context.store, name, pid, &grades).await {
@@ -4244,7 +4244,7 @@ fn comment_lines(board: &[db::guilds::StoredComment]) -> Vec<GuildCommentLine> {
         .map(|comment| GuildCommentLine {
             id: comment.id,
             name: comment.name.as_bytes().to_vec(),
-            content: comment.content.as_bytes().to_vec(),
+            content: comment.content.clone(),
         })
         .collect()
 }
@@ -4380,7 +4380,7 @@ where
         .map(|comment| GuildCommentLine {
             id: comment.id,
             name: comment.name.as_bytes().to_vec(),
-            content: comment.content.as_bytes().to_vec(),
+            content: comment.content.clone(),
         })
         .collect();
     let packet = guild_comments_packet(&lines);
@@ -4555,7 +4555,6 @@ where
         return false;
     }
     let name = character.name.clone();
-    let text = String::from_utf8_lossy(&text).into_owned();
     if let Err(error) = db::guilds::post_comment(&context.store, guild_id, &name, &text).await {
         warn!(%addr, %error, "The comment could not be posted; closing");
         return false;
@@ -4572,7 +4571,7 @@ where
         .map(|comment| GuildCommentLine {
             id: comment.id,
             name: comment.name.as_bytes().to_vec(),
-            content: comment.content.as_bytes().to_vec(),
+            content: comment.content.clone(),
         })
         .collect();
     let committed = match context
@@ -7436,8 +7435,7 @@ where
         return false;
     };
     let name = character.name.clone();
-    let text = String::from_utf8_lossy(posted).into_owned();
-    if let Err(error) = db::guilds::post_comment(&context.store, guild_id, &name, &text).await {
+    if let Err(error) = db::guilds::post_comment(&context.store, guild_id, &name, posted).await {
         warn!(%addr, %error, "A quest comment could not be posted; closing");
         return false;
     }
@@ -7457,7 +7455,7 @@ where
         .map(|comment| GuildCommentLine {
             id: comment.id,
             name: comment.name.as_bytes().to_vec(),
-            content: comment.content.as_bytes().to_vec(),
+            content: comment.content.clone(),
         })
         .collect();
     let committed = match context

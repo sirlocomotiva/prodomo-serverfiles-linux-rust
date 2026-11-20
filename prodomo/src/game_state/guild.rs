@@ -649,8 +649,8 @@ pub enum GuildGradeSet {
     GradeName {
         /// The 1-based grade.
         grade: u8,
-        /// The judged name.
-        name: String,
+        /// The judged name (raw client bytes; ADR-0003).
+        name: Vec<u8>,
     },
     /// The grade's new auth (`ChangeGradeAuth`'s update, `G/guild.cpp:881-885`).
     GradeAuth {
@@ -1303,8 +1303,7 @@ impl GameState {
                 .filter(|grade| grade.guild_id == guild.id)
             {
                 if (1..=15).contains(&grade.grade) {
-                    grades[usize::from(grade.grade - 1)] =
-                        (grade.name.as_bytes().to_vec(), grade.auth);
+                    grades[usize::from(grade.grade - 1)] = (grade.name.clone(), grade.auth);
                 }
             }
             let mut members = BTreeMap::new();
@@ -2582,7 +2581,7 @@ impl GameState {
             guild_id: id,
             set: GuildGradeSet::GradeName {
                 grade,
-                name: String::from_utf8_lossy(name).into_owned(),
+                name: name.to_vec(),
             },
         }
     }
@@ -3195,7 +3194,7 @@ impl GameState {
             .collect();
         let fan = match set {
             GuildGradeSet::GradeName { grade, name } => {
-                let Some(fan) = self.commit_grade_name(*guild_id, *grade, name.as_bytes()) else {
+                let Some(fan) = self.commit_grade_name(*guild_id, *grade, name) else {
                     return empty;
                 };
                 fan
@@ -8715,9 +8714,9 @@ mod tests {
                 guild_id: GUILD_ID,
                 grade,
                 name: if grade == 1 {
-                    "Leader".to_owned()
+                    b"Leader".to_vec()
                 } else {
-                    "...".to_owned()
+                    b"...".to_vec()
                 },
                 auth: if grade == 1 { 15 } else { 0 },
             })
@@ -9422,7 +9421,7 @@ mod tests {
                 guild_id: GUILD_ID,
                 set: GuildGradeSet::GradeName {
                     grade: 15,
-                    name: "Veteran".to_owned(),
+                    name: b"Veteran".to_vec(),
                 },
             }
         );
@@ -9474,7 +9473,7 @@ mod tests {
                 guild_id: GUILD_ID,
                 set: GuildGradeSet::GradeName {
                     grade: 15,
-                    name: "Veterans".to_owned(),
+                    name: b"Veterans".to_vec(),
                 },
             }
         );
@@ -10449,9 +10448,9 @@ mod tests {
                     guild_id: id,
                     grade,
                     name: if grade == 1 {
-                        "Leader".to_owned()
+                        b"Leader".to_vec()
                     } else {
-                        "...".to_owned()
+                        b"...".to_vec()
                     },
                     auth: if grade == 1 { 15 } else { 0 },
                 })

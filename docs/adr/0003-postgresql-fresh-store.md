@@ -33,10 +33,9 @@ preference. It also means the schema is designed for the Rewrite rather than cop
 - A test run without `DATABASE_URL` proves no Parity inventory row: every scripted-client scenario
   returns at its first line and is counted as passed. A gate receipt names the `DATABASE_URL` run
   and its counts, or says that it did not run.
-- Drift from this decision, to be corrected by a new migration and never by editing an applied
-  one: `guild_comment.content` and `guild_grade.name` are `text` with `char_length` checks
-  (`db/migrations/0012_guild_comment.sql`, `0011_guild.sql`), where Free text is `bytea` with a
-  byte-length check.
+- Drift from this decision, closed in ledger 738 (Package C5, `db/migrations/0048_guild_free_text_bytea.sql`):
+  `guild_comment.content` and `guild_grade.name` were `text` with `char_length` checks
+  (`0012_guild_comment.sql`, `0011_guild.sql`) and are now `bytea` with `octet_length` checks.
 - `player_deleted.player` is `jsonb` holding the whole deleted row
   (`db/migrations/0003_character_select.sql`). That is an accepted exception: nothing reads it
   back, and typed columns would have to follow every later `player` migration.

@@ -58460,3 +58460,49 @@ pre-`BlueDragon_StateBattle` normal melee fallback on 2493; updated to test `+25
 through `WeakBreath`, 8× parallel clean).
 Run 2 passed 5,763/0. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
 of 2,332 rows (100% closed); 602 scenarios. No ADR changed.
+
+## 738. Package C5 (`guild_grade.name` and `guild_comment.content` `bytea`) and Package C8 (i686 GC width probe & `gc_inventory.rs` reconciliation)
+
+Closes **Package C5** and **Package C8** from `docs/STATUS.md`:
+
+- **Package C5 (`text` → `bytea` for the last two free-text columns, ADR-0003):**
+  - Added `db/migrations/0048_guild_free_text_bytea.sql` converting `guild_grade.name` and
+    `guild_comment.content` from `text` to `bytea` via `convert_to(..., 'UTF8')` with
+    `octet_length(name) <= 9` and `octet_length(content) BETWEEN 1 AND 50` checks (applied
+    migrations `0011_guild.sql` and `0012_guild_comment.sql` stay immutable).
+  - Updated `db/src/guilds.rs` (`StoredGrade::name`, `StoredComment::content`, `create_guild`,
+    `set_grade_name`, `post_comment`), `prodomo/src/game_state/guild.rs`
+    (`GuildGradeSet::GradeName`), and `prodomo/src/main.rs` (`store_make_guild`,
+    `guild_comment_post_step`, `store_quest_guild_comment`, `comment_lines`) to store and relay
+    raw client bytes with no `String::from_utf8_lossy` transcoding.
+  - Added DB test
+    `non_utf8_grade_names_and_comments_round_trip_byte_exact_and_enforce_byte_bounds` in
+    `db/tests/guilds.rs` proving raw non-UTF-8 bytes round-trip byte-exact and byte-length CHECK
+    constraints hold; updated raw SQL test fixtures in `prodomo/tests/parity.rs` to `bytea`
+    literals; updated `docs/adr/0003-postgresql-fresh-store.md`.
+- **Package C8 (i686 GC width probe & `gc_inventory.rs` reconciliation):**
+  - Added `.scratch/probes/738/gc_widths.cpp` (with `.scratch/probes/738/inc/` shims) compiling
+    verbatim `server/server/libthecore/typedef.h`, `common/prodomodefines.h`, `length.h`,
+    `item_length.h`, `tables.h`, and `game/packet.h` with `i686-linux-gnu-g++-12 -std=c++17
+    -static`: verified all 145 game-to-client record headers and dynamic element/sub-structs
+    against Rust codecs with **zero differences**. Positive controls: `ControlTwoLong == 8`,
+    `sizeof(long) == 4`, `sizeof(time_t) == 4`, `sizeof(QWORD) == 4`, `TPacketGCPhase == 2`,
+    `TPacketGCHandshake == 13`, `TPacketGCLoginFailure == 10`. Negative controls verified:
+    `-DNEGATIVE_CONTROL` fails compile (`2 == 3`) and host 64-bit `g++` fails compile
+    (`ControlTwoLong` `16 == 8`).
+  - Reconciled `protocol/src/gc_inventory.rs`: flipped `HEADER_GC_SYNC_POSITION` (`0x05`,
+    coded in `protocol/src/gc_position.rs`) from `false` to `true` (126 of 134 implemented, 8
+    missing; confirmed `0x5f` `HEADER_GC_REFINE_INFORMATION_OLD` has no send site and no codec,
+    while `0x77` `HEADER_GC_REFINE_INFORMATION_NEW` is already `true`). Added
+    `probed_i686_widths_match_every_rust_codec` pinning Rust codec constants against the i686
+    probe; updated `protocol/tests/cg_wiring.rs` and `.scratch/probes/README.md`.
+
+Gates (2026-11-20), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,765
+passed, 0 failed in 46 targets; with it 5,765 passed, 0 failed in 46 targets (476 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+Run 1 failed 34 guild scenarios in `prodomo/tests/parity.rs` whose raw SQL `INSERT INTO
+guild_grade` helpers still passed `text` literals `'Leader'` / `'...'` into the converted
+`bytea` column; updated all 13 raw SQL helpers to `bytea` literals.
+Run 2 passed 5,765/0. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`,
+of 2,332 rows (100% closed); 602 scenarios. ADR-0003 drift note marked closed.

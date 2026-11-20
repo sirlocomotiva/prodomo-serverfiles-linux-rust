@@ -2711,7 +2711,7 @@ mod tests {
                 (1..=15).map(|grade| db::guilds::StoredGrade {
                     guild_id: *id,
                     grade,
-                    name: "Leader".to_owned(),
+                    name: b"Leader".to_vec(),
                     auth: 15,
                 })
             })

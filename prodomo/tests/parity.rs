@@ -21587,7 +21587,7 @@ fn seed_war_pair(database: &ScratchDatabase) {
     sql(
         database,
         "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT g, grade, CASE WHEN \
-         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
          FROM (VALUES (1), (2)) guilds(g) CROSS JOIN generate_series(1, 15) grade",
     );
     sql(
@@ -21623,7 +21623,7 @@ fn a_master_builds_on_its_land_and_clears_it() {
     );
     sql(
         &database,
-        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN          grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 15) grade",
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN          grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 15) grade",
     );
     sql(
         &database,
@@ -27819,7 +27819,7 @@ fn the_guild_mans_score_chat_names_the_rank_and_ladder() {
     sql(
         &database,
         "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN \
-         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
          FROM generate_series(1, 15) grade",
     );
     sql(
@@ -32825,7 +32825,7 @@ fn a_gm_gresets_and_the_guild_faith_refills_quietly() {
     sql(
         &database,
         "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, CASE WHEN \
-         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
          FROM generate_series(1, 15) grade",
     );
     sql(
@@ -46843,7 +46843,7 @@ fn a_guild_master_claims_land_and_rebuilds_its_refinery() {
     );
     sql(
         &database,
-        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN          grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 15) grade",
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN          grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 15) grade",
     );
     sql(
         &database,
@@ -46994,7 +46994,7 @@ fn a_guild_master_buys_the_land_by_the_sellers_dialog() {
     sql(
         &database,
         "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN \
-         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
          FROM generate_series(1, 15) grade",
     );
     sql(
@@ -47122,7 +47122,7 @@ fn seed_meley_guild(database: &ScratchDatabase) {
     sql(
         database,
         "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN \
-         grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
+         grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END \
          FROM generate_series(1, 15) grade",
     );
     sql(
@@ -61265,7 +61265,7 @@ fn seed_melt_master(database: &ScratchDatabase) {
     );
     sql(
         database,
-        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN          grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 3) AS grade",
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN          grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END          FROM generate_series(1, 3) AS grade",
     );
     sql(
         database,
@@ -61575,7 +61575,7 @@ fn seed_tower_guild(database: &ScratchDatabase) {
     );
     sql(
         database,
-        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
     );
     sql(
         database,
@@ -61655,7 +61655,7 @@ fn seed_altar_guild(database: &ScratchDatabase) {
     );
     sql(
         database,
-        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
     );
     sql(
         database,
@@ -61850,7 +61850,7 @@ fn seed_crown_guild(database: &ScratchDatabase) {
     );
     sql(
         database,
-        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
+        "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 3) AS grade",
     );
     sql(
         database,
@@ -70698,7 +70698,7 @@ fn seed_guild_smith_fixture(database: &ScratchDatabase) {
         "INSERT INTO guild (id, name, master_pid, level, gold) \
          SELECT 7, 'MyGuild', id, 10, 1000 FROM player WHERE name = 'Alpha'",
         "INSERT INTO guild_grade (guild_id, grade, name, auth) \
-         SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, \
+         SELECT 7, grade, CASE WHEN grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, \
          CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 15) grade",
         "INSERT INTO guild_member (pid, guild_id, grade) \
          SELECT id, 7, 1 FROM player WHERE name = 'Alpha'",
@@ -71390,7 +71390,7 @@ fn a_standing_building_stamps_attr_object_and_blocks_overlap_until_knocked_down(
     sql(
         &database,
         "INSERT INTO guild_grade (guild_id, grade, name, auth) SELECT 1, grade, \
-         CASE WHEN grade = 1 THEN 'Leader' ELSE '...' END, \
+         CASE WHEN grade = 1 THEN 'Leader'::bytea ELSE '...'::bytea END, \
          CASE WHEN grade = 1 THEN 15 ELSE 0 END FROM generate_series(1, 15) grade",
     );
     sql(
