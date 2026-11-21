@@ -58799,3 +58799,38 @@ First-run failure before scenario fix: `a_summoning_monster_spawns_helpers_up_to
 (stunned at distance 0 before moving east); fixed in `prodomo/tests/parity.rs` and re-verified
 clean (5,797/0). Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`, 0 `codec`, of
 2,332 rows (100% closed); 608 scenarios. No ADR changed.
+
+## 745. Repository cleanup and workspace reorganization
+
+Reorganized the repository layout into a standard Rust workspace with a root `docker-compose.yml`
+and removed all `.scratch/` clutter and stale local artifacts:
+
+- **Workspace crates moved under `crates/`:**
+  - Moved all nine workspace crates (`protocol`, `common`, `net`, `db`, `gamedata`, `world`,
+    `quest`, `prodomo`, `parity`) into `crates/<crate>/` and updated `Cargo.toml` workspace
+    `members`.
+  - Updated repo-root-relative test/data paths across 108 `.rs` files in `crates/{common,gamedata,world,quest,prodomo,parity}` (one extra `../` level to reach `legacy/`, `config/`, `server/`, and `docs/parity/`, plus `crates/common/src/constants.rs` `file!()` assertion), while keeping sibling-crate paths (`../common/...`, `../../../db/tests/support/lease.rs`) and `crates/`-relative inventory scenario paths intact.
+- **Root `docker-compose.yml` and container build:**
+  - Renamed `compose.yaml` to `docker-compose.yml` at the repository root with Docker Compose
+    (`docker compose`) as the primary workflow alongside Podman Compose compatibility.
+  - Updated `Dockerfile` (`COPY crates crates`) and `.dockerignore` (`!crates`), verified with
+    `docker-compose` config validation and a fresh container image build (`prodomo:local`).
+- **Removed `.scratch/` directory:**
+  - Relocated `.scratch/parity/` → `docs/parity/`, `.scratch/migration/` → `docs/migration/`,
+    and `.scratch/probes/` → `tools/probes/`.
+  - Updated `docs/parity/tools/gen.py`, `docs/parity/spec.md`, `tools/probes/README.md`,
+    `tools/gates.sh` (`crates` allow scan, `podman`/`docker` auto-detect for `prodomo-pg18`),
+    `tools/mutate.py`, `.gitignore` (`/.tmp/` and `/tools/probes/**`), `config/prodomo.toml.example`,
+    `README.md`, `AGENTS.md`, `docs/STATUS.md`, `docs/PLAYTEST.md`, and `docs/agents/{domain,issue-tracker}.md`.
+  - Regenerated `docs/parity/*.md` via `PYTHONDONTWRITEBYTECODE=1 python3 docs/parity/tools/gen.py`.
+- **Local workspace cleanup:**
+  - Removed 10 stale detached-HEAD git worktrees under `.overlord/wt-*` (~27 GB) via
+    `git worktree remove --force` + `git worktree prune`, stale `.opencode/`, `__pycache__/`, and
+    untracked `probes/738/inc/` stubs.
+
+Gates (2026-11-21), `tools/gates.sh` with `DATABASE_URL=postgres://prodomo:...@127.0.0.1:55432/prodomo`,
+cargo 1.100.0 and rustc 1.100.0: fmt, build and Clippy clean; without `DATABASE_URL` 5,797
+passed, 0 failed in 46 targets; with it 5,797 passed, 0 failed in 46 targets (493 s); doc-tests
+and `cargo doc` clean; `temp-files` 0, `servers` 0, `scratch-dbs` 0, `cores` 0; `allows` 132.
+No test failed on the first run. Parity: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`,
+0 `codec`, of 2,332 rows (100% closed); 608 scenarios. No ADR changed.

@@ -5,14 +5,13 @@
 .codegraph
 
 # Scratch output and nested experiment clones: local only, never committed.
-# Everything else under .scratch/ is tracked.
-/.scratch/tmp/
+/.tmp/
 
-# A compiled probe: only the sources and the README of .scratch/probes/ are tracked.
-/.scratch/probes/**
-!/.scratch/probes/**/
-!/.scratch/probes/**/*.cpp
-!/.scratch/probes/README.md
+# A compiled probe: only the sources and the README of tools/probes/ are tracked.
+/tools/probes/**
+!/tools/probes/**/
+!/tools/probes/**/*.cpp
+!/tools/probes/README.md
 
 # The scratch commit-message drafts a session writes at the root: local only.
 /COMMIT_MSG_*.txt

@@ -1,0 +1,3569 @@
+//! Selecting a character, the loading burst, and entering the game.
+//!
+//! This module builds the records for the two transitions that take a descriptor from the
+//! select screen to a live character, and the verdicts for the two client records that ask
+//! for them. It holds no descriptor, no store and no world: the caller supplies the character
+//! the store read and the neighbourhood the world knows, and sends what comes back.
+//!
+//! | step | legacy handler | sends |
+//! |---|---|---|
+//! | `CG_CHARACTER_SELECT` (6) | `CInputLogin::CharacterSelect` (`G/input_login.cpp:265-306`) | nothing; asks for the load |
+//! | the load answer | `CInputDB::PlayerLoad` (`G/input_db.cpp:414-455`) | the loading burst |
+//! | `CG_ENTER_GAME` (10) | `CInputLogin::Entergame` (`G/input_login.cpp:562-790`) | the enter-game burst |
+//!
+//! # The two bursts, in legacy order
+//!
+//! Each burst is returned in the two halves its legacy handler writes in, because each handler
+//! changes the descriptor phase or takes a branch part-way through. Neither burst returns the
+//! `GC_PHASE` record: in both handlers that record is a `DESC::SetPhase` call, so the
+//! descriptor writes it when it moves the phase.
+//!
+//! Loading, from [`loading_burst`], as a [`LoadingBurst`]:
+//!
+//! 1. `GC_PHASE` (253) with `PHASE_LOADING` (4) &mdash; the caller's phase transition
+//! 2. `before_map_test`: `GC_ENTITY` (249), every other online character, then
+//!    `GC_MAIN_CHARACTER` (113), the 46-byte empire variant
+//! 3. &mdash; the `map_allow_find` test, which closes the descriptor on a map the Channel does
+//!    not host
+//! 4. `after_map_test`: one `GC_QUICKSLOT_ADD` (28) per non-empty quickslot, then
+//!    `GC_CHARACTER_GOLD` (224), `GC_CHARACTER_POINTS` (16), and `GC_SKILL_LEVEL` (76)
+//!
+//! Entering the game, from [`enter_game_burst`], as an [`EnterGameBurst`]:
+//!
+//! 1. `before_phase`: `GC_CHARACTER_ADD` (68) and `GC_CHAR_ADDITIONAL_INFO` (136) for the
+//!    entering character, then the same pair for every character already in view; then
+//!    `GC_NPC_POSITION` (115), only when the map has NPCs; then `GC_AFFECT_ADD` (126) for the
+//!    five-second revive-invisible affect
+//! 2. &mdash; `GC_PHASE` (253) with `PHASE_GAME` (5), the caller's phase transition
+//! 3. `after_phase`: `GC_PVP` (41), one per live duel; `GC_LAND_LIST` (130), only for a map
+//!    with guild land; then `GC_TIME` (106), `GC_CHANNEL` (121), and one `GC_CHAT` (4) line,
+//!    `letters_event 0`
+//!
+//! # Legacy records this burst does not send, and why
+//!
+//! Each of these is a reachability question rather than a missing codec. They are listed so a
+//! later ledger does not re-derive them.
+//!
+//! - `GC_HYBRIDCRYPT_SDB` (153), the package SDB, is a **loading** record, not an enter-game
+//!   one. `SendClientPackageSDBToLoadMap` writes only when the package crypt knows the map's
+//!   SDB stream, and `legacy/` has no `package_info.txt`, so legacy sends it for no map.
+//! - `BroadcastEventFlagOnLogin` sends one `GC_CHAT` per non-zero event flag (`worldboss`,
+//!   `xmas_snow`, `xmas_boom`, `xmas_tree`, `DayMode`, `newyear_boom`). The descriptor asks the
+//!   world for them and puts them at the front of the after-map-test half; with every flag 0, as
+//!   in a fresh process, none is sent.
+//! - `SendGreetMessage` sends one `GC_CHAT` per legacy DB `string` row named `GREET`. The
+//!   snapshot has no such row, so none is sent. A hard-coded welcome would be a Divergence.
+//! - The guild, party, messenger, marriage, premium, mount and horse-skill records belong to
+//!   systems the Rewrite has not ported; each belongs to its own ledger.
+//!
+//! # Where the Rewrite differs from legacy, and why
+//!
+//! - **The client-version check is not reproduced.** Legacy ends `Entergame` with
+//!   `g_bCheckClientVersion`, which `config.cpp:86-87` defaults to `true` against
+//!   `g_stClientVersion = "1215955205"`, and `legacy/config/ch1/core1/CONFIG` sets neither
+//!   `check_version_server` nor `check_version_value`. So every client whose client version
+//!   differs gets a notice chat and `DelayedDisconnect(0)`, an immediate close
+//!   (`G/input_login.cpp:743-771`). The `if (!d->GetClientVersion())` arm above it is dead
+//!   code: `GetClientVersion()` returns `std::string::c_str()`, which is never null, so the
+//!   ten-second branch cannot be taken either. That is a Defect and a Divergence: the Rewrite
+//!   lets a client into the game and records the client version it saw.
+//! - **The two uninitialised point slots are not reproduced.** Legacy's `PointsPacket`
+//!   declares `TPacketGCPoints pack;` on the stack and never writes slot 0 (`POINT_NONE`) or
+//!   slot 2 (`POINT_VOICE`), so 16 bytes of stack garbage reach the client
+//!   (`G/char.cpp:2033-2086`). The Rewrite writes every one of the 255 slots, with
+//!   `POINT_VOICE` holding the character's stored voice. That is a Defect.
+//! - **The select index is checked before the slot is read.** Legacy reads
+//!   `c_r.players[pinfo->index].dwID` before it tests `pinfo->index >= PLAYER_PER_ACCOUNT`
+//!   (`G/input_login.cpp:265-274`), an out-of-bounds read a client can trigger with one byte.
+//!   The Rewrite tests the index first; see [`judge_select`].
+//! - **A position the map cannot take is not a disconnect.** Legacy shows the character at
+//!   the first movable point around its saved position, and logs and falls back to the empire
+//!   recall point when none is (`G/input_login.cpp:572-590`); the Rewrite does the same
+//!   ([`entering_position`]). The fallback also takes the recall point's `z`, which
+//!   `LoadMapRegion` never sets (`G/sectree_manager.cpp:347-386`), so legacy sends and saves
+//!   an indeterminate height (`G/char.cpp:1081`, `:1563`); the Rewrite sends and saves 0. Where
+//!   the map has no recall point, or its recall point has no sectree on the map, legacy's
+//!   `Show` finds no sectree and returns before placing the character
+//!   (`G/char.cpp:1847-1854`), so the client never gets its own insert (a Defect). The Rewrite
+//!   keeps the saved position, where legacy's character stays.
+
+use common::levels;
+use common::point_slot as point;
+use db::players::{Character, PLAYER_SLOTS};
+use gamedata::map_atlas::MapAtlas;
+use gamedata::mob_proto::{CHAR_TYPE_NPC, CHAR_TYPE_PC};
+use protocol::gc_actors::{
+    GcCharacterAdd, GcCharacterAdditionalInfo, GcMainCharacter2Empire, GcMainCharacter3Bgm,
+    GcMainCharacter4BgmVol, NAME_LEN,
+};
+use protocol::gc_chat::{GcChat, CHAT_TYPE_COMMAND};
+use protocol::gc_entity::{GcEntity, GcEntityInfo, ENTITY_PART_NUM};
+use protocol::gc_fields::{GcGold, GcPoints, GC_POINT_SLOT_COUNT};
+use protocol::gc_inventory::{HEADER_GC_CHANNEL, HEADER_GC_PLAYER_POINT_CHANGE, HEADER_GC_TIME};
+use protocol::gc_nested::{
+    GcAffectAdd, GcAffectElement, GcPointChange, GcSkill, GcSkillLevelNew,
+    GC_POINT_CHANGE_WIRE_SIZE, GC_SKILL_SLOT_COUNT,
+};
+use protocol::gc_npc_position::{GcNpcPosition, GcNpcPositionEntry};
+use protocol::gc_small::GcHeaderAndByte;
+use protocol::gc_vid::GcHeaderAndDword;
+use world::cells::MapCells;
+use world::character::{PointRecord, Points, PointsRow};
+use world::npc::{MapNpcs, Npc, NpcPosition};
+
+/// The legacy `PHASE_LOADING` byte (`EPhase`, `G/packet.h:796`).
+pub const PHASE_LOADING: u8 = 4;
+
+/// The legacy `PHASE_GAME` byte (`EPhase`, `G/packet.h:797`).
+pub const PHASE_GAME: u8 = 5;
+
+/// The legacy `PHASE_DEAD` byte (`EPhase`, `G/packet.h:798`), which `Dead` sends a player.
+pub const PHASE_DEAD: u8 = 6;
+
+/// `AffectType` 215 (`G/affect.h:40`), the affect `ReviveInvisible` adds.
+pub const AFFECT_REVIVE_INVISIBLE: u32 = 215;
+
+/// `AFFECT_INVISIBILITY` (`G/affect.h:26`): the affect `do_invisibility` adds
+/// and removes.
+pub const AFFECT_INVISIBILITY: u32 = 203;
+
+/// `AFFECT_MOV_SPEED` (`G/affect.h:23`): the potion affect the 20201/20217
+/// extended uses refuse against.
+pub const AFFECT_MOV_SPEED: u32 = 200;
+
+/// `AFFECT_ATT_SPEED` (`G/affect.h:24`): the potion affect the 20202 extended
+/// use refuses against.
+pub const AFFECT_ATT_SPEED: u32 = 201;
+
+/// `AFFECT_ATT_GRADE` (`G/affect.h:25`): the green-potion attack affect.
+pub const AFFECT_ATT_GRADE: u32 = 202;
+
+/// `AFFECT_STR` (`G/affect.h:27`): the strength potion's affect.
+pub const AFFECT_STR: u32 = 204;
+
+/// `AFFECT_DEX` (`G/affect.h:28`): the dexterity potion's affect.
+pub const AFFECT_DEX: u32 = 205;
+
+/// `AFFECT_CON` (`G/affect.h:29`): the constitution potion's affect.
+pub const AFFECT_CON: u32 = 206;
+
+/// `AFFECT_INT` (`G/affect.h:30`): the intelligence potion's affect.
+pub const AFFECT_INT: u32 = 207;
+
+/// `AFFECT_FISH_MIND_PILL` (`G/affect.h:31`): 208, the eighth after `AFFECT_MOV_SPEED` (200).
+pub const AFFECT_FISH_MIND_PILL: u32 = 208;
+
+/// `AFFECT_CAST_SPEED` (`G/affect.h:42`): the casting-speed potion's affect.
+pub const AFFECT_CAST_SPEED: u32 = 217;
+
+/// `AFFECT_DEF_GRADE` (`G/affect.h:55`): the defence potion's affect.
+pub const AFFECT_DEF_GRADE: u32 = 226;
+
+/// The kinds `CHARACTER::RemoveGoodAffect` removes (`G/char_affect.cpp:892-916`): the six
+/// potion affects and `CHINA_FIREWORK`, then the fourteen skill affects.
+pub const GOOD_AFFECT_KINDS: [u32; 21] = [
+    200, // `AFFECT_MOV_SPEED` (`G/affect.h:23`)
+    201, // `AFFECT_ATT_SPEED`
+    204, // `AFFECT_STR`
+    205, // `AFFECT_DEX`
+    206, // `AFFECT_CON`
+    207, // `AFFECT_INT`
+    224, // `AFFECT_CHINA_FIREWORK`
+    3,   // `SKILL_JEONGWI` (`G/skill.h:55`)
+    4,   // `SKILL_GEOMKYUNG`
+    19,  // `SKILL_CHUNKEON`
+    34,  // `SKILL_EUNHYUNG`
+    49,  // `SKILL_GYEONGGONG`
+    63,  // `SKILL_GWIGEOM`
+    64,  // `SKILL_TERROR`
+    65,  // `SKILL_JUMAGAP`
+    79,  // `SKILL_MANASHILED`
+    94,  // `SKILL_HOSIN`
+    95,  // `SKILL_REFLECT`
+    110, // `SKILL_KWAESOK`
+    111, // `SKILL_JEUNGRYEOK`
+    97,  // `SKILL_GICHEON`
+];
+
+/// `AFFECT_POISON` (`G/affect.h:33`): `AttackedByPoison`'s affect.
+pub const AFFECT_POISON: u32 = 209;
+
+/// `AFFECT_DRAGON_SOUL_QUALIFIED` (`G/affect.h:105`): the affect
+/// `DragonSoul_GiveQualification` adds and `DragonSoul_IsQualified` reads.
+pub const AFFECT_DRAGON_SOUL_QUALIFIED: u32 = 540;
+
+/// `AFFECT_DRAGON_SOUL_DECK_0` (`G/affect.h:106`): the affect
+/// `DragonSoul_ActivateDeck` adds for deck 0, with the deck-1 one after it.
+pub const AFFECT_DRAGON_SOUL_DECK_0: u32 = 541;
+
+/// `AFFECT_STUN` (`G/affect.h:34`): `NormalAttackAffect`'s stun.
+pub const AFFECT_STUN: u32 = 210;
+
+/// `AFFECT_BOW_DISTANCE` (`G/affect.h:54`): `AttractRanger`'s range cut.
+pub const AFFECT_BOW_DISTANCE: u32 = 225;
+
+/// `AFFECT_SLOW` (`G/affect.h:35`): `NormalAttackAffect`'s slow.
+pub const AFFECT_SLOW: u32 = 211;
+
+/// `AFFECT_POLYMORPH` (`G/affect.h:46`): the affect the polymorph ball and
+/// `Polymorph()` lay, whose `POINT_POLYMORPH` value is the morphed-into vnum.
+pub const AFFECT_POLYMORPH: u32 = 220;
+
+/// `AFFECT_MOUNT` (`G/affect.h:47`): the affect the mount lays, which `/unmount`
+/// removes.
+pub const AFFECT_MOUNT: u32 = 221;
+
+/// `AFFECT_WAR_FLAG` (`G/affect.h:49`): the affect a war's flag gives its carrier, and
+/// the one its speed comes with.
+pub const AFFECT_WAR_FLAG: u32 = 222;
+
+/// `AFFECT_BLOCK_CHAT` (`G/affect.h:51`): the silence `do_block_chat` lays on.
+pub const AFFECT_BLOCK_CHAT: u32 = 223;
+
+/// `AFFECT_PREMIUM_START` (`G/affect.h:57`): the first premium affect, which
+/// `ClearAffect` keeps with its whole 500-600 band.
+pub const AFFECT_PREMIUM_START: u32 = 500;
+
+/// `AFFECT_PREMIUM_END` (`G/affect.h:71`): the last premium affect.
+pub const AFFECT_PREMIUM_END: u32 = 509;
+
+/// `AFFECT_PREMIUM_PRIVATE_SHOP` (`G/affect.h:66`): the private-shop premium
+/// affect the 72355 use lays, synced to the account expiry on the affect tick.
+pub const AFFECT_PREMIUM_PRIVATE_SHOP: u32 = 507;
+
+/// `AFFECT_PREMIUM_PLAYERS_01` (`G/affect.h:150`): the premium-players max-HP affect.
+pub const AFFECT_PREMIUM_PLAYERS_01: u32 = 549;
+
+/// `AFFECT_PREMIUM_PLAYERS_02` (`G/affect.h:151`): the premium-players monster-bonus affect.
+pub const AFFECT_PREMIUM_PLAYERS_02: u32 = 550;
+
+/// `AFFECT_PREMIUM_PLAYERS_03` (`G/affect.h:152`): the premium-players boss-bonus affect.
+pub const AFFECT_PREMIUM_PLAYERS_03: u32 = 551;
+
+/// `AFFECT_PREMIUM_PLAYERS_04` (`G/affect.h:153`): the premium-players metin-bonus affect.
+pub const AFFECT_PREMIUM_PLAYERS_04: u32 = 552;
+
+/// `AFFECT_HAIR` (`G/affect.h:78`): the hair affect `affect.add_hair` grants and
+/// `/hair` reads.
+pub const AFFECT_HAIR: u32 = 514;
+
+/// `AFFECT_BLEND` (`G/affect.h:97`): the affect a plain blend use lays.
+pub const AFFECT_BLEND: u32 = 531;
+
+/// `AFFECT_MALL` (`G/affect.h:73`): the mall affect an extended blend use refuses
+/// against.
+pub const AFFECT_MALL: u32 = 510;
+
+/// `AFFECT_NOG_ABILITY` (`G/affect.h:120`): the Nog pocket's three rows.
+pub const AFFECT_NOG_ABILITY: u32 = 302;
+
+/// `AFFECT_NO_DEATH_PENALTY` (`G/affect.h:74`): death loses nothing while held.
+pub const AFFECT_NO_DEATH_PENALTY: u32 = 511;
+
+/// `AFFECT_SKILL_BOOK_BONUS` (`G/affect.h:75`): the book-read bonus affect.
+pub const AFFECT_SKILL_BOOK_BONUS: u32 = 512;
+
+/// `AFFECT_SKILL_NO_BOOK_DELAY` (`G/affect.h:76`): the book-delay skip affect.
+pub const AFFECT_SKILL_NO_BOOK_DELAY: u32 = 513;
+
+/// `AFFECT_EXP_BONUS_EURO_FREE` (`G/affect.h:80`): the free-experience affect a
+/// blend use refuses against.
+pub const AFFECT_EXP_BONUS_EURO_FREE: u32 = 516;
+
+/// `AFFECT_BLEND_POTION_1` (`G/affect.h:125`): the first extended-blend affect,
+/// laid by 50821 and 20210.
+pub const AFFECT_BLEND_POTION_1: u32 = 304;
+
+/// `AFFECT_BLEND_POTION_2` (`G/affect.h:126`): laid by 50822 and 20209.
+pub const AFFECT_BLEND_POTION_2: u32 = 305;
+
+/// `AFFECT_BLEND_POTION_3` (`G/affect.h:127`): laid by 50823, 20214, 50825 and
+/// 20211 (the plain arm reuses 3 for the 50825 pair).
+pub const AFFECT_BLEND_POTION_3: u32 = 306;
+
+/// `AFFECT_BLEND_POTION_4` (`G/affect.h:128`): laid by 50824 and 20213.
+pub const AFFECT_BLEND_POTION_4: u32 = 307;
+
+/// `AFFECT_BLEND_POTION_5` (`G/affect.h:129`): laid by the 50825 pair on the
+/// extended arm only.
+pub const AFFECT_BLEND_POTION_5: u32 = 308;
+
+/// `AFFECT_BLEND_POTION_6` (`G/affect.h:130`): laid by 50826 and 20212.
+pub const AFFECT_BLEND_POTION_6: u32 = 309;
+
+/// `AFFECT_BLEND_POTION_7` (`G/affect.h:131`): laid by 20215.
+pub const AFFECT_BLEND_POTION_7: u32 = 310;
+
+/// `AFFECT_ENERGY` (`G/affect.h:132`): laid by 51002 and 20216.
+pub const AFFECT_ENERGY: u32 = 311;
+
+/// `AFFECT_DRAGON_GOD_1` (`G/affect.h:133`): laid by 20205.
+pub const AFFECT_DRAGON_GOD_1: u32 = 312;
+
+/// `AFFECT_DRAGON_GOD_2` (`G/affect.h:134`): laid by 20206.
+pub const AFFECT_DRAGON_GOD_2: u32 = 313;
+
+/// `AFFECT_DRAGON_GOD_3` (`G/affect.h:135`): laid by 20207.
+pub const AFFECT_DRAGON_GOD_3: u32 = 314;
+
+/// `AFFECT_DRAGON_GOD_4` (`G/affect.h:136`): laid by 20208.
+pub const AFFECT_DRAGON_GOD_4: u32 = 315;
+
+/// `AFFECT_CRITICAL` (`G/affect.h:137`): laid by 20203.
+pub const AFFECT_CRITICAL: u32 = 316;
+
+/// `AFFECT_PENETRATE` (`G/affect.h:138`): laid by 20204.
+pub const AFFECT_PENETRATE: u32 = 317;
+
+/// `AFFECT_ATTACK_SPEED` (`G/affect.h:139`): laid by 20202.
+pub const AFFECT_ATTACK_SPEED: u32 = 318;
+
+/// `AFFECT_MOVE_SPEED` (`G/affect.h:140`): laid by 20201.
+pub const AFFECT_MOVE_SPEED: u32 = 319;
+
+/// `AFFECT_WIND_SHOES` (`G/affect.h:141`): laid by 20217.
+pub const AFFECT_WIND_SHOES: u32 = 320;
+
+/// `AFFECT_HORSE_NAME` (`G/affect.h:99`): the affect `horse.set_name` lays for the name's
+/// month (`G/questlua_horse.cpp:252-256`), which `HorseNameManager::Validate` watches
+/// (`G/horsename_manager.cpp:58-75`). 531: the 519-to-530 cube row and the blend fill the
+/// gap past `AFFECT_UNIQUE_ABILITY` (518).
+pub const AFFECT_HORSE_NAME: u32 = 531;
+
+/// `AFFECT_MOUNT_BONUS` (`G/affect.h:100`): the bonus `pc.mount_bonus` lays beside a
+/// mount, the member after [`AFFECT_HORSE_NAME`].
+pub const AFFECT_MOUNT_BONUS: u32 = 532;
+
+/// `SKILL_MUYEONG` (`G/skill.h:100`): the one saved affect `LoadAffect` never
+/// restores (`G/char_affect.cpp:598-599`).
+pub const SKILL_MUYEONG: u32 = 78;
+
+/// `POINT_MAX_NUM` (`common/length.h:82`): a saved affect whose point reaches it
+/// is not restored (`G/char_affect.cpp:609-614`).
+pub const POINT_MAX_NUM: usize = 255;
+
+/// `AFFECT_AUTO_HP_RECOVERY` (`G/affect.h:102`): a saved row restores only with
+/// the item its flag names (`G/char_affect.cpp:600-608`).
+pub const AFFECT_AUTO_HP_RECOVERY: u32 = 534;
+
+/// `AFFECT_AUTO_SP_RECOVERY` (`G/affect.h:103`): as its HP sibling.
+pub const AFFECT_AUTO_SP_RECOVERY: u32 = 535;
+
+/// `AFFECT_BLEND_POTION_1` (`G/affect.h:129`): the first renewal blend affect
+/// `ClearAffect` keeps.
+pub const AFFECT_BLEND_POTION_FIRST: u32 = 304;
+
+/// `AFFECT_WIND_SHOES` (`G/affect.h:143`): the last renewal blend affect
+/// `ClearAffect` keeps.
+pub const AFFECT_BLEND_POTION_LAST: u32 = 320;
+
+/// `AFFECT_SUNGMA_STR` (`G/affect.h:172`): the first conqueror affect
+/// `ClearAffect` keeps.
+pub const AFFECT_SUNGMA_FIRST: u32 = 623;
+
+/// `AFFECT_SUNGMA_IMMUNE` (`G/affect.h:175`): past the last conqueror affect
+/// `ClearAffect` keeps.
+pub const AFFECT_SUNGMA_END: u32 = 626;
+
+/// `AFFECT_GUILD_BONUS_1` (`G/affect.h:194`): the first guild bonus
+/// `ClearAffect` keeps.
+pub const AFFECT_GUILD_BONUS_FIRST: u32 = 801;
+
+/// `AFFECT_GUILD_BONUS_4` (`G/affect.h:197`): the last guild bonus
+/// `ClearAffect` keeps.
+pub const AFFECT_GUILD_BONUS_LAST: u32 = 804;
+
+/// `AFFECT_MULTI_FARM_PREMIUM` (`G/affect.h:184`): the multi-farm row
+/// `ClearAffect` keeps.
+pub const AFFECT_MULTI_FARM_PREMIUM: u32 = 998;
+
+/// `AFFECT_WORLD_BOSS_REWARD` (`G/affect.h:169`): the world-boss rows
+/// `ClearAffect` keeps, with the daily one after it.
+pub const AFFECT_WORLD_BOSS_REWARD: u32 = 609;
+
+/// `AFFECT_PICKUP_ENABLE` (`G/affect.h:178`): the two realtime pickup rows
+/// `ClearAffect` keeps, with the deactive one after it.
+pub const AFFECT_PICKUP_ENABLE: u32 = 810;
+
+/// `AFFECT_PLAYER_TOP_1` (`G/affect.h:145`): the first of the three top-player
+/// affects `SetTopPlayerEffect` grants at 120.
+pub const AFFECT_PLAYER_TOP_1: u32 = 321;
+
+/// `AFFECT_PLAYER_TOP_2` (`G/affect.h:146`).
+pub const AFFECT_PLAYER_TOP_2: u32 = 322;
+
+/// `AFFECT_PLAYER_TOP_3` (`G/affect.h:147`).
+pub const AFFECT_PLAYER_TOP_3: u32 = 323;
+
+/// `AFF_PLAYER_TOP_1` (`G/affect.h:262`), numbered from 1: the bit the first
+/// top-player affect sets on its carrier.
+pub const AFF_PLAYER_TOP_1: u32 = 44;
+
+/// `AFF_PLAYER_TOP_2` (`G/affect.h:263`), numbered from 1.
+pub const AFF_PLAYER_TOP_2: u32 = 45;
+
+/// `AFF_PLAYER_TOP_3` (`G/affect.h:264`), numbered from 1.
+pub const AFF_PLAYER_TOP_3: u32 = 46;
+
+/// `AFFECT_STATUE` (`G/affect.h:187`): Meley's statues carry one row, whose flag
+/// climbs `AFF_STATUE1` to `AFF_STATUE4` through the steps.
+pub const AFFECT_STATUE: u32 = 700;
+
+/// `AFF_STATUE1` (`G/affect.h:265`), numbered from 1.
+pub const AFF_STATUE1: u32 = 47;
+
+/// `AFF_STATUE2` (`G/affect.h:266`), numbered from 1.
+pub const AFF_STATUE2: u32 = 48;
+
+/// `AFF_STATUE3` (`G/affect.h:267`), numbered from 1.
+pub const AFF_STATUE3: u32 = 49;
+
+/// `AFF_STATUE4` (`G/affect.h:268`), numbered from 1.
+pub const AFF_STATUE4: u32 = 50;
+
+/// `INFINITE_AFFECT_DURATION` (`G/affect.h:289`) as the 32-bit `long` the legacy's
+/// `AddAffect` takes: sixty years of seconds, which the word holds as 1,471,228,928.
+pub const INFINITE_AFFECT_DURATION: i32 = 1_471_228_928;
+
+/// `AFF_WAR_FLAG1` (`G/affect.h:251`), numbered from 1: the bit the first team's flag
+/// sets on its carrier.
+pub const AFF_WAR_FLAG1: u32 = 37;
+
+/// `AFF_WAR_FLAG2` (`G/affect.h:252`), numbered from 1: the bit the other team's flag
+/// sets on its carrier.
+pub const AFF_WAR_FLAG2: u32 = 38;
+
+/// `AFF_WAR_FLAG3` (`G/affect.h:253`), numbered from 1: the bit the third flag sets on
+/// its carrier. The legacy's flag wars own two flags, and the third bit is only ever
+/// read (`G/char_state.cpp:62`).
+pub const AFF_WAR_FLAG3: u32 = 39;
+
+/// `AFF_INVISIBILITY` (`G/affect.h:210`), numbered from 1 as
+/// `game_state::affect::flags_of` reads it.
+pub const AFF_INVISIBILITY: u32 = 3;
+
+/// `AFF_POISON` (`G/affect.h:214`), numbered from 1 as `game_state::affect::flags_of` reads it.
+pub const AFF_POISON: u32 = 5;
+
+/// `AFF_SLOW` (`G/affect.h:215`), numbered from 1.
+pub const AFF_SLOW: u32 = 6;
+
+/// `AFF_STUN` (`G/affect.h:216`), numbered from 1.
+pub const AFF_STUN: u32 = 7;
+
+/// `AFF_MOV_SPEED_POTION` (`G/affect.h:225`), numbered from 1.
+pub const AFF_MOV_SPEED_POTION: u32 = 13;
+
+/// `AFF_ATT_SPEED_POTION` (`G/affect.h:226`), numbered from 1.
+pub const AFF_ATT_SPEED_POTION: u32 = 14;
+
+/// `AFF_FISH_MIND` (`G/affect.h:228`), numbered from 1.
+pub const AFF_FISH_MIND: u32 = 14;
+
+/// `AFF_BITS_MAX` (`G/affect.h:275`): 43 plain bits, 3 top-player bits, 4 statue bits
+/// and the laser bit, all gated on (`G/prodomodefines.h:38`, `:43-50`, `:125`).
+pub const AFF_BITS_MAX: u32 = 51;
+
+/// `AFF_SPAWN` (`G/affect.h:212`), numbered from 1: the bit a spawn-motion `Show` and
+/// `SetPolymorph` set (`G/char.cpp:1887`, `:7701`) and nothing resets (D5).
+pub const AFF_SPAWN: u32 = 3;
+
+/// `AFF_POLYMORPH` (`G/affect.h:250`), numbered from 1: the bit the polymorph
+/// affect holds.
+pub const AFF_POLYMORPH: u32 = 36;
+/// `AFF_JEONGWIHON` (`G/affect.h:230`), numbered from 1 (230f).
+pub const AFF_JEONGWIHON: u32 = 15;
+/// `AFF_GEOMGYEONG` (`G/affect.h:231`), numbered from 1 (230f).
+pub const AFF_GEOMGYEONG: u32 = 16;
+/// `AFF_CHEONGEUN` (`G/affect.h:232`), numbered from 1 (230f).
+pub const AFF_CHEONGEUN: u32 = 17;
+/// `AFF_GYEONGGONG` (`G/affect.h:233`), numbered from 1 (230f).
+pub const AFF_GYEONGGONG: u32 = 18;
+/// `AFF_EUNHYUNG` (`G/affect.h:234`), numbered from 1 (230f).
+pub const AFF_EUNHYUNG: u32 = 19;
+/// `AFF_GWIGUM` (`G/affect.h:235`), numbered from 1 (230f).
+pub const AFF_GWIGUM: u32 = 20;
+/// `AFF_TERROR` (`G/affect.h:236`), numbered from 1 (230f).
+pub const AFF_TERROR: u32 = 21;
+/// `AFF_JUMAGAP` (`G/affect.h:237`), numbered from 1 (230f).
+pub const AFF_JUMAGAP: u32 = 22;
+/// `AFF_MANASHIELD` (`G/affect.h:241`), numbered from 1 (230f).
+pub const AFF_MANASHIELD: u32 = 26;
+/// `AFF_PABEOP` (`G/affect.h:254`), numbered from 1 (230f).
+pub const AFF_PABEOP: u32 = 33;
+/// `AFF_HOSIN` (`G/affect.h:238`), numbered from 1 (520).
+pub const AFF_HOSIN: u32 = 23;
+/// `AFF_BOHO` (`G/affect.h:239`), numbered from 1 (520).
+pub const AFF_BOHO: u32 = 24;
+/// `AFF_KWAESOK` (`G/affect.h:240`), numbered from 1 (520).
+pub const AFF_KWAESOK: u32 = 25;
+/// `AFF_GICHEON` (`G/affect.h:245`), numbered from 1 (520).
+pub const AFF_GICHEON: u32 = 30;
+/// `AFF_JEUNGRYEOK` (`G/affect.h:246`), numbered from 1 (520).
+pub const AFF_JEUNGRYEOK: u32 = 31;
+
+/// `POISON_LENGTH + 1` (`G/char.h:78`, `G/char_resist.cpp:205`): the poison's ticks.
+pub const POISON_TICKS: i32 = 31;
+
+/// `NormalAttackAffect`'s stun ticks on a player (`G/battle.cpp:755-756`): 2, since no
+/// PC-on-monster arm lengthens it.
+pub const STUN_TICKS: i32 = 2;
+
+/// `NormalAttackAffect`'s stun ticks on a non-player of a player's hit (`G/battle.cpp:752-753`).
+pub const STUN_TICKS_NPC: i32 = 4;
+
+/// `poison_damage_rate` (`G/char_resist.cpp:4-7`): the poison tick's per-mille of the
+/// maximum by mob rank, PAWN to KING.
+pub const POISON_DAMAGE_RATE: [i32; 6] = [80, 50, 40, 30, 25, 1];
+
+/// `NormalAttackAffect`'s slow ticks (`G/battle.cpp:757`).
+pub const SLOW_TICKS: i32 = 20;
+
+/// `NormalAttackAffect`'s slow, `MOV_SPEED -30` (`G/battle.cpp:757`).
+pub const SLOW_MOV_SPEED: i32 = -30;
+
+/// `AFFECT_FLAG` 28 (`G/affect.h:243`), the flag that affect carries.
+pub const AFF_REVIVE_INVISIBLE: u32 = 28;
+
+/// The seconds `Entergame` gives the revive-invisible affect.
+pub const REVIVE_INVISIBLE_SECONDS: i32 = 5;
+
+/// The chat line `SEventLetters` sends at the end of `Entergame` for a character that
+/// is not in the event (`G/input_login.cpp:69-82`): the `letters_event` flag is 0.
+pub const LETTERS_EVENT_CHAT: &[u8] = b"letters_event 0";
+
+/// The chat line `SEventLetters` sends for a character that is in the event: the
+/// `letters_event` flag is not 0.
+pub const LETTERS_EVENT_ON_CHAT: &[u8] = b"letters_event 1";
+
+/// The `BroadcastEventFlagOnLogin` lines (`G/questmanager.cpp:1701-1744`) as `GC_CHAT`
+/// command records, one frame each, for a character of `empire`. A text longer than the
+/// chat limit is skipped: every text the world builds is a short name and a number.
+#[must_use]
+pub fn event_flag_lines(empire: u8, lines: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    lines
+        .iter()
+        .filter_map(|text| GcChat::notice(CHAT_TYPE_COMMAND, empire, text).ok())
+        .map(|mut line| encoded(&mut line, "an event flag line"))
+        .collect()
+}
+
+/// The rotation a player's body enters with: `GetRotation()` is 0 until the first move turns it
+/// (`SetRotation` in `Sync` and in the move handler, `G/char.cpp:3413`, `G/input_main.cpp:1876`).
+/// `EncodeInsertPacket` writes the live rotation (`G/char.cpp:1078`).
+pub const IDLE_ANGLE_BITS: u32 = 0;
+
+/// The `bMovingSpeed` and `bAttackSpeed` a character has with no affect on it:
+/// `SetPoint(POINT_MOV_SPEED, 100)` and `SetPoint(POINT_ATT_SPEED, 100)` plus the haste
+/// bonus, which is 0 with no party (`G/char.cpp:2969-2972`).
+///
+/// Every insert record reads its speeds from the character's limited points; these are what
+/// those points give a character with no affect and no item bonus.
+pub const BASE_SPEED: u8 = 100;
+
+/// `PK_MODE_PEACE` (`EPKModes`, `G/char.h:348-356`), the mode `CHARACTER::Initialize` gives
+/// every character (`G/char.cpp:323`).
+pub const PK_MODE_PEACE: u8 = 0;
+
+/// `PK_MODE_REVENGE` (`EPKModes`, `G/char.h:348-356`): `/pkmode 1` lets a wronged
+/// player strike its wrongdoer (`G/pvp.cpp:476-491`).
+pub const PK_MODE_REVENGE: u8 = 1;
+
+/// `PK_MODE_FREE` (`EPKModes`, `G/char.h:348-356`), the mode `CHARACTER::SetProto` gives every
+/// mob (`G/char.cpp:2474`).
+pub const PK_MODE_FREE: u8 = 2;
+
+/// `PK_MODE_PROTECT` (`EPKModes`, `G/char.h:348-356`), the mode of a player below the PK protect
+/// level.
+pub const PK_MODE_PROTECT: u8 = 3;
+
+/// `PK_MODE_GUILD` (`EPKModes`, `G/char.h:348-356`), the mode `/pkmode 4` asks for:
+/// guildless callers fall back to `PK_MODE_FREE`, and every caller on Meley's map
+/// is forced into it (`G/char_battle.cpp:3604-3610`).
+pub const PK_MODE_GUILD: u8 = 4;
+
+/// `PK_MODE_MAX_NUM` (`EPKModes`, `G/char.h:348-356`): `/pkmode` refuses the line
+/// at and above it.
+pub const PK_MODE_MAX_NUM: u8 = 5;
+
+/// The PK mode a loaded player has: `SetPlayerProto` sets `PK_MODE_PROTECT` when its level is
+/// below `PK_PROTECT_LEVEL`, through `SetLevel` and again after it (`G/char.cpp:2211-2222`,
+/// `:2378-2379`), and leaves `Initialize`'s `PK_MODE_PEACE` otherwise. Legacy also protects
+/// every character above `GM_PLAYER` (`:2362-2375`, compiled in by `ENABLE_GM_FLAG_IF_TEST_SERVER`
+/// at `:2231`, and `SetLevel`'s `GetGMLevel() != GM_PLAYER` arm); every character is `GM_PLAYER`
+/// here until the GM audit, so that rule gives nothing yet.
+#[must_use]
+pub const fn pk_mode(level: u8, protect_level: u8) -> u8 {
+    if level < protect_level {
+        PK_MODE_PROTECT
+    } else {
+        PK_MODE_PEACE
+    }
+}
+
+/// What the descriptor should do with a `CG_CHARACTER_SELECT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectVerdict {
+    /// The descriptor holds no account table: legacy sends nothing and does not close.
+    Ignore,
+    /// The slot holds no character: legacy answers `SetPhase(PHASE_CLOSE)`.
+    Close,
+    /// The account holds a character in that slot: load this one.
+    Load {
+        /// The character ID to load.
+        player: u32,
+    },
+}
+
+/// Judge a `CG_CHARACTER_SELECT` (`G/input_login.cpp:265-306`).
+///
+/// # Where this differs from legacy
+///
+/// Legacy's first test is `c_r.players[pinfo->index].dwID == 0`, which reads the slot array
+/// *before* it checks `pinfo->index >= PLAYER_PER_ACCOUNT` one line later. A client that sends
+/// an index of 4 or more makes the server read past the end of a four-element array. That is a
+/// Defect; here the index is range-checked first, so an index past the last slot is
+/// [`SelectVerdict::Ignore`] rather than a close or a load.
+#[must_use]
+pub fn judge_select(index: u8, account: Option<&[u32]>) -> SelectVerdict {
+    let Some(slots) = account else {
+        return SelectVerdict::Ignore;
+    };
+    if usize::from(index) >= PLAYER_SLOTS {
+        return SelectVerdict::Ignore;
+    }
+    let Some(&player) = slots.get(usize::from(index)) else {
+        return SelectVerdict::Ignore;
+    };
+    if player == 0 {
+        return SelectVerdict::Close;
+    }
+    SelectVerdict::Load { player }
+}
+
+/// What the descriptor should do with a `CG_ENTER_GAME`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterGameVerdict {
+    /// The descriptor holds no character: legacy answers `SetPhase(PHASE_CLOSE)`
+    /// (`G/input_login.cpp:566-570`).
+    Close,
+    /// The character is on the descriptor: enter the game.
+    Enter,
+}
+
+/// Judge a `CG_ENTER_GAME`.
+///
+/// `TPacketCGEnterGame` is a single header byte (`G/packet.h:594-597`), so there is nothing
+/// else to check. Legacy's one guard is whether the descriptor has a character.
+#[must_use]
+pub fn judge_enter_game(has_character: bool) -> EnterGameVerdict {
+    if has_character {
+        EnterGameVerdict::Enter
+    } else {
+        EnterGameVerdict::Close
+    }
+}
+
+/// The map the `map_allow_find` test uses.
+///
+/// `CInputDB::PlayerLoad` folds an instance map onto its base map before the test:
+/// `lPublicMapIndex = lMapIndex >= 10000 ? lMapIndex / 10000 : lMapIndex`
+/// (`G/input_db.cpp:427`). A Channel's configured map list holds base maps, so testing the
+/// un-folded index would refuse an instance map the legacy deployment hosts.
+#[must_use]
+pub fn public_map_index(map_index: i32) -> i32 {
+    if map_index >= INSTANCE_MAP_BASE {
+        map_index / INSTANCE_MAP_BASE
+    } else {
+        map_index
+    }
+}
+
+/// The map index at which a `lMapIndex` is treated as an instance map
+/// (`lMapIndex >= 10000` in `G/input_db.cpp:427`).
+pub const INSTANCE_MAP_BASE: i32 = 10_000;
+
+/// `map_allow_find` for the maps a Channel hosts (`G/config.cpp:174-184`).
+///
+/// Legacy's test is membership in the `MAP_ALLOW` set the process was started with. A Channel's
+/// configured map list is exactly the union of that Channel's legacy `MAP_ALLOW` lists
+/// (`config/prodomo.toml.example`), so the same test is membership in the Channel's list.
+///
+/// Legacy's first arm, `if (g_bAuthServer) return false`, has no equivalent here: every game
+/// listener in the Rewrite hosts a Channel, and the auth port never reaches this call.
+#[must_use]
+pub fn map_is_allowed(public_map: i32, channel_maps: &[u32]) -> bool {
+    channel_maps
+        .iter()
+        .any(|&map| i64::from(map) == i64::from(public_map))
+}
+
+/// A character the loading burst's `GC_ENTITY` lists, with the five fields it carries.
+///
+/// The list the Rewrite sends is empty: legacy's lists every player on the Core, the loading
+/// one included (`G/sectree_manager.cpp:1697-1746`, `G/input_db.cpp:415`), a Divergence (V7).
+/// The enter-game burst does not use this type: the world's view inserts describe the
+/// characters in view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleCharacter {
+    /// The character's VID.
+    pub vid: u32,
+    /// The race, which the client turns into a `dwRaceVNum`.
+    pub job: u8,
+    /// The six equipment parts, in `ECharacterEquipmentPart` order.
+    pub parts: [u16; ENTITY_PART_NUM],
+    /// The x the character stands at.
+    pub x: i32,
+    /// The y the character stands at.
+    pub y: i32,
+}
+
+impl VisibleCharacter {
+    /// The five-field description `GC_ENTITY` carries.
+    #[must_use]
+    pub fn entity(&self) -> GcEntityInfo {
+        GcEntityInfo::new(self.vid, self.job.into(), self.parts, self.x, self.y)
+    }
+}
+
+/// The characters the loading burst's `GC_ENTITY` lists (V7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Neighbourhood {
+    /// The characters listed.
+    pub characters: Vec<VisibleCharacter>,
+}
+
+/// The `GC_CHARACTER_ADD` for an NPC standing where it spawned
+/// (`CHARACTER::EncodeInsertPacket`, `G/char.cpp:1060-1110`).
+///
+/// The type is the proto's, the angle its rotation, the z its spawn's, and the race the vnum's
+/// low 16 bits. The speeds are its limited points. The affects are its own: a stone or a
+/// monster shown with the spawn motion keeps `AFF_SPAWN` (`G/char.cpp:1886-1887`), which
+/// nothing resets. It has no state flag: `Show` clears `ADD_CHARACTER_STATE_SPAWN` once the
+/// record is written (`:1913`), before any client can enter its view.
+#[must_use]
+pub fn npc_add(npc: &Npc) -> GcCharacterAdd {
+    npc_add_at(
+        npc,
+        InsertAt {
+            angle: f32::from(npc.rotation),
+            x: npc.x,
+            y: npc.y,
+            z: npc.z,
+        },
+        npc.affect_flags,
+    )
+}
+
+/// [`npc_add`] with the angle and the point the view reads from the NPC's state machine.
+/// The speeds are its limited live points (`GetLimitPoint`, `:1089-1091`), not the spawn
+/// bytes: a slowed NPC inserts slowed. The caller passes the live affect words beside
+/// the row, as the row keeps the base (spawn) words only.
+#[must_use]
+pub fn npc_add_at(npc: &Npc, at: InsertAt, words: [u32; 2]) -> GcCharacterAdd {
+    GcCharacterAdd::new(
+        npc.vid,
+        at.angle,
+        at.x,
+        at.y,
+        at.z,
+        npc.char_type,
+        npc.race,
+        u8::try_from(npc.fight.point(point::POINT_MOV_SPEED).clamp(0, 250)).unwrap_or(u8::MAX),
+        u8::try_from(npc.fight.point(point::POINT_ATT_SPEED).clamp(0, 250)).unwrap_or(u8::MAX),
+        // `ADD_CHARACTER_STATE_DEAD` once it has died (`G/char.cpp:1446-1447`), until it goes.
+        u8::from(npc.dead),
+        words,
+    )
+}
+
+/// The `GC_CHAR_ADDITIONAL_INFO` for an NPC, which legacy sends only for `CHAR_TYPE_NPC`: a warp
+/// or a goto gets `None` (`G/char.cpp:1111`).
+///
+/// The Name is `GetName()`, the `LOCALE_YMIR` mob name of the race. `ENABLE_SHOWNPCLEVEL` is not
+/// defined, so the level is 0, and an NPC has no guild, mount, alignment or language. Its
+/// parts are its worn parts, 0 but for the buff follower's armour and weapon (520).
+#[must_use]
+pub fn npc_additional(npc: &Npc) -> Option<GcCharacterAdditionalInfo> {
+    (npc.char_type == CHAR_TYPE_NPC).then(|| {
+        GcCharacterAdditionalInfo::new(
+            npc.vid,
+            name_bytes_field(&npc.name),
+            npc.parts,
+            npc.empire,
+            0,
+            0,
+            0,
+            0,
+            PK_MODE_FREE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    })
+}
+
+/// A mini-map entry as `SendNPCPosition` writes it (`G/sectree_manager.cpp:1110-1117`).
+#[must_use]
+pub fn npc_position(position: &NpcPosition) -> GcNpcPositionEntry {
+    GcNpcPositionEntry::new(
+        position.char_type,
+        name_bytes_field(&position.name),
+        position.x,
+        position.y,
+    )
+}
+
+/// The points engine of a loaded character, as the points half of `CHARACTER::SetPlayerProto`
+/// fills it (`G/char.cpp:2233-2420`).
+///
+/// `map_index` is the atlas index of the saved position, which is `GetMapIndex()` for the
+/// loaded character and which decides the conqueror will of the map. The unlock count rides
+/// the row (`envanter`), as `CHARACTER::Load` copies `m_points.envanter` (`G/char.cpp:2346`).
+#[must_use]
+pub fn load_points(character: &Character, map_index: i32) -> Points {
+    let mut points = Points::load(&PointsRow {
+        race: character.job,
+        level: character.level,
+        exp: character.exp,
+        conqueror_level: character.conqueror_level,
+        st: character.st,
+        ht: character.ht,
+        dx: character.dx,
+        iq: character.iq,
+        sungma: [
+            character.sungma_str,
+            character.sungma_hp,
+            character.sungma_move,
+            character.sungma_immune,
+        ],
+        hp: character.hp,
+        sp: character.sp,
+        stamina: character.stamina,
+        inven_point: u16::try_from(character.envanter).unwrap_or(0),
+        random_hp: i32::from(character.random_hp),
+        random_sp: i32::from(character.random_sp),
+        stat_point: i32::from(character.stat_point),
+        skill_point: i32::from(character.skill_point),
+        sub_skill_point: i32::from(character.sub_skill_point),
+        level_step: i32::from(character.level_step),
+        stat_reset_count: i32::from(character.stat_reset_count),
+        map_index,
+        part_base: character.part_base,
+        hair_part: character.hair_part,
+        sash_part: character.sash_part,
+        playtime: character.playtime_minutes,
+        conqueror_exp: character.conqueror_exp,
+        gaya: character.gaya,
+        biologist: [
+            u32::try_from(character.biologist_state).unwrap_or(0),
+            u32::try_from(character.biologist_items_taken).unwrap_or(0),
+            u32::try_from(character.biologist_completed).unwrap_or(0),
+        ],
+        secured: (
+            u8::try_from(character.secured).unwrap_or(0),
+            character.secured_password,
+        ),
+        premium: (
+            u8::try_from(character.premium).unwrap_or(0),
+            character.premium_time,
+        ),
+        shop_unlocked: character.private_shop_unlocked_slot,
+    });
+    points.set_conqueror_progress(
+        i32::from(character.conqueror_level_step),
+        i32::from(character.conqueror_point),
+    );
+    // `SetHorseData` and, for a character with a horse, `UpdateHorseDataByLogoff`
+    // (`G/char.cpp:2381-2384`); the horse-skill points go to both arrays (`:2311`).
+    let stored = &character.horse;
+    let mut horse = world::character::Horse::from_info(world::character::HorseInfo {
+        level: stored.level,
+        riding: stored.riding,
+        stamina: stored.stamina,
+        health: stored.health,
+        health_drop_time: stored.health_drop_time,
+    });
+    horse.catch_up_logoff(character.logoff_interval);
+    points.set_horse(horse, i32::from(stored.skill_point));
+    points
+}
+
+/// The 255 point slots of `GC_CHARACTER_POINTS`, as `CHARACTER::PointsPacket` fills them
+/// (`G/char.cpp:2031-2087`).
+///
+/// # How each slot is decided
+///
+/// Legacy writes the named slots below `POINT_ST` from the character, then loops `POINT_ST` to
+/// `POINT_MAX_NUM` writing `GetPoint(i)`, then overwrites the conqueror slots and
+/// `POINT_MOV_SPEED`, which carries `GetLimitPoint` rather than `GetPoint`. The level,
+/// experience, gold and voice come from the row; every other slot comes from `state`.
+///
+/// `POINT_GAYA` sits above `POINT_ST`, so the loop writes it from the gaya the load seeded.
+/// `POINT_INVEN` is written before the loop and then overwritten by it for the same reason.
+/// The biologist slots are written
+/// after the loop from state the Rewrite does not store, so they stay at what `GetPoint`
+/// answers, which is 0.
+///
+/// # The two slots legacy leaves alone
+///
+/// Slot 0 is `POINT_NONE` and slot 2 is `POINT_VOICE`, and legacy writes neither, so 16 bytes
+/// of uninitialised stack reach the client. The Rewrite writes zero into slot 0 and the
+/// character's stored voice into slot 2. See the module note.
+#[must_use]
+pub fn points(character: &Character, state: &Points) -> [i64; GC_POINT_SLOT_COUNT] {
+    let mut slots = [0i64; GC_POINT_SLOT_COUNT];
+    slots[point::POINT_LEVEL] = i64::from(character.level);
+    slots[point::POINT_VOICE] = i64::from(character.voice);
+    slots[point::POINT_EXP] = character.exp;
+    slots[point::POINT_NEXT_EXP] = levels::next_exp(character.level);
+    slots[point::POINT_HP] = i64::from(state.hp());
+    slots[point::POINT_MAX_HP] = i64::from(state.max_hp());
+    slots[point::POINT_SP] = i64::from(state.sp());
+    slots[point::POINT_MAX_SP] = i64::from(state.max_sp());
+    slots[point::POINT_GOLD] = character.gold;
+    slots[point::POINT_STAMINA] = i64::from(state.stamina());
+    slots[point::POINT_MAX_STAMINA] = i64::from(state.max_stamina());
+    for (kind, slot) in slots.iter_mut().enumerate().skip(point::POINT_ST) {
+        *slot = i64::from(state.get_point(kind));
+    }
+    slots[point::POINT_CONQUEROR_LEVEL] = i64::from(character.conqueror_level);
+    slots[point::POINT_CONQUEROR_EXP] = character.conqueror_exp;
+    slots[point::POINT_CONQUEROR_NEXT_EXP] = levels::conqueror_next_exp(character.conqueror_level);
+    slots[point::POINT_MOV_SPEED] = i64::from(state.limit_point(point::POINT_MOV_SPEED));
+    slots
+}
+
+/// The `GC_CHARACTER_POINT_CHANGE` records for the changes `state` reports, in order.
+///
+/// Legacy writes each record with its own `DESC::Packet` call from `UpdatePointsPacket`
+/// (`G/char.cpp:2089-2118`), so each is its own frame. The frames carry no address: the caller
+/// sends a broadcast record with `PacketAround` and any other to the character alone.
+#[must_use]
+pub fn point_changes(records: &[PointRecord], vid: u32) -> Vec<Vec<u8>> {
+    records
+        .iter()
+        .map(|record| {
+            let mut bytes = Vec::with_capacity(GC_POINT_CHANGE_WIRE_SIZE);
+            GcPointChange {
+                header: i32::from(HEADER_GC_PLAYER_POINT_CHANGE.value()),
+                vid,
+                change_type: record.kind,
+                amount: record.amount,
+                value: record.value,
+            }
+            .encode_into(&mut bytes);
+            bytes
+        })
+        .collect()
+}
+
+/// The 255 skill slots of `GC_SKILL_LEVEL`, all empty: the Rewrite has no skill table yet.
+///
+/// Legacy writes `m_skills[255]`, and a character with no learned skill has a zero level and a
+/// zero `tNextRead` in every slot (`CHARACTER::SkillLevelPacket`, `G/char_skill.cpp:170-186`).
+#[must_use]
+pub fn skill_levels() -> [GcSkill; GC_SKILL_SLOT_COUNT] {
+    [GcSkill {
+        master_type: 0,
+        level: 0,
+        next_read: 0,
+    }; GC_SKILL_SLOT_COUNT]
+}
+/// Fill the burst's skill-level record with the stored slots: each nonzero
+/// slot's level, the ladder's master type, and its read time. The record is
+/// the last of `after_map_test`, where [`loading_burst`] put it.
+pub fn fill_skill_levels(burst: &mut LoadingBurst, skills: &[db::player_skills::StoredSkill]) {
+    if skills.is_empty() {
+        return;
+    }
+    let mut slots = skill_levels();
+    for slot in skills {
+        let entry = &mut slots[usize::from(slot.vnum)];
+        entry.level = slot.level;
+        entry.master_type = crate::game_state::pc_skill::master_of(slot.level);
+        entry.next_read = slot.next_read;
+    }
+    let mut frame = GcSkillLevelNew {
+        header: GcSkillLevelNew::header(),
+        skills: slots,
+    };
+    if let Some(record) = burst.after_map_test.last_mut() {
+        *record = encoded(&mut frame, "the skill-level record");
+    }
+}
+
+/// A character's Name in its 25-byte wire field.
+///
+/// Legacy writes the Name with `strlcpy(pack.szName, ch->GetName(), sizeof(pack.szName))`, which
+/// copies at most `sizeof - 1` bytes and always NUL-terminates. This does the same, so a Name
+/// the store's `CHECK` already bounds to 24 ASCII bytes fills the field exactly, and a longer
+/// one is truncated at 24 with the terminator left in place rather than filling all 25 bytes.
+#[must_use]
+pub fn name_field(name: &str) -> [u8; NAME_LEN] {
+    name_bytes_field(name.as_bytes())
+}
+
+/// A Name's bytes in the 25-byte wire field, as `strlcpy` copies them: up to the first NUL, at
+/// most 24 bytes, and always terminated.
+#[must_use]
+pub fn name_bytes_field(name: &[u8]) -> [u8; NAME_LEN] {
+    let mut field = [0u8; NAME_LEN];
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    let kept = usize::min(end, NAME_LEN - 1);
+    field[..kept].copy_from_slice(&name[..kept]);
+    field
+}
+
+/// The own-character record `MainCharacterPacket` sends for a character on `map_index`
+/// (`CHARACTER::MainCharacterPacket`, `G/char.cpp:1965-2030`): the 46-byte plain record at
+/// byte 113 when the map has no music, the 71-byte record at byte 137 when it has music
+/// and the volume flag is off, and the 75-byte record at byte 138 when the flag is on.
+///
+/// `map_index` is the map the character stands on, before the `map_allow_find` test: legacy
+/// reads `GetMapIndex()` and folds an instance map onto its base (`FIX_DUNGEON_MUSIC` is
+/// defined), exactly as [`public_map_index`] does. The music is what `settings.lua` recorded
+/// (`add_bgm_info`, `set_bgm_volume_enable`); an empty name is no music, as legacy's
+/// `bgmInfo.name.empty()` is.
+#[must_use]
+pub fn main_character_on(
+    character: &Character,
+    vid: u32,
+    map_index: i32,
+    settings: &quest::host::Settings,
+) -> Vec<u8> {
+    let map = u32::try_from(public_map_index(map_index)).unwrap_or(0);
+    let music = settings
+        .bgm
+        .get(&map)
+        .filter(|music| !music.name.is_empty());
+    let mut bytes = Vec::new();
+    match music {
+        None => encoded(
+            &mut main_character(character, vid),
+            "the own-character record",
+        ),
+        Some(music) => {
+            let name = name_field(&character.name);
+            let bgm = name_bytes_field(&music.name);
+            if settings.bgm_volume_enable {
+                // Legacy stores the volume as a `float` (`CHARACTER_AddBGMInfo`, `char.cpp:1937`).
+                #[allow(clippy::cast_possible_truncation)]
+                let volume = music.volume as f32;
+                GcMainCharacter4BgmVol::new(
+                    vid,
+                    u16::from(character.job),
+                    name,
+                    bgm,
+                    volume,
+                    character.x,
+                    character.y,
+                    0,
+                    character.empire,
+                    character.skill_group,
+                )
+                .encode_into(&mut bytes);
+            } else {
+                GcMainCharacter3Bgm::new(
+                    vid,
+                    u16::from(character.job),
+                    name,
+                    bgm,
+                    character.x,
+                    character.y,
+                    0,
+                    character.empire,
+                    character.skill_group,
+                )
+                .encode_into(&mut bytes);
+            }
+            bytes
+        }
+    }
+}
+
+/// The 46-byte own-character record the server sends at byte 113
+/// (`CHARACTER::MainCharacterPacket`, `G/char.cpp:2005-2029`).
+#[must_use]
+pub fn main_character(character: &Character, vid: u32) -> GcMainCharacter2Empire {
+    GcMainCharacter2Empire::new(
+        vid,
+        u16::from(character.job),
+        name_field(&character.name),
+        character.x,
+        character.y,
+        0,
+        character.empire,
+        character.skill_group,
+    )
+}
+
+/// The parts of a player's ADD and INFO that walking does not change, built on the descriptor
+/// from the loaded [`Character`] and sent to the world with the entry. The field types follow
+/// [`Character`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PcCard {
+    /// `GetName()`.
+    pub name: String,
+    /// The race, `GetRaceNum()`.
+    pub job: u8,
+    /// `GetEmpire()`.
+    pub empire: u8,
+    /// `GetLevel()`.
+    pub level: u8,
+    /// The conqueror level.
+    pub conqueror_level: u8,
+    /// The client language the INFO carries.
+    pub language: u8,
+    /// `m_bPKMode`, from [`pk_mode`].
+    pub pk_mode: u8,
+    /// `GetSkillGroup()`: the heal and the shaman shares read it in the world.
+    pub skill_group: u8,
+    /// `GetRealAlignment()`: the stored alignment, which the kills raise and the rules
+    /// read. The value the client is shown lives on the world's body beside this card
+    /// (`Body::shown_alignment`), and leaves this one only while the hide-alignment
+    /// unique (70048) holds it at 0 (`ShowAlignment`, `G/char_battle.cpp:3457-3475`).
+    pub alignment: i32,
+    /// `POINT_VOICE`, which a mid-game points record carries.
+    pub voice: u8,
+    /// `m_byPremium` (`G/char.h:2590`), which the ADD and the UPDATE send.
+    pub premium: u8,
+    /// `m_iPremiumTime` (`G/char.h:2591`), which the ADD and the UPDATE send.
+    pub premium_time: i32,
+}
+
+impl PcCard {
+    /// The card of a loaded character whose client speaks `language`, on a Channel whose PK
+    /// protect level is `pk_protect_level`.
+    #[must_use]
+    pub fn of(character: &Character, language: u8, pk_protect_level: u8) -> Self {
+        Self {
+            name: character.name.clone(),
+            job: character.job,
+            empire: character.empire,
+            level: character.level,
+            conqueror_level: character.conqueror_level,
+            language,
+            pk_mode: pk_mode(character.level, pk_protect_level),
+            skill_group: character.skill_group,
+            alignment: character.alignment,
+            voice: character.voice,
+            premium: u8::try_from(character.premium).unwrap_or(0),
+            premium_time: character.premium_time,
+        }
+    }
+}
+
+/// The live fields `EncodeInsertPacket` writes into the ADD (`G/char.cpp:1080-1105`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InsertAt {
+    /// `GetRotation()`, the angle in degrees.
+    pub angle: f32,
+    /// The x the ADD reports.
+    pub x: i32,
+    /// The y the ADD reports.
+    pub y: i32,
+    /// The z the ADD reports.
+    pub z: i32,
+}
+
+/// A player's `GC_CHARACTER_ADD` (`CHARACTER::EncodeInsertPacket`, `G/char.cpp:1060-1110`).
+///
+/// `bType` is `GetCharType()` (`G/char.cpp:1077`), which `SetPlayerProto` makes `CHAR_TYPE_PC`
+/// for every PC (`G/char.cpp:2240`). Until ledger 223 the Rewrite sent 1, which is
+/// `CHAR_TYPE_NPC`. The angle and the point are `at`, which the view reads from the body.
+///
+/// `wRaceNum` is `GetRaceNum()` (`G/char.cpp:1082`, `:2177-2186`): the polymorph vnum while
+/// morphed, else the job, narrowed to the record's `WORD`.
+///
+/// The two speeds are `GetLimitPoint(POINT_MOV_SPEED)` and `GetLimitPoint(POINT_ATT_SPEED)`
+/// (`G/char.cpp:1089-1091`), which the limit holds to 0..200 and 0..170, so each fits the
+/// record's byte.
+///
+/// `insert` holds the two affect words the character has now (`dwAffectFlag`), which the
+/// insert carries as the view's record of its affects, whether it is dead, and whether its
+/// spawn state bit is held.
+#[must_use]
+pub fn character_add(
+    state: &Points,
+    vid: u32,
+    at: InsertAt,
+    insert: impl Into<InsertState>,
+) -> GcCharacterAdd {
+    let insert = insert.into();
+    GcCharacterAdd::new(
+        vid,
+        at.angle,
+        at.x,
+        at.y,
+        at.z,
+        CHAR_TYPE_PC,
+        u16::try_from(state.shown_race() & 0xffff).unwrap_or(u16::MAX),
+        speed_byte(state.limit_point(point::POINT_MOV_SPEED)),
+        speed_byte(state.limit_point(point::POINT_ATT_SPEED)),
+        state_flag(insert.dead)
+            | if insert.spawn {
+                ADD_CHARACTER_STATE_SPAWN
+            } else {
+                0
+            }
+            | if insert.killer_mode {
+                ADD_CHARACTER_STATE_KILLER
+            } else {
+                0
+            },
+        insert.flags,
+    )
+}
+
+/// `ADD_CHARACTER_STATE_DEAD` (`G/packet.h:862`): the bit of `m_bAddChrState` a death sets and a
+/// restart clears (`G/char.cpp:1440-1447`).
+pub const ADD_CHARACTER_STATE_DEAD: u8 = 1;
+
+/// `ADD_CHARACTER_STATE_SPAWN` (`G/packet.h:863`): the bit of `m_bAddChrState` `SetPolymorph`
+/// holds for its reencode alone (`G/char.cpp:7700-7705`).
+pub const ADD_CHARACTER_STATE_SPAWN: u8 = 1 << 1;
+
+/// `ADD_CHARACTER_STATE_KILLER` (`G/packet.h:865`): the bit of `m_bAddChrState`
+/// `SetKillerMode` sets and clears (`G/char_battle.cpp:3568-3581`).
+pub const ADD_CHARACTER_STATE_KILLER: u8 = 1 << 3;
+
+/// `m_bAddChrState`'s dead bit, which an insert (`G/char.cpp:1095`) and an update (`:1310`)
+/// carry in `bStateFlag`. The spawn bit is held only for `SetPolymorph`'s reencode, so only
+/// an insert ORs it in ([`InsertState::spawn`]); the killer and party bits come with the
+/// systems that set them.
+#[must_use]
+pub const fn state_flag(dead: bool) -> u8 {
+    if dead {
+        ADD_CHARACTER_STATE_DEAD
+    } else {
+        0
+    }
+}
+
+/// What a player's insert carries of its state besides the body and the points.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InsertState {
+    /// The two affect words (`dwAffectFlag`).
+    pub flags: [u32; 2],
+    /// Whether the character is dead, which sets [`ADD_CHARACTER_STATE_DEAD`].
+    pub dead: bool,
+    /// Whether the spawn state bit is held, which sets [`ADD_CHARACTER_STATE_SPAWN`].
+    pub spawn: bool,
+    /// Whether killer mode is on, which sets [`ADD_CHARACTER_STATE_KILLER`].
+    pub killer_mode: bool,
+}
+
+impl From<[u32; 2]> for InsertState {
+    fn from(flags: [u32; 2]) -> Self {
+        Self {
+            flags,
+            ..Self::default()
+        }
+    }
+}
+
+/// A limited speed as the record's byte. [`Points::limit_point`] holds both speeds inside a
+/// byte, so the fall-back is never taken.
+fn speed_byte(speed: i32) -> u8 {
+    u8::try_from(speed).unwrap_or(u8::MAX)
+}
+
+/// A player's `GC_CHAR_ADDITIONAL_INFO` (`G/char.cpp:1111-1200`). `bPKMode` is `m_bPKMode`
+/// (`G/char.cpp:1128`). `dwMountVnum` is the mounted vnum (`:1129`). `guild` is the
+/// pair the world's `view_guild` computes (`dwGuildID` and `dwNewIsGuildName`,
+/// `G/char.cpp:1176-1199`): the guild id, and 3 for the master, 2 for a general, 1 for a
+/// plain member, 0 with no guild.
+///
+/// The alignment is `m_iAlignment / 10` (`G/char.cpp:1201`), the value the client is shown
+/// in tenths.
+///
+/// The parts are the ones the last `ComputePoints` left (`GetPart`), which after the item load
+/// are the worn armour, weapon, hair costume and sash over the base part.
+#[must_use]
+pub fn character_additional(
+    card: &PcCard,
+    state: &Points,
+    vid: u32,
+    guild: (u32, u8),
+) -> GcCharacterAdditionalInfo {
+    GcCharacterAdditionalInfo::new(
+        vid,
+        name_field(&card.name),
+        state.parts(),
+        card.empire,
+        guild.0,
+        u32::from(card.level),
+        u32::from(card.conqueror_level),
+        i16::try_from(card.alignment / 10).unwrap_or(i16::MAX),
+        card.pk_mode,
+        state.mount_vnum(),
+        0,
+        guild.1,
+        card.premium,
+        card.premium_time,
+        card.language,
+    )
+}
+
+/// The loading burst, split where `CInputDB::PlayerLoad` branches.
+///
+/// The split is not cosmetic. `CInputDB::PlayerLoad` writes the entity list and the
+/// own-character records, then tests `map_allow_find`; a character standing on a map the
+/// Channel does not host gets `SetPhase(PHASE_CLOSE)` there and never receives the gold,
+/// points, or skill-level records (`G/input_db.cpp:414-455`). A caller that cannot see that
+/// branch would send records legacy never sends on that path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadingBurst {
+    /// `GC_ENTITY` and the own-character records, written before the map test.
+    pub before_map_test: Vec<Vec<u8>>,
+    /// The gold, points, and skill-level records, written only when the map is allowed.
+    pub after_map_test: Vec<Vec<u8>>,
+}
+
+/// The records the loading burst sends, in legacy order.
+///
+/// `vid` is the character's own VID, the identity the rest of the session uses. The quickslot
+/// records are not built here: the descriptor loads the stored slots and puts what
+/// [`crate::quickslot::load`] sends at the front of `after_map_test`, where `PlayerLoad` sets
+/// them (`G/input_db.cpp:436-443`).
+///
+/// `DESC::SetPhase(PHASE_LOADING)` is the burst's first record and is **not** returned here: the
+/// descriptor writes it as a phase transition, because that is the legacy operation that
+/// produces it (`G/input_db.cpp:414`). Returning it as content as well would put two
+/// `GC_PHASE` records on the wire.
+#[must_use]
+pub fn loading_burst(
+    character: &Character,
+    state: &Points,
+    vid: u32,
+    view: &Neighbourhood,
+    map_index: i32,
+    settings: &quest::host::Settings,
+) -> LoadingBurst {
+    let entities: Vec<GcEntityInfo> = view
+        .characters
+        .iter()
+        .map(VisibleCharacter::entity)
+        .collect();
+    let before_map_test = vec![
+        encoded(
+            &mut GcEntity::new(entities),
+            "a character list from the world",
+        ),
+        main_character_on(character, vid, map_index, settings),
+    ];
+    let mut after_map_test = points_packet(character, state);
+    after_map_test.push(encoded(
+        &mut GcSkillLevelNew {
+            header: GcSkillLevelNew::header(),
+            skills: skill_levels(),
+        },
+        "the skill-level record",
+    ));
+    LoadingBurst {
+        before_map_test,
+        after_map_test,
+    }
+}
+
+/// The records `CHARACTER::PointsPacket` writes: the gold record, then the points record.
+///
+/// `ENABLE_REMOVE_LIMIT_GOLD` is on, so `PointsPacket` writes `GC_CHARACTER_GOLD` before
+/// `GC_CHARACTER_POINTS` (`G/char.cpp:2078-2085`). The loading burst sends the pair once
+/// from `PlayerLoad`, and the item load sends it again as its last step
+/// (`G/input_db.cpp:1564`), whether or not the character owns an item.
+///
+/// # Panics
+///
+/// Panics when a record does not encode; both are fixed layouts, so that would be a bug in
+/// this module.
+#[must_use]
+pub fn points_packet(character: &Character, state: &Points) -> Vec<Vec<u8>> {
+    vec![
+        encoded(&mut GcGold::new(gold(character)), "the gold record"),
+        encoded(
+            &mut GcPoints::new(points(character, state)),
+            "the points record",
+        ),
+    ]
+}
+
+/// The same pair mid-game, for `/level`'s `ResetPoint` and its conqueror-off gate:
+/// the gold record, then the points record. The level, experience and conqueror
+/// slots come from `state`, which the reset has already moved; only the gold and
+/// the voice come from the row, which the world does not hold.
+///
+/// # Panics
+///
+/// Panics when a record does not encode; both are fixed layouts, so that would be a bug in
+/// this module.
+#[must_use]
+pub fn mid_game_points(state: &Points, gold: i64, voice: u8) -> Vec<Vec<u8>> {
+    let mut slots = [0i64; GC_POINT_SLOT_COUNT];
+    slots[point::POINT_LEVEL] = i64::from(state.level());
+    slots[point::POINT_VOICE] = i64::from(voice);
+    slots[point::POINT_EXP] = state.exp();
+    slots[point::POINT_NEXT_EXP] = levels::next_exp(state.level());
+    slots[point::POINT_HP] = i64::from(state.hp());
+    slots[point::POINT_MAX_HP] = i64::from(state.max_hp());
+    slots[point::POINT_SP] = i64::from(state.sp());
+    slots[point::POINT_MAX_SP] = i64::from(state.max_sp());
+    slots[point::POINT_GOLD] = gold;
+    slots[point::POINT_STAMINA] = i64::from(state.stamina());
+    slots[point::POINT_MAX_STAMINA] = i64::from(state.max_stamina());
+    for (kind, slot) in slots.iter_mut().enumerate().skip(point::POINT_ST) {
+        *slot = i64::from(state.get_point(kind));
+    }
+    slots[point::POINT_CONQUEROR_LEVEL] = i64::from(state.conqueror_level());
+    slots[point::POINT_CONQUEROR_EXP] = state.conqueror_exp();
+    slots[point::POINT_CONQUEROR_NEXT_EXP] = levels::conqueror_next_exp(state.conqueror_level());
+    slots[point::POINT_MOV_SPEED] = i64::from(state.limit_point(point::POINT_MOV_SPEED));
+    vec![
+        encoded(
+            &mut GcGold::new(u64::try_from(gold).unwrap_or(0)),
+            "the gold record",
+        ),
+        encoded(&mut GcPoints::new(slots), "the points record"),
+    ]
+}
+
+/// The records the item load ends with: `CheckMaximumPoints`, then `PointsPacket`
+/// (`G/input_db.cpp:1563-1564`).
+///
+/// A stored hit or spell point total above the maximum the load computed is brought down to
+/// it, with one `GC_CHARACTER_POINT_CHANGE` each, and the gold and points records that
+/// follow carry the clamped values. `state` keeps the clamp, so the caller's next save writes
+/// it.
+#[must_use]
+pub fn item_load_points(character: &Character, state: &mut Points, vid: u32) -> Vec<Vec<u8>> {
+    let mut frames = point_changes(&state.check_maximum_points(), vid);
+    frames.extend(points_packet(character, state));
+    frames
+}
+
+/// The gold as the record carries it.
+///
+/// Legacy's field is `unsigned long long` because `ENABLE_REMOVE_LIMIT_GOLD` is on, so the
+/// value is never negative. The store's `CHECK` on `player.gold` refuses a negative row, so
+/// this is a fall-back, not a path a row can reach.
+fn gold(character: &Character) -> u64 {
+    u64::try_from(character.gold).unwrap_or(0)
+}
+
+/// Where `CInputLogin::Entergame` shows a character (`G/input_login.cpp:572-585`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnteringPosition {
+    /// The first movable point of `GetMovablePosition` around the saved position, which is the
+    /// saved position itself when its cell is movable.
+    Movable {
+        /// The point's x.
+        x: i32,
+        /// The point's y.
+        y: i32,
+    },
+    /// No point around is movable, so legacy logs `!GetMovablePosition` and shows the
+    /// character at its empire's recall position.
+    Recalled {
+        /// The recall position's x.
+        x: i32,
+        /// The recall position's y.
+        y: i32,
+    },
+    /// No point around is movable, and the map has no recall position or its recall position
+    /// has no sectree on the map. Legacy's `Show` then returns before placing the character
+    /// (`G/char.cpp:1847-1854`), so it stays at the saved position and the client never gets
+    /// its own insert (a Defect). The Rewrite keeps the saved position and shows it there.
+    ///
+    /// The owner's map 235 (`metin2_map_n_flame_dungeon_01`) recalls every empire to
+    /// (614200, 706800), which lies on map 62, so a character there with no movable point
+    /// around it is kept.
+    Kept,
+}
+
+/// Where `CInputLogin::Entergame` shows a character saved at `saved` on `map_index`: the first
+/// movable point around it ([`MapCells::movable_position`]), else the recall position of its
+/// empire ([`crate::warp::recall_position`]) when the map has a sectree there.
+///
+/// `cells` is the map's, or `None` for a map the process does not host, where legacy finds no
+/// sectree and so neither a movable point nor a place to show the character.
+#[must_use]
+pub fn entering_position(
+    cells: Option<&MapCells>,
+    atlas: &MapAtlas,
+    map_index: i32,
+    empire: u8,
+    saved: (i32, i32),
+) -> EnteringPosition {
+    let Some(cells) = cells else {
+        return EnteringPosition::Kept;
+    };
+    if let Some((x, y)) = cells.movable_position(saved.0, saved.1) {
+        return EnteringPosition::Movable { x, y };
+    }
+    match crate::warp::recall_position(atlas, map_index, empire) {
+        Some((x, y)) if cells.grid().sectree_at(x, y).is_some() => {
+            EnteringPosition::Recalled { x, y }
+        }
+        _ => EnteringPosition::Kept,
+    }
+}
+
+/// The enter-game burst, split where `CInputLogin::Entergame` calls `SetPhase`.
+///
+/// `SetPhase(PHASE_GAME)` sits in the middle of `Entergame`, after the revive-invisible affect
+/// and before the time and Channel records (`G/input_login.cpp:592-606`). Legacy writes the
+/// `GC_PHASE` record through the boundary the descriptor already has, so the record belongs to
+/// the phase transition rather than to the content; the caller sends the first half, moves the
+/// descriptor, then sends the second half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnterGameBurst {
+    /// What the world's `Show` wrote, the NPC list, and the affect.
+    pub before_phase: Vec<Vec<u8>>,
+    /// The time, Channel, and `letters_event` records, written after the phase change.
+    pub after_phase: Vec<Vec<u8>>,
+}
+
+/// The records the enter-game burst carries behind the character's own update: the
+/// restored affects' adds, then the enter-game hide restore's `SetXCostumeHidden`
+/// lines, then the live priv bonus notices, whether the letters line reads 1, and the
+/// fish-event report's records.
+pub struct BurstAfter {
+    /// The restored affects' add records, in store order.
+    pub silence: Vec<Vec<u8>>,
+    /// The five hide-restore lines in part order.
+    pub hide_lines: Vec<Vec<u8>>,
+    /// The live priv bonus notices, in type order.
+    pub priv_lines: Vec<Vec<u8>>,
+    /// The advance-skill window line, when the entrant is ungrouped and past level 4.
+    pub advance_window: Option<Vec<u8>>,
+    /// Whether the character is in the letters event: the `letters_event` line reads
+    /// 1 then, else 0.
+    pub letters_event: bool,
+    /// The fish-event login report's records: the enable record, then one `SHAPE_ADD`
+    /// per main cell (`FishEventGeneralInfo`, `G/char.cpp:10880-10913`).
+    pub fish_lines: Vec<Vec<u8>>,
+    /// The map's guild lands: each owned land's NAME, then the one list
+    /// (`CManager::SendLandList`, `G/building.cpp:938-989`).
+    pub land_lines: Vec<Vec<u8>>,
+    /// The kingdom war's score record (`G/input_login.cpp:680-683`): `Some` with the
+    /// record for an entrant on 103 while the war runs. The burst carries it after
+    /// the land lines, where legacy sends it after them.
+    pub kingdom_line: Option<Vec<u8>>,
+    /// The switchbot report: the attribute info, then the table when the character
+    /// has one (`CSwitchbotManager::EnterGame`, `G/refactorized_switchbot.cpp:748-761`).
+    pub switchbot_lines: Vec<Vec<u8>>,
+}
+
+/// The records the enter-game burst sends, in legacy order.
+///
+/// `shown` is what the world's `Show` of the entering character wrote to it: its own pair, then
+/// the pair of every character and NPC its view took in, in walk order
+/// (`G/input_login.cpp:590`, `G/char.cpp:1905`). `npcs` is the map's mini-map list.
+/// `channel` is `g_bChannel`, and `now` is `get_global_time()`, which is `time(0)` plus a gap
+/// the Rewrite does not yet carry. The time and channel records are unconditional.
+///
+/// # Panics
+///
+/// Panics when a record does not encode. Every record here is a fixed layout this module
+/// builds itself, so a failure is a defect in this module rather than anything a client
+/// sends.
+#[must_use]
+pub fn enter_game_burst(
+    character: &Character,
+    shown: Vec<Vec<u8>>,
+    npcs: &MapNpcs,
+    update: Option<Vec<u8>>,
+    after: BurstAfter,
+    channel: u8,
+    now: u32,
+) -> EnterGameBurst {
+    let mut before = shown;
+    // `SECTREE_MANAGER::SendNPCPosition` returns without writing when the map has no NPC, so
+    // an empty list sends nothing at all (`G/sectree_manager.cpp:1089-1098`).
+    if !npcs.positions.is_empty() {
+        let entries = npcs.positions.iter().map(npc_position).collect();
+        before.push(encoded(&mut GcNpcPosition::new(entries), "the NPC list"));
+    }
+    // The character's own update comes first: `ReviveInvisible` changes the affect flags the
+    // update carries, and the update is sent before the affect's own record. The restored
+    // silences ride behind the update, as `LoadAffect`'s adds ride the queue they found
+    // (`G/char_affect.cpp:573-666`).
+    if let Some(frame) = update {
+        before.push(frame);
+    }
+    before.extend(after.silence);
+    // `ch->ReviveInvisible(5)` adds an affect, and `AddAffect` sends `GC_AFFECT_ADD` for
+    // every affect it takes on a PC (`G/char.cpp:7490-7493`, `G/char_affect.cpp:747-750`).
+    before.push(encoded(
+        &mut GcAffectAdd {
+            header: GcAffectAdd::header(),
+            element: GcAffectElement {
+                affect_type: AFFECT_REVIVE_INVISIBLE,
+                apply_on: 0,
+                apply_value: 0,
+                flag: AFF_REVIVE_INVISIBLE,
+                duration: REVIVE_INVISIBLE_SECONDS,
+                sp_cost: 0,
+            },
+        },
+        "the revive-invisible affect",
+    ));
+    // `SetPhase(PHASE_GAME)` writes the `GC_PHASE` record; it is the caller's phase
+    // transition, so it is the boundary between the two halves rather than a record here.
+    // The hide restore's lines lead the far half, as legacy sends them right after
+    // `SetPhase` (`G/input_login.cpp:612-638`).
+    let mut out = Vec::with_capacity(3 + after.hide_lines.len() + after.land_lines.len());
+    out.extend(after.hide_lines);
+    // `CManager::SendLandList` (`G/input_login.cpp:676`) runs after the guild-war
+    // send and before the time record; the marriage record it sits among belongs to
+    // an unported system. The kingdom-war score (`:680-683`) rides after the land
+    // lines, where legacy sends it after them.
+    out.extend(after.land_lines);
+    if let Some(line) = after.kingdom_line {
+        out.push(line);
+    }
+    out.push(encoded(
+        &mut GcHeaderAndDword::new(HEADER_GC_TIME.value(), now),
+        "the time record",
+    ));
+    out.push(encoded(
+        &mut GcHeaderAndByte::new(HEADER_GC_CHANNEL.value(), channel),
+        "the Channel record",
+    ));
+    // `SendGreetMessage` sends nothing on the owner's data (no `GREET` row), and
+    // `_send_bonus_info`'s priv notices follow it (`G/input_login.cpp:694-697`).
+    out.extend(after.priv_lines);
+    // `ch->AdvanceSkillSelect()` (`G/input_login.cpp:723-725`) runs after
+    // `_send_bonus_info` and before the waiting lines, so its line rides here.
+    if let Some(line) = after.advance_window {
+        out.push(line);
+    }
+    // `SEventLetters` always sends one line: 1 for a character in the event, else 0.
+    // Both constants are short, so the length check cannot fail.
+    let chat = if after.letters_event {
+        LETTERS_EVENT_ON_CHAT
+    } else {
+        LETTERS_EVENT_CHAT
+    };
+    let mut line = GcChat::notice(CHAT_TYPE_COMMAND, character.empire, chat)
+        .expect("the letters_event line is shorter than the chat length limit");
+    out.push(encoded(&mut line, "the letters_event line"));
+    // `FishEventGeneralInfo` and `CSwitchbotManager::EnterGame` close `Entergame`
+    // (`G/input_login.cpp:939-956`): the enable record, one `SHAPE_ADD` per main cell, then
+    // the attribute info and the table, ride the burst last.
+    out.extend(after.fish_lines);
+    out.extend(after.switchbot_lines);
+    EnterGameBurst {
+        before_phase: before,
+        after_phase: out,
+    }
+}
+
+/// Encode one record into its own frame.
+///
+/// Legacy writes each record with its own `DESC::Packet` call, so each is a separate frame on
+/// the wire; a caller that concatenated them would hand the client one TEA unit where legacy
+/// hands it several. The two fallible encoders refuse only when a list is long enough to
+/// overflow a length field, which a world's character list cannot be, so the message names the
+/// record rather than swallowing the error.
+fn encoded<T>(record: &mut T, what: &str) -> Vec<u8>
+where
+    T: RecordFrame,
+{
+    let mut bytes = Vec::new();
+    record
+        .frame_into(&mut bytes)
+        .unwrap_or_else(|()| panic!("{what} does not fit its wire length field"));
+    bytes
+}
+
+/// A record that can write itself into one frame.
+trait RecordFrame {
+    /// Append the whole record, or report that it does not fit its length field.
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()>;
+}
+
+impl RecordFrame for GcEntity {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcEntity::encode_into(self, out).map_err(|_| ())
+    }
+}
+
+impl RecordFrame for GcMainCharacter2Empire {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcMainCharacter2Empire::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcGold {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcGold::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcPoints {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcPoints::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcSkillLevelNew {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcSkillLevelNew::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcCharacterAdd {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcCharacterAdd::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcCharacterAdditionalInfo {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcCharacterAdditionalInfo::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcNpcPosition {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcNpcPosition::encode_into(self, out).map_err(|_| ())
+    }
+}
+
+impl RecordFrame for GcAffectAdd {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcAffectAdd::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcHeaderAndDword {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcHeaderAndDword::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcHeaderAndByte {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcHeaderAndByte::encode_into(self, out);
+        Ok(())
+    }
+}
+
+impl RecordFrame for GcChat {
+    fn frame_into(&self, out: &mut Vec<u8>) -> Result<(), ()> {
+        GcChat::encode_into(self, out).map_err(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gamedata::mob_proto::{CHAR_TYPE_GOTO, CHAR_TYPE_MONSTER, CHAR_TYPE_STONE, CHAR_TYPE_WARP};
+
+    /// A character with values chosen so that every field's little-endian bytes are distinct:
+    /// no field is byte-symmetric, so an endianness or byte-order slip cannot pass.
+    fn hero() -> Character {
+        Character {
+            id: 0x1122_3344,
+            slot: 1,
+            name: "Arges".to_string(),
+            empire: 2,
+            job: 5,
+            level: 9,
+            exp: 0x0102_0304_0506,
+            conqueror_level: 3,
+            random_hp: 0,
+            random_sp: 0,
+            stat_point: 43,
+            skill_point: 47,
+            sub_skill_point: 53,
+            level_step: 3,
+            stat_reset_count: 0,
+            sungma_str: 21,
+            sungma_hp: 22,
+            sungma_move: 23,
+            sungma_immune: 24,
+            st: 11,
+            ht: 13,
+            dx: 17,
+            iq: 19,
+            hp: 0x0012_3456,
+            sp: 0x00ab_cdef,
+            stamina: 0x0011_2233,
+            gold: 0x0012_3456_789a_bcde,
+            gaya: 0x0012_3456,
+            biologist_state: 3,
+            biologist_items_taken: 4,
+            biologist_completed: 0,
+            secured: 0,
+            secured_password: 999_999,
+            premium: 0,
+            premium_time: 0,
+            envanter: 5,
+            private_shop_unlocked_slot: 9,
+            conqueror_exp: 0x00fe_dcba,
+            conqueror_level_step: 0,
+            conqueror_point: 0,
+            voice: 77,
+            part_base: 1,
+            main_part: 0x1122,
+            hair_part: 0x3344,
+            sash_part: 0x5566,
+            x: 0x0012_3456,
+            y: -0x0012_3457,
+            map_index: 21,
+            exit_x: 0x0012_3458,
+            exit_y: -0x0012_3459,
+            exit_map_index: 22,
+            skill_group: 6,
+            playtime_minutes: 0x0a0b_0c0d,
+            alignment: -43_210,
+            change_name: false,
+            horse: db::players::PlayerHorse::default(),
+            logoff_interval: 0,
+        }
+    }
+
+    /// The hero's points on a map with no conqueror will.
+    fn hero_points() -> Points {
+        load_points(&hero(), 0)
+    }
+
+    fn empty_view() -> Neighbourhood {
+        Neighbourhood::default()
+    }
+
+    fn neighbour() -> VisibleCharacter {
+        VisibleCharacter {
+            vid: 0x0a0b_0c0d,
+            job: 7,
+            parts: [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666],
+            x: 0x0000_1000,
+            y: -0x0000_2000,
+        }
+    }
+
+    fn with_neighbour() -> Neighbourhood {
+        Neighbourhood {
+            characters: vec![neighbour()],
+        }
+    }
+
+    /// Where the hero's body stands as it enters: its saved point, at angle 0.
+    fn hero_at() -> InsertAt {
+        let hero = hero();
+        InsertAt {
+            angle: 0.0,
+            x: hero.x,
+            y: hero.y,
+            z: 0,
+        }
+    }
+
+    /// The hero's own pair as the world's `Show` writes it to a client speaking `language`.
+    fn own_pair(language: u8) -> Vec<Vec<u8>> {
+        let card = PcCard::of(&hero(), language, 15);
+        let mut add = Vec::new();
+        character_add(&hero_points(), 0x1122_3344, hero_at(), [0; 2]).encode_into(&mut add);
+        let mut info = Vec::new();
+        character_additional(&card, &hero_points(), 0x1122_3344, (0, 0)).encode_into(&mut info);
+        vec![add, info]
+    }
+
+    /// A map with no NPC.
+    fn no_npcs() -> MapNpcs {
+        MapNpcs::default()
+    }
+
+    /// A map whose mini-map lists a gate and a smith.
+    fn npcs_listed() -> MapNpcs {
+        MapNpcs {
+            npcs: Vec::new(),
+            positions: vec![
+                NpcPosition {
+                    char_type: CHAR_TYPE_GOTO,
+                    name: b"Poarta".to_vec(),
+                    x: 62_200,
+                    y: 55_600,
+                },
+                NpcPosition {
+                    char_type: CHAR_TYPE_NPC,
+                    name: b"Fierar".to_vec(),
+                    x: 12_345,
+                    y: 23_456,
+                },
+            ],
+            regens: Vec::new(),
+        }
+    }
+
+    fn headers(burst: &[Vec<u8>]) -> Vec<u8> {
+        burst.iter().map(|frame| frame[0]).collect()
+    }
+
+    /// Every record of a burst, in wire order across the split, for a test that is about a
+    /// record's own bytes rather than about where the phase transition falls.
+    fn all<'a>(before: &'a [Vec<u8>], after: &'a [Vec<u8>]) -> Vec<&'a Vec<u8>> {
+        before.iter().chain(after.iter()).collect()
+    }
+
+    #[test]
+    fn select_needs_an_account_table() {
+        assert_eq!(judge_select(0, None), SelectVerdict::Ignore);
+    }
+
+    #[test]
+    fn select_loads_the_character_in_the_slot() {
+        assert_eq!(
+            judge_select(2, Some(&[11, 0, 33, 0])),
+            SelectVerdict::Load { player: 33 }
+        );
+    }
+
+    #[test]
+    fn select_closes_on_an_empty_slot() {
+        assert_eq!(judge_select(1, Some(&[11, 0, 33, 0])), SelectVerdict::Close);
+    }
+
+    /// The out-of-bounds index legacy reads before it range-checks. The index must not load,
+    /// and it must not close either: the Rewrite has nothing to say about a slot that does not
+    /// exist, and a close would be a response to a byte legacy never meant to accept.
+    #[test]
+    fn select_ignores_an_index_past_the_last_slot() {
+        for index in u8::try_from(PLAYER_SLOTS).expect("four slots fit in a u8")..=u8::MAX {
+            assert_eq!(
+                judge_select(index, Some(&[11, 22, 33, 44])),
+                SelectVerdict::Ignore,
+                "index {index} must not reach the slot array",
+            );
+        }
+    }
+
+    #[test]
+    fn select_reaches_every_slot_inside_the_table() {
+        for index in 0..u8::try_from(PLAYER_SLOTS).expect("four slots fit in a u8") {
+            assert_eq!(
+                judge_select(index, Some(&[11, 22, 33, 44])),
+                SelectVerdict::Load {
+                    player: 11 + u32::from(index) * 11
+                },
+                "slot {index} is inside the table and must load",
+            );
+        }
+    }
+
+    #[test]
+    fn enter_game_closes_without_a_character() {
+        assert_eq!(judge_enter_game(false), EnterGameVerdict::Close);
+    }
+
+    #[test]
+    fn enter_game_needs_nothing_but_a_character() {
+        assert_eq!(judge_enter_game(true), EnterGameVerdict::Enter);
+    }
+
+    /// The loading burst, one record per frame, in the order `CInputDB::PlayerLoad` writes
+    /// them. `GC_PHASE` is the descriptor's own phase transition and is not in either half.
+    #[test]
+    fn loading_burst_headers_are_in_legacy_order() {
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            0x1122_3344,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        assert_eq!(
+            headers(&burst.before_map_test),
+            vec![249, 113],
+            "GC_ENTITY, GC_MAIN_CHARACTER2_EMPIRE",
+        );
+        assert_eq!(
+            headers(&burst.after_map_test),
+            vec![224, 16, 76],
+            "GC_CHARACTER_GOLD, GC_CHARACTER_POINTS, GC_SKILL_LEVEL",
+        );
+    }
+
+    #[test]
+    fn loading_burst_frame_widths_are_the_legacy_widths() {
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            0x1122_3344,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        let widths = |frames: &[Vec<u8>]| -> Vec<usize> { frames.iter().map(Vec::len).collect() };
+        assert_eq!(
+            widths(&burst.before_map_test),
+            vec![3, 46],
+            "the empty ENTITY is 3, MAIN_CHARACTER2_EMPIRE is 46",
+        );
+        assert_eq!(
+            widths(&burst.after_map_test),
+            vec![9, 2041, 1531],
+            "GOLD is 9, POINTS is 1 + 255*8, SKILL_LEVEL is 1 + 255*6",
+        );
+    }
+
+    /// Neither half carries a `GC_PHASE`. The burst's phase record is the caller's
+    /// `SetPhase(PHASE_LOADING)`, so a caller that also wrote one would put two on the wire.
+    #[test]
+    fn no_loading_burst_half_carries_a_phase_record() {
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            7,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        for frame in burst
+            .before_map_test
+            .iter()
+            .chain(burst.after_map_test.iter())
+        {
+            assert_ne!(
+                frame[0], 253,
+                "GC_PHASE is the descriptor's phase transition"
+            );
+        }
+    }
+
+    /// `GC_MAIN_CHARACTER2_EMPIRE` is byte 113, not byte 15. Byte 15 is the two-empire
+    /// variant legacy never sends, and choosing the wrong one is a silent Parity break.
+    #[test]
+    fn main_character_uses_the_empire_variant_byte() {
+        let mut bytes = Vec::new();
+        main_character(&hero(), 0x1122_3344).encode_into(&mut bytes);
+        assert_eq!(bytes[0], 113, "byte 113 is GC_MAIN_CHARACTER2_EMPIRE");
+        assert_ne!(bytes[0], 15, "byte 15 is HEADER_GC_MAIN_CHARACTER_OLD");
+        assert_eq!(bytes.len(), 46, "the empire variant is 46 packed bytes");
+    }
+
+    /// The field order of `TPacketGCMainCharacter` (`G/packet.h:1004-1013`): header, dwVID,
+    /// wRaceNum, the 25-byte szName, the three longs, empire, skill group.
+    #[test]
+    fn main_character_bytes_are_in_legacy_field_order() {
+        let hero = hero();
+        let mut bytes = Vec::new();
+        main_character(&hero, 0x1122_3344).encode_into(&mut bytes);
+        assert_eq!(
+            &bytes[1..5],
+            &0x1122_3344u32.to_le_bytes(),
+            "dwVID little-endian"
+        );
+        assert_eq!(&bytes[5..7], &5u16.to_le_bytes(), "wRaceNum is the job");
+        assert_eq!(&bytes[7..12], b"Arges", "the Name, NUL-terminated");
+        assert_eq!(&bytes[12..32], &[0u8; 20], "the rest of the Name is zero");
+        assert_eq!(&bytes[32..36], &hero.x.to_le_bytes(), "lx");
+        assert_eq!(&bytes[36..40], &hero.y.to_le_bytes(), "ly");
+        assert_eq!(
+            &bytes[40..44],
+            &[0u8; 4],
+            "lz is the world-owned height, zero here"
+        );
+        assert_eq!(bytes[44], 2, "empire");
+        assert_eq!(bytes[45], 6, "skill_group");
+    }
+
+    /// `strlcpy` copies at most `sizeof - 1` bytes and always terminates, so the last field
+    /// byte is the NUL even for a Name the store's `CHECK` would refuse.
+    #[test]
+    fn a_name_longer_than_the_field_is_truncated_and_terminated() {
+        let mut hero = hero();
+        hero.name = "A".repeat(40);
+        let mut bytes = Vec::new();
+        main_character(&hero, 1).encode_into(&mut bytes);
+        assert_eq!(bytes.len(), 46, "the field never grows");
+        assert_eq!(
+            &bytes[7..31],
+            &[b'A'; 24],
+            "24 Name bytes, as strlcpy copies"
+        );
+        assert_eq!(bytes[31], 0, "the 25th field byte is the terminator");
+    }
+
+    #[test]
+    fn a_name_of_exactly_24_characters_fills_the_field() {
+        let mut hero = hero();
+        hero.name = "B".repeat(24);
+        let mut bytes = Vec::new();
+        main_character(&hero, 1).encode_into(&mut bytes);
+        assert_eq!(&bytes[7..31], &[b'B'; 24]);
+        assert_eq!(bytes[31], 0);
+    }
+
+    /// `MainCharacterPacket` sends the map's music: byte 138 with the name and the volume
+    /// when the volume flag is on, byte 137 with the name alone when it is off, and byte 113
+    /// when the map has no music (`G/char.cpp:1972-2009`). An empty name is no music.
+    #[test]
+    fn the_own_character_record_carries_the_maps_music() {
+        use quest::host::{Bgm, Settings};
+        use std::collections::BTreeMap;
+        let hero = hero();
+        let settings = Settings {
+            bgm: BTreeMap::from([(
+                1,
+                Bgm {
+                    name: b"enter_the_east.mp3".to_vec(),
+                    volume: 0.5,
+                },
+            )]),
+            bgm_volume_enable: true,
+            ..Settings::default()
+        };
+        let vol = main_character_on(&hero, 1, 1, &settings);
+        assert_eq!(vol[0], 138, "music with the flag is byte 138");
+        assert_eq!(vol.len(), 75, "the volume variant is 75 packed bytes");
+        assert_eq!(&vol[7..12], b"Arges", "the Name still leads");
+        assert_eq!(
+            &vol[32..50],
+            b"enter_the_east.mp3",
+            "szBGMName follows the Name"
+        );
+        assert_eq!(&vol[57..61], &0.5f32.to_le_bytes(), "fBGMVol");
+        assert_eq!(&vol[61..65], &hero.x.to_le_bytes(), "lx shifts by 29");
+        let plain = Settings {
+            bgm_volume_enable: false,
+            ..settings.clone()
+        };
+        let novol = main_character_on(&hero, 1, 1, &plain);
+        assert_eq!(novol[0], 137, "music without the flag is byte 137");
+        assert_eq!(
+            novol.len(),
+            71,
+            "the plain music variant is 71 packed bytes"
+        );
+        assert_eq!(
+            &novol[32..50],
+            b"enter_the_east.mp3",
+            "szBGMName follows the Name"
+        );
+        assert_eq!(&novol[57..61], &hero.x.to_le_bytes(), "lx unshifted");
+        let silent = main_character_on(&hero, 1, 72, &settings);
+        assert_eq!(silent[0], 113, "a map with no music is byte 113");
+        assert_eq!(silent.len(), 46, "the plain record is 46 packed bytes");
+        // An instance map folds onto its base (`FIX_DUNGEON_MUSIC`).
+        let folded = main_character_on(&hero, 1, 10_001, &settings);
+        assert_eq!(folded[0], 138, "instance map 10001 plays map 1's music");
+        let mut empty = settings;
+        empty.bgm.insert(
+            1,
+            Bgm {
+                name: Vec::new(),
+                volume: 0.5,
+            },
+        );
+        let none = main_character_on(&hero, 1, 1, &empty);
+        assert_eq!(none[0], 113, "an empty name is no music");
+    }
+
+    #[test]
+    fn gold_record_carries_the_full_64_bit_value() {
+        let hero = hero();
+        let mut bytes = Vec::new();
+        GcGold::new(gold(&hero)).encode_into(&mut bytes);
+        assert_eq!(bytes[0], 224, "GC_CHARACTER_GOLD");
+        assert_eq!(&bytes[1..9], &0x0012_3456_789a_bcdeu64.to_le_bytes());
+    }
+
+    /// The points record is 2041 bytes: one header byte and 255 eight-byte slots. Legacy's
+    /// `pack.points[255]` is the last field of `TPacketGCPoints`, so the array starts one byte
+    /// after the header.
+    #[test]
+    fn points_record_is_2041_bytes_of_little_endian_slots() {
+        let mut bytes = Vec::new();
+        GcPoints::new(points(&hero(), &hero_points())).encode_into(&mut bytes);
+        assert_eq!(bytes.len(), 2041, "1 header byte plus 255 eight-byte slots");
+        assert_eq!(bytes[0], 16, "GC_CHARACTER_POINTS");
+        assert_eq!(&bytes[9..17], &9i64.to_le_bytes(), "slot 1 is POINT_LEVEL");
+    }
+
+    /// The two slots legacy leaves uninitialised, pinned so the Defect cannot creep back in.
+    #[test]
+    fn points_writes_the_two_slots_legacy_leaves_uninitialised() {
+        let slots = points(&hero(), &hero_points());
+        assert_eq!(
+            slots[0], 0,
+            "POINT_NONE is written as zero, not stack garbage"
+        );
+        assert_eq!(
+            slots[2], 77,
+            "POINT_VOICE carries the character's stored voice"
+        );
+    }
+
+    #[test]
+    fn points_carry_the_stored_and_the_derived_values() {
+        let hero = hero();
+        let slots = points(&hero, &hero_points());
+        assert_eq!(slots[point::POINT_EXP], hero.exp);
+        assert_eq!(slots[point::POINT_NEXT_EXP], levels::next_exp(hero.level));
+        assert_eq!(slots[point::POINT_HP], i64::from(hero.hp));
+        assert_eq!(slots[point::POINT_SP], i64::from(hero.sp));
+        assert_eq!(slots[point::POINT_STAMINA], i64::from(hero.stamina));
+        assert_eq!(slots[point::POINT_GOLD], hero.gold);
+        assert_eq!(slots[point::POINT_CONQUEROR_LEVEL], 3);
+        assert_eq!(slots[point::POINT_CONQUEROR_EXP], hero.conqueror_exp);
+        assert_eq!(
+            slots[point::POINT_CONQUEROR_NEXT_EXP],
+            levels::conqueror_next_exp(3),
+        );
+        assert_eq!(slots[point::POINT_ST], 11);
+        assert_eq!(slots[point::POINT_HT], 13);
+        assert_eq!(slots[point::POINT_DX], 17);
+        assert_eq!(slots[point::POINT_IQ], 19);
+        assert_eq!(slots[point::POINT_SUNGMA_STR], 21);
+        assert_eq!(slots[point::POINT_SUNGMA_HP], 22);
+        assert_eq!(slots[point::POINT_SUNGMA_MOVE], 23);
+        assert_eq!(slots[point::POINT_SUNGMA_IMMUNE], 24);
+    }
+
+    /// The engine a login loads holds the stored experience, which a death penalty takes from
+    /// and the save writes back.
+    #[test]
+    fn the_loaded_points_hold_the_stored_exp() {
+        assert_eq!(hero_points().exp(), hero().exp);
+    }
+
+    /// The three base speeds are 100, which is `SetPoint` in `CHARACTER::Init` plus the haste
+    /// bonus that is 0 with no party.
+    #[test]
+    fn points_carry_the_three_base_speeds() {
+        let slots = points(&hero(), &hero_points());
+        assert_eq!(slots[point::POINT_MOV_SPEED], 100);
+        assert_eq!(slots[point::POINT_ATT_SPEED], 100);
+        assert_eq!(slots[point::POINT_CASTING_SPEED], 100);
+    }
+
+    /// From `POINT_ST` on, every slot is `GetPoint`, except the three conqueror slots, which
+    /// come from the row, and the movement speed, which is `GetLimitPoint`.
+    #[test]
+    fn every_slot_from_point_st_is_the_engine_value() {
+        let hero = hero();
+        let state = hero_points();
+        let slots = points(&hero, &state);
+        let overwritten = [
+            point::POINT_CONQUEROR_LEVEL,
+            point::POINT_CONQUEROR_EXP,
+            point::POINT_CONQUEROR_NEXT_EXP,
+            point::POINT_MOV_SPEED,
+        ];
+        for (kind, slot) in slots.iter().enumerate().skip(point::POINT_ST) {
+            if overwritten.contains(&kind) {
+                continue;
+            }
+            assert_eq!(*slot, i64::from(state.get_point(kind)), "point slot {kind}");
+        }
+        assert_eq!(
+            slots[point::POINT_MOV_SPEED],
+            i64::from(state.limit_point(point::POINT_MOV_SPEED)),
+        );
+    }
+
+    /// A level-1 warrior with the creation attributes 6, 4, 3 and 3: the five grades
+    /// `ComputeBattlePoints` gives it, and the three maxima of `ComputePoints`, each a hand sum
+    /// of the warrior row (600 + 4 x 40, 200 + 3 x 20, 800 + 4 x 5).
+    #[test]
+    fn a_fresh_warrior_is_sent_its_grades_and_maxima() {
+        let warrior = Character {
+            job: 0,
+            level: 1,
+            conqueror_level: 0,
+            st: 6,
+            ht: 4,
+            dx: 3,
+            iq: 3,
+            ..hero()
+        };
+        let slots = points(&warrior, &load_points(&warrior, 0));
+        assert_eq!(slots[point::POINT_ATT_GRADE], 14);
+        assert_eq!(slots[point::POINT_DEF_GRADE], 4);
+        assert_eq!(slots[point::POINT_CLIENT_DEF_GRADE], 5);
+        assert_eq!(slots[point::POINT_MAGIC_ATT_GRADE], 8);
+        assert_eq!(slots[point::POINT_MAGIC_DEF_GRADE], 5);
+        assert_eq!(slots[point::POINT_MAX_HP], 760);
+        assert_eq!(slots[point::POINT_MAX_SP], 260);
+        assert_eq!(slots[point::POINT_MAX_STAMINA], 820);
+    }
+
+    /// `SetPlayerProto` puts the stored minutes played in the real `POINT_PLAYTIME`
+    /// (`G/char.cpp:2296`), and `PointsPacket` sends `GetPoint`, the instant slot, which
+    /// nothing sets (`G/char.cpp:2056-2057`).
+    #[test]
+    fn the_playtime_loads_as_a_real_point_the_points_record_does_not_send() {
+        let hero = hero();
+        let state = load_points(&hero, 0);
+        assert_eq!(state.real_point(point::POINT_PLAYTIME), 0x0a0b_0c0d);
+        assert_eq!(points(&hero, &state)[point::POINT_PLAYTIME], 0);
+    }
+
+    /// The unlocks are stored since ledger 449, so the burst reads the hero's own, as it
+    /// reads the gaya, the biologist and the lock.
+    #[test]
+    fn the_slots_of_unstored_state_are_zero() {
+        let slots = points(&hero(), &hero_points());
+        assert_eq!(
+            slots[point::POINT_GAYA],
+            0x0012_3456,
+            "the gaya is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_BIOLOGIST_STATE],
+            3,
+            "the mission is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_BIOLOGIST_ITEMS_TAKEN],
+            4,
+            "the taken is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_BIOLOGIST_COMPLETED],
+            0,
+            "the completed is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_SECURED_STATE],
+            0,
+            "the lock is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_SECURED_PASSWORD],
+            999_999,
+            "the lock's password is the row's own"
+        );
+        assert_eq!(
+            slots[point::POINT_INVEN],
+            5,
+            "the unlocks are the row's own"
+        );
+    }
+
+    /// The maxima are the engine's, from the assassin row: 650 + 13 x 40 hit points,
+    /// 200 + 19 x 20 spell points and 800 + 13 x 5 stamina. The stored hit points are far
+    /// above the maximum, and the loading burst sends them unclamped, as legacy does.
+    #[test]
+    fn point_maxima_are_derived_from_the_attributes() {
+        let hero = hero();
+        let slots = points(&hero, &hero_points());
+        assert_eq!(slots[point::POINT_MAX_HP], 1170);
+        assert_eq!(slots[point::POINT_MAX_SP], 580);
+        assert_eq!(slots[point::POINT_MAX_STAMINA], 865);
+        assert_eq!(slots[point::POINT_HP], 0x0012_3456);
+    }
+
+    /// Map 384 wants a movement will of 65 and a hit-point will of 60. The hero is a conqueror
+    /// with 23 and 22, so the client is told half its speed and half its maximum hit points,
+    /// in the points record and in its own insert record.
+    #[test]
+    fn a_weak_conqueror_is_sent_half_its_speed_and_hit_points() {
+        let hero = hero();
+        let state = load_points(&hero, 384);
+        let slots = points(&hero, &state);
+        assert_eq!(slots[point::POINT_MOV_SPEED], 50);
+        assert_eq!(slots[point::POINT_MAX_HP], 585);
+        let mut bytes = Vec::new();
+        character_add(&state, 1, hero_at(), [0; 2]).encode_into(&mut bytes);
+        assert_eq!(bytes[24], 50, "bMovingSpeed");
+        assert_eq!(bytes[25], 100, "bAttackSpeed");
+    }
+
+    /// `TPacketGCPointChange` (`G/packet.h:1064-1071`): a four-byte `int` header, the VID, the
+    /// type byte, then the amount and the value as `long long`.
+    #[test]
+    fn a_point_change_is_25_bytes_in_legacy_field_order() {
+        let record = PointRecord {
+            kind: 0x05,
+            amount: -0x0102_0304_0506_0708,
+            value: 0x1112_1314_1516_1718,
+            broadcast: false,
+        };
+        let frames = point_changes(&[record], 0x2122_2324);
+        assert_eq!(frames.len(), 1);
+        let mut expected = vec![0x11, 0, 0, 0, 0x24, 0x23, 0x22, 0x21, 0x05];
+        expected.extend_from_slice(&(-0x0102_0304_0506_0708i64).to_le_bytes());
+        expected.extend_from_slice(&[0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11]);
+        assert_eq!(frames[0], expected);
+    }
+
+    /// The item load's tail: `CheckMaximumPoints` clamps the stored hit and spell points, one
+    /// record each, and only then `PointsPacket` sends the gold and the clamped points.
+    #[test]
+    fn the_item_load_clamps_the_pools_before_the_points_packet() {
+        let hero = hero();
+        let mut state = hero_points();
+        let frames = item_load_points(&hero, &mut state, 0x0a0b_0c0d);
+        assert_eq!(headers(&frames), vec![0x11, 0x11, 224, 16]);
+        let hp = GcPointChange::decode(&frames[0]).expect("a point change");
+        assert_eq!(
+            (hp.vid, hp.change_type, hp.amount, hp.value),
+            (0x0a0b_0c0d, 5, 0, 1170),
+        );
+        let sp = GcPointChange::decode(&frames[1]).expect("a point change");
+        assert_eq!((sp.change_type, sp.amount, sp.value), (7, 0, 580));
+        assert_eq!((state.hp(), state.sp()), (1170, 580));
+        let hp_slot = 1 + 8 * point::POINT_HP;
+        assert_eq!(&frames[3][hp_slot..hp_slot + 8], &1170i64.to_le_bytes());
+    }
+
+    /// A character inside its maxima is not clamped, so the item load sends only the pair.
+    #[test]
+    fn the_item_load_sends_no_change_for_pools_inside_their_maxima() {
+        let hero = Character {
+            hp: 1170,
+            sp: 1,
+            ..hero()
+        };
+        let mut state = load_points(&hero, 0);
+        let frames = item_load_points(&hero, &mut state, 1);
+        assert_eq!(headers(&frames), vec![224, 16]);
+    }
+
+    #[test]
+    fn skill_levels_are_255_empty_slots() {
+        let skills = skill_levels();
+        assert_eq!(skills.len(), 255);
+        for (index, skill) in skills.iter().enumerate() {
+            assert_eq!(skill.master_type, 0, "skill slot {index}");
+            assert_eq!(skill.level, 0, "skill slot {index}");
+            assert_eq!(skill.next_read, 0, "skill slot {index}");
+        }
+        let mut bytes = Vec::new();
+        GcSkillLevelNew {
+            header: GcSkillLevelNew::header(),
+            skills,
+        }
+        .encode_into(&mut bytes);
+        assert_eq!(bytes.len(), 1531, "1 header byte plus 255 six-byte slots");
+    }
+
+    #[test]
+    fn the_loaded_parts_are_the_base_part_and_the_stored_hair_and_sash() {
+        // `SetPlayerProto` puts the base part in the main part and reads the hair and the sash
+        // from the row; the stored armour part (0x1122) is what the select screen shows, and
+        // the load puts it back only by wearing the armour.
+        let parts = hero_points().parts();
+        assert_eq!(parts[0], 1, "the base part");
+        assert_eq!(parts[1], 0, "weapon: nothing is worn");
+        assert_eq!(parts[2], 0, "head");
+        assert_eq!(parts[3], 0x3344, "hair");
+        assert_eq!(parts[4], 0x5566, "sash");
+        assert_eq!(parts[5], 0, "aura: not stored");
+    }
+
+    /// `TPacketGCCharacterAdd` is 35 packed bytes and its header is **byte 1**, not 68: byte
+    /// 68 is `GC_CHARACTER_POSITION`.
+    #[test]
+    fn character_add_is_35_bytes_under_byte_one() {
+        let hero = hero();
+        let mut bytes = Vec::new();
+        character_add(&hero_points(), 0x1122_3344, hero_at(), [0; 2]).encode_into(&mut bytes);
+        assert_eq!(bytes.len(), 35, "1 header byte plus the 34-byte payload");
+        assert_eq!(bytes[0], 1, "HEADER_GC_CHARACTER_ADD is byte 1");
+        assert_ne!(bytes[0], 68, "byte 68 is GC_CHARACTER_POSITION");
+        assert_eq!(&bytes[1..5], &0x1122_3344u32.to_le_bytes(), "dwVID");
+        assert_eq!(
+            &bytes[5..9],
+            &0u32.to_le_bytes(),
+            "the angle is the body's rotation, 0 as it enters"
+        );
+        assert_eq!(&bytes[9..13], &hero.x.to_le_bytes(), "x");
+        assert_eq!(&bytes[13..17], &hero.y.to_le_bytes(), "y");
+        assert_eq!(&bytes[17..21], &[0u8; 4], "z");
+        assert_eq!(
+            bytes[21], 6,
+            "bType is GetCharType(), CHAR_TYPE_PC for every PC"
+        );
+        assert_eq!(&bytes[22..24], &5u16.to_le_bytes(), "wRaceNum");
+        assert_eq!(bytes[24], BASE_SPEED, "bMovingSpeed");
+        assert_eq!(bytes[25], BASE_SPEED, "bAttackSpeed");
+        assert_eq!(bytes[26], 0, "bStateFlag");
+        assert_eq!(&bytes[27..35], &[0u8; 8], "the two affect-flag words");
+    }
+
+    /// `ADD_CHARACTER_STATE_DEAD` is `1 << 0` (`G/packet.h:862`): the state flag of a dead
+    /// character is 1, and of a living one 0.
+    #[test]
+    fn the_state_flag_is_1_for_the_dead_and_0_for_the_living() {
+        assert_eq!(state_flag(true), 1);
+        assert_eq!(state_flag(false), 0);
+    }
+
+    /// The summary record is 70 packed bytes: 1 header, 4 vid, 25 name, 12 parts, then the
+    /// eleven trailing fields. `dwNewIsGuildName` is a `BYTE`, which is what makes 70 the right
+    /// total and not 73.
+    #[test]
+    fn character_additional_is_70_bytes_over_byte_136() {
+        let hero = hero();
+        let mut bytes = Vec::new();
+        character_additional(
+            &PcCard::of(&hero, 3, 15),
+            &hero_points(),
+            0x1122_3344,
+            (0, 0),
+        )
+        .encode_into(&mut bytes);
+        assert_eq!(bytes.len(), 70);
+        assert_eq!(bytes[0], 136, "GC_CHAR_ADDITIONAL_INFO");
+        assert_eq!(&bytes[1..5], &0x1122_3344u32.to_le_bytes(), "dwVID");
+        assert_eq!(&bytes[5..10], b"Arges", "szName");
+        assert_eq!(&bytes[10..30], &[0u8; 20], "the rest of szName is zero");
+        assert_eq!(
+            &bytes[30..42],
+            &[1, 0, 0, 0, 0, 0, 0x44, 0x33, 0x66, 0x55, 0, 0],
+            "awPart is main, weapon, head, hair, sash, aura as six LE words",
+        );
+        assert_eq!(bytes[42], 2, "bEmpire");
+        assert_eq!(
+            &bytes[43..47],
+            &0u32.to_le_bytes(),
+            "dwGuildID: no guild is ported"
+        );
+        assert_eq!(&bytes[47..51], &9u32.to_le_bytes(), "dwLevel");
+        assert_eq!(&bytes[51..55], &3u32.to_le_bytes(), "dwConquerorLevel");
+        assert_eq!(
+            &bytes[55..57],
+            &(-4321i16).to_le_bytes(),
+            "sAlignment: the alignment in tenths"
+        );
+        assert_eq!(bytes[57], 3, "bPKMode: PROTECT, level 9 is below 15");
+        assert_eq!(&bytes[58..62], &0u32.to_le_bytes(), "dwMountVnum");
+        assert_eq!(bytes[62], 0, "bRefineElementType");
+        assert_eq!(bytes[63], 0, "dwNewIsGuildName is a BYTE");
+        assert_eq!(bytes[64], 0, "byPremium");
+        assert_eq!(&bytes[65..69], &0i32.to_le_bytes(), "iPremiumTime");
+        assert_eq!(bytes[69], 3, "bLanguage comes from the descriptor");
+    }
+
+    /// A player below the PK protect level is in `PK_MODE_PROTECT` and one at it in
+    /// `PK_MODE_PEACE` (`G/char.cpp:2211-2222`, `:2378-2379`), and the INFO carries the mode.
+    #[test]
+    fn the_pk_mode_is_protect_only_below_the_protect_level() {
+        assert_eq!(pk_mode(14, 15), PK_MODE_PROTECT);
+        assert_eq!(pk_mode(15, 15), PK_MODE_PEACE);
+        assert_eq!(pk_mode(99, 15), PK_MODE_PEACE);
+        assert_eq!(
+            pk_mode(1, 0),
+            PK_MODE_PEACE,
+            "a protect level of 0 protects no one"
+        );
+        assert_eq!(
+            pk_mode(29, 30),
+            PK_MODE_PROTECT,
+            "the BYTE default without a locale"
+        );
+        let mut hero = hero();
+        for (level, mode) in [(14, PK_MODE_PROTECT), (15, PK_MODE_PEACE)] {
+            hero.level = level;
+            let card = PcCard::of(&hero, 0, 15);
+            assert_eq!(card.pk_mode, mode, "level {level}");
+            let mut bytes = Vec::new();
+            character_additional(&card, &hero_points(), 1, (0, 0)).encode_into(&mut bytes);
+            assert_eq!(bytes[57], mode, "bPKMode at level {level}");
+        }
+    }
+
+    /// The insert reports the point and the angle the view gives it, not the stored row's:
+    /// a body that walked or turned is shown where it stands.
+    #[test]
+    fn the_insert_reports_the_point_and_angle_it_is_given() {
+        let at = InsertAt {
+            angle: 135.0,
+            x: 0x0102_0304,
+            y: -0x0506_0708,
+            z: 0x0a0b,
+        };
+        let mut bytes = Vec::new();
+        character_add(&hero_points(), 1, at, [0; 2]).encode_into(&mut bytes);
+        assert_eq!(&bytes[5..9], &135f32.to_le_bytes(), "angle");
+        assert_eq!(&bytes[9..13], &0x0102_0304i32.to_le_bytes(), "x");
+        assert_eq!(&bytes[13..17], &(-0x0506_0708i32).to_le_bytes(), "y");
+        assert_eq!(&bytes[17..21], &0x0a0bi32.to_le_bytes(), "z");
+    }
+
+    /// The enter-game burst, one record per frame, in the order `CInputLogin::Entergame`
+    /// writes them. With an empty map and nobody in view the world shows only the own pair, so
+    /// it is six records around the descriptor's own `SetPhase(PHASE_GAME)`.
+    #[test]
+    fn enter_game_burst_headers_are_in_legacy_order() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(3),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            1_600_000_000,
+        );
+        assert_eq!(
+            headers(&burst.before_phase),
+            vec![1, 136, 126],
+            "CHARACTER_ADD, CHAR_ADDITIONAL_INFO, AFFECT_ADD",
+        );
+        assert_eq!(
+            headers(&burst.after_phase),
+            vec![106, 121, 4],
+            "TIME, CHANNEL, CHAT, all after the phase change",
+        );
+    }
+
+    /// Neither half carries a `GC_PHASE`: `Entergame`'s is the descriptor's phase transition,
+    /// and writing it as content as well would put two on the wire.
+    #[test]
+    fn no_enter_game_half_carries_a_phase_record() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        for frame in all(&burst.before_phase, &burst.after_phase) {
+            assert_ne!(
+                frame[0], 253,
+                "GC_PHASE is the descriptor's phase transition"
+            );
+        }
+    }
+
+    /// `CInputDB::PlayerLoad` folds an instance map onto its base map before the allow test.
+    #[test]
+    fn an_instance_map_folds_onto_its_base_map() {
+        assert_eq!(public_map_index(10_000), 1, "10000 is instance 1");
+        assert_eq!(public_map_index(10_501), 1, "the tail is dropped");
+        assert_eq!(
+            public_map_index(19_999),
+            1,
+            "the whole instance range folds"
+        );
+        assert_eq!(public_map_index(20_000), 2, "20000 is instance 2");
+    }
+
+    /// A map below the instance base is its own public map, unchanged.
+    #[test]
+    fn a_base_map_is_its_own_public_map() {
+        for map in [0, 1, 56, 9999] {
+            assert_eq!(public_map_index(map), map, "map {map} is unchanged");
+        }
+    }
+
+    /// The allow test is membership in the Channel's configured maps, which are base maps.
+    #[test]
+    fn the_allow_test_is_membership_in_the_channel_maps() {
+        let maps = [1, 3, 4, 21, 373];
+        assert!(map_is_allowed(21, &maps), "a listed map is allowed");
+        assert!(!map_is_allowed(2, &maps), "an unlisted map is refused");
+        assert!(
+            !map_is_allowed(21, &[]),
+            "a Channel with no maps allows nothing"
+        );
+    }
+
+    /// An instance map is allowed when its base map is listed, which is what legacy's fold is
+    /// for. Testing the raw index would refuse it.
+    #[test]
+    fn an_instance_map_is_allowed_through_its_base_map() {
+        let maps = [1, 21];
+        assert!(
+            map_is_allowed(public_map_index(10_501), &maps),
+            "instance 10501 is instance 1, and 1 is listed"
+        );
+        assert!(
+            !map_is_allowed(public_map_index(20_501), &maps),
+            "instance 20501 is instance 2, which is not listed"
+        );
+    }
+
+    /// The configured list is a `u32` per map and the map index is a signed `long`. A map
+    /// index above `i32::MAX` is not a legacy map, but it must not wrap into a listed value.
+    #[test]
+    fn a_wide_map_index_cannot_wrap_into_a_listed_map() {
+        assert!(
+            !map_is_allowed(i32::MIN, &[u32::MAX >> 1]),
+            "a negative index matches nothing"
+        );
+    }
+
+    /// The revive-invisible affect is unconditional: `Entergame` calls `ReviveInvisible(5)`
+    /// after the NPC records and before `SetPhase(PHASE_GAME)`.
+    #[test]
+    fn the_revive_invisible_affect_is_sent_once_with_five_seconds() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        let affects: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
+            .into_iter()
+            .filter(|f| f[0] == 126)
+            .collect();
+        assert_eq!(affects.len(), 1, "exactly one GC_AFFECT_ADD");
+        let frame = affects[0];
+        assert_eq!(
+            frame.len(),
+            22,
+            "1 header byte plus the 21-byte affect element"
+        );
+        assert_eq!(&frame[1..5], &215u32.to_le_bytes(), "AffectType 215");
+        assert_eq!(frame[5], 0, "bPointIdxApplyOn");
+        assert_eq!(&frame[6..10], &0i32.to_le_bytes(), "lApplyValue");
+        assert_eq!(&frame[10..14], &28u32.to_le_bytes(), "AFFECT_FLAG 28");
+        assert_eq!(
+            &frame[14..18],
+            &5i32.to_le_bytes(),
+            "lDuration is five seconds"
+        );
+        assert_eq!(&frame[18..22], &0i32.to_le_bytes(), "lSPCost");
+    }
+
+    /// `Entergame` calls `SetPhase(PHASE_GAME)` after the revive-invisible affect, so the
+    /// affect is the last record before the phase change and the time record is the first
+    /// after it.
+    #[test]
+    fn the_affect_is_the_last_record_before_the_phase_change() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        assert_eq!(
+            burst.before_phase.last().map(|f| f[0]),
+            Some(126),
+            "GC_AFFECT_ADD is written just before SetPhase(PHASE_GAME)"
+        );
+        assert_eq!(
+            burst.after_phase.first().map(|f| f[0]),
+            Some(106),
+            "GC_TIME is the first record after it"
+        );
+    }
+
+    #[test]
+    fn time_then_channel_carry_their_whole_values() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            4,
+            1_600_000_000,
+        );
+        let frames = all(&burst.before_phase, &burst.after_phase);
+        let time_at = frames.iter().position(|f| f[0] == 106).unwrap();
+        let channel_at = frames.iter().position(|f| f[0] == 121).unwrap();
+        assert!(time_at < channel_at, "GC_TIME is written before GC_CHANNEL");
+        assert_eq!(
+            frames[time_at],
+            &vec![106, 0x00, 0x10, 0x5e, 0x5f],
+            "GC_TIME is 5 bytes"
+        );
+        assert_eq!(frames[channel_at], &vec![121, 4], "GC_CHANNEL is 2 bytes");
+    }
+
+    /// The chat line is the last record. Its `wSize` covers the whole record, the type is a
+    /// command line, and the text is the unterminated tail.
+    #[test]
+    fn the_letters_event_line_is_the_last_record() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        let last = burst.after_phase.last().unwrap();
+        assert_eq!(last[0], 4, "GC_CHAT is byte 4");
+        assert_eq!(
+            usize::from(last[1]) | (usize::from(last[2]) << 8),
+            last.len(),
+            "wSize"
+        );
+        assert_eq!(
+            last[3], CHAT_TYPE_COMMAND,
+            "the event line is a command line"
+        );
+        assert_eq!(&last[4..8], &0u32.to_le_bytes(), "id stays 0");
+        assert_eq!(last[8], 2, "the character's empire");
+        assert_eq!(
+            last[9], 1,
+            "bCanFormat stays true, as the constructor leaves it"
+        );
+        assert_eq!(&last[10..], b"letters_event 0");
+    }
+
+    /// The client trims the line on a space or a control byte, so the sent text is exactly
+    /// `letters_event` with the `0` left for the client to show as a flag. Both are what
+    /// `SEventLetters` writes; the sent bytes must keep the space.
+    #[test]
+    fn the_letters_event_line_keeps_its_space() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        let last = burst.after_phase.last().unwrap();
+        let text = &last[10..];
+        assert_eq!(text, b"letters_event 0");
+        assert!(text.contains(&b' '), "the space is part of the sent bytes");
+    }
+
+    /// In the event the line reads 1: `SEventLetters`'s first arm runs when the
+    /// `letters_event` flag is not 0.
+    #[test]
+    fn in_the_event_the_letters_line_reads_one() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: true,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        let last = burst.after_phase.last().unwrap();
+        assert_eq!(&last[10..], b"letters_event 1");
+    }
+
+    /// An empty NPC list sends nothing at all: `SendNPCPosition` returns before it writes.
+    #[test]
+    fn an_empty_npc_list_sends_no_record() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        assert!(
+            !all(&burst.before_phase, &burst.after_phase)
+                .into_iter()
+                .any(|f| f[0] == 115),
+            "GC_NPC_POSITION is byte 115 and must be absent",
+        );
+    }
+
+    /// An NPC whose every field differs, so that no field can stand in for another.
+    fn smith() -> Npc {
+        let mut npc = Npc {
+            vid: 0x8000_0007,
+            vnum: 0x1_4e30,
+            race: 0x4e30,
+            char_type: CHAR_TYPE_NPC,
+            on_click: 1,
+            x: 12_345,
+            y: 23_456,
+            z: 7,
+            rotation: 135,
+            empire: 3,
+            moving_speed: 120,
+            attack_speed: 90,
+            name: b"Fierar".to_vec(),
+            ..world::npc::Npc::default()
+        };
+        npc.fight.add(common::point_slot::POINT_MOV_SPEED, 120);
+        npc.fight.add(common::point_slot::POINT_ATT_SPEED, 90);
+        npc
+    }
+
+    /// An NPC's insert carries each of its own fields, and nothing it does not have.
+    #[test]
+    fn an_npc_insert_carries_each_of_its_fields() {
+        let add = npc_add(&smith());
+        assert_eq!(add.dw_vid, 0x8000_0007);
+        assert_eq!(
+            add.angle.to_bits(),
+            135f32.to_bits(),
+            "the angle is its rotation"
+        );
+        assert_eq!((add.x, add.y, add.z), (12_345, 23_456, 7));
+        assert_eq!((add.b_type, add.w_race_num), (CHAR_TYPE_NPC, 0x4e30));
+        assert_eq!((add.b_moving_speed, add.b_attack_speed), (120, 90));
+        assert_eq!((add.b_state_flag, add.dw_affect_flag), (0, [0, 0]));
+        let warp = Npc {
+            char_type: CHAR_TYPE_WARP,
+            ..smith()
+        };
+        assert_eq!(
+            npc_add(&warp).b_type,
+            CHAR_TYPE_WARP,
+            "the type is the proto's"
+        );
+    }
+
+    /// An NPC's summary is its VID, name, empire and `PK_MODE_FREE`; a warp or goto has none.
+    #[test]
+    fn only_an_npc_of_type_npc_has_a_summary() {
+        let summary = npc_additional(&smith()).unwrap();
+        assert_eq!(summary.dw_vid, 0x8000_0007);
+        assert_eq!(&summary.name[..7], b"Fierar\0");
+        assert_eq!((summary.b_empire, summary.b_pk_mode), (3, PK_MODE_FREE));
+        assert_eq!((summary.dw_level, summary.b_language), (0, 0));
+        for char_type in [
+            CHAR_TYPE_WARP,
+            CHAR_TYPE_GOTO,
+            CHAR_TYPE_MONSTER,
+            CHAR_TYPE_STONE,
+        ] {
+            let other = Npc {
+                char_type,
+                ..smith()
+            };
+            assert!(npc_additional(&other).is_none(), "type {char_type}");
+        }
+    }
+
+    /// A mini-map entry carries its own type, name and position.
+    #[test]
+    fn a_mini_map_entry_carries_its_own_fields() {
+        let position = NpcPosition {
+            char_type: CHAR_TYPE_GOTO,
+            name: b"Poarta".to_vec(),
+            x: 62_200,
+            y: 55_600,
+        };
+        let entry = npc_position(&position);
+        assert_eq!(entry.npc_type, CHAR_TYPE_GOTO);
+        assert_eq!(&entry.name[..7], b"Poarta\0");
+        assert_eq!((entry.x, entry.y), (62_200, 55_600));
+    }
+
+    /// A name is cut at its first NUL and at 24 bytes, and the field always ends with a NUL.
+    #[test]
+    fn a_name_field_is_cut_as_strlcpy_cuts_it() {
+        assert_eq!(&name_bytes_field(b"Ab\0cd")[..4], b"Ab\0\0");
+        let long = name_bytes_field(&[b'x'; 30]);
+        assert_eq!(long[..24], [b'x'; 24]);
+        assert_eq!(long[24], 0, "the 25th byte is the terminator");
+    }
+
+    /// What the world's `Show` wrote leads the burst byte for byte and in its order: the burst
+    /// adds no insert of its own, so a neighbour's pair stays where the view put it.
+    #[test]
+    fn the_shown_records_lead_the_burst_unchanged() {
+        let mut shown = own_pair(3);
+        let neighbour = PcCard {
+            name: "Spectre".to_string(),
+            job: 7,
+            empire: 1,
+            level: 21,
+            conqueror_level: 1,
+            language: 5,
+            pk_mode: PK_MODE_PEACE,
+            skill_group: 0,
+            alignment: 0,
+            voice: 0,
+            premium: 0,
+            premium_time: 0,
+        };
+        let at = InsertAt {
+            angle: 90.0,
+            x: 0x0000_1000,
+            y: -0x0000_2000,
+            z: 0,
+        };
+        let mut add = Vec::new();
+        character_add(&hero_points(), 0x0a0b_0c0d, at, [0; 2]).encode_into(&mut add);
+        let mut info = Vec::new();
+        character_additional(&neighbour, &hero_points(), 0x0a0b_0c0d, (0, 0))
+            .encode_into(&mut info);
+        shown.extend([add, info]);
+        let burst = enter_game_burst(
+            &hero(),
+            shown.clone(),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        assert_eq!(
+            headers(&burst.before_phase),
+            vec![1, 136, 1, 136, 126],
+            "the shown pairs, then the affect",
+        );
+        assert_eq!(&burst.before_phase[..4], &shown[..], "byte for byte");
+    }
+
+    /// The burst writes no insert itself: a world that showed nothing leaves only the affect
+    /// before the phase change, so the own pair can never reach the client twice.
+    #[test]
+    fn the_burst_adds_no_insert_of_its_own() {
+        let burst = enter_game_burst(
+            &hero(),
+            Vec::new(),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        assert_eq!(headers(&burst.before_phase), vec![126]);
+    }
+
+    /// A map with a mini-map list sends it once, after what the world showed and before the
+    /// affect (`G/input_login.cpp:590-593`), with every entry in list order.
+    #[test]
+    fn the_mini_map_sits_between_the_shown_records_and_the_affect() {
+        let npcs = npcs_listed();
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &npcs,
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        assert_eq!(headers(&burst.before_phase), vec![1, 136, 115, 126]);
+        let mut expected = Vec::new();
+        GcNpcPosition::new(npcs.positions.iter().map(npc_position).collect())
+            .encode_into(&mut expected)
+            .expect("two entries fit");
+        assert_eq!(burst.before_phase[2], expected);
+    }
+
+    /// A second character in view is described by `GC_ENTITY` at load. `wSize` is a `WORD`
+    /// holding the whole record, and each `TPacketEntityInfo` is 28 bytes.
+    #[test]
+    fn a_visible_character_reaches_the_loading_burst() {
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &with_neighbour(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        let entity = &burst.before_map_test[0];
+        assert_eq!(entity[0], 249, "GC_ENTITY is byte 249");
+        assert_eq!(entity.len(), 31, "3 header bytes plus one 28-byte entry");
+        assert_eq!(
+            usize::from(entity[1]) | (usize::from(entity[2]) << 8),
+            entity.len(),
+            "wSize is the whole record",
+        );
+        assert_eq!(&entity[3..7], &0x0a0b_0c0du32.to_le_bytes(), "dwVID");
+        assert_eq!(&entity[7..11], &7u32.to_le_bytes(), "dwRaceVNum is a DWORD");
+        assert_eq!(
+            &entity[11..23],
+            &[0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44, 0x55, 0x55, 0x66, 0x66],
+            "wPart[CHR_EQUIPPART_NUM] is six little-endian words",
+        );
+        assert_eq!(&entity[23..27], &0x0000_1000i32.to_le_bytes(), "xPos");
+        assert_eq!(&entity[27..31], &(-0x0000_2000i32).to_le_bytes(), "yPos");
+    }
+
+    /// `GC_ENTITY` is still sent when nobody is in view: the client expects the record, and
+    /// legacy writes it with a size of 3 and no entries.
+    #[test]
+    fn an_empty_view_still_sends_the_entity_record() {
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        assert_eq!(
+            burst.before_map_test[0],
+            vec![249, 3, 0],
+            "a size of 3 and no entries"
+        );
+    }
+
+    /// The quickslot records come from the store, which the descriptor reads, so the burst
+    /// built from the row alone holds none.
+    #[test]
+    fn the_burst_leaves_the_quickslot_records_to_the_descriptor() {
+        let burst = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &empty_view(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        assert!(
+            !all(&burst.before_map_test, &burst.after_map_test)
+                .into_iter()
+                .any(|f| f[0] == 28),
+            "GC_QUICKSLOT_ADD is byte 28 and must be absent",
+        );
+    }
+
+    /// `GC_HYBRIDCRYPT_SDB` is a loading record, not an enter-game one, and `legacy/` has no
+    /// `package_info.txt`, so legacy sends it for no map. It must be absent from both bursts.
+    #[test]
+    fn the_package_sdb_is_absent_from_both_bursts() {
+        let loading = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &with_neighbour(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        let entering = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &npcs_listed(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        assert!(
+            !all(&loading.before_map_test, &loading.after_map_test)
+                .into_iter()
+                .any(|f| f[0] == 153),
+            "absent from the loading burst"
+        );
+        assert!(
+            !all(&entering.before_phase, &entering.after_phase)
+                .into_iter()
+                .any(|f| f[0] == 153),
+            "absent from enter-game"
+        );
+    }
+
+    /// A hard-coded welcome would be a Divergence: the snapshot has no `GREET` row.
+    #[test]
+    fn no_hard_coded_greeting_is_sent() {
+        let burst = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &no_npcs(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        let lines: Vec<&Vec<u8>> = all(&burst.before_phase, &burst.after_phase)
+            .into_iter()
+            .filter(|f| f[0] == 4)
+            .collect();
+        assert_eq!(lines.len(), 1, "only the letters_event line");
+        assert_eq!(&lines[0][10..], b"letters_event 0");
+    }
+
+    /// Each record is its own frame. Concatenating them would hand the client one TEA unit
+    /// where legacy hands it several.
+    #[test]
+    fn every_record_is_its_own_frame() {
+        let loading = loading_burst(
+            &hero(),
+            &hero_points(),
+            1,
+            &with_neighbour(),
+            0,
+            &quest::host::Settings::default(),
+        );
+        let entering = enter_game_burst(
+            &hero(),
+            own_pair(0),
+            &npcs_listed(),
+            None,
+            BurstAfter {
+                silence: Vec::new(),
+                hide_lines: Vec::new(),
+                priv_lines: Vec::new(),
+                advance_window: None,
+                letters_event: false,
+                fish_lines: Vec::new(),
+                land_lines: Vec::new(),
+                kingdom_line: None,
+                switchbot_lines: Vec::new(),
+            },
+            1,
+            0,
+        );
+        for half in [
+            &loading.before_map_test,
+            &loading.after_map_test,
+            &entering.before_phase,
+            &entering.after_phase,
+        ] {
+            assert!(half.iter().all(|frame| !frame.is_empty()));
+            assert!(!half.is_empty(), "every half of a burst has a record");
+        }
+    }
+
+    /// A one-sectree map at sectree (1, 2) whose cells are all `fill` but `free`, with its
+    /// region in an atlas as map 5.
+    fn enclosed(fill: u32, free: &[(usize, usize)]) -> (MapCells, MapAtlas) {
+        use gamedata::server_attr::{CellBlock, SectreeGrid, ServerAttr, SECTREE_CELLS};
+        let mut cells = vec![fill; SECTREE_CELLS * SECTREE_CELLS];
+        for &(x, y) in free {
+            cells[y * SECTREE_CELLS + x] = 0;
+        }
+        let block = CellBlock::from_cells(&cells);
+        let attr = ServerAttr::from_blocks(1, 1, vec![block]).expect("one block");
+        let grid = SectreeGrid {
+            x: 1,
+            y: 2,
+            columns: 1,
+            rows: 1,
+        };
+        let region = gamedata::map_atlas::MapRegion {
+            index: 5,
+            name: b"five".to_vec(),
+            sx: 6400,
+            sy: 12_800,
+            ex: 12_800,
+            ey: 19_200,
+            spawn: (7000, 13_000),
+            empire_spawns: Some([(7100, 13_100), (7200, 13_200), (7300, 13_300)]),
+        };
+        (
+            MapCells::new(grid, std::sync::Arc::new(attr)),
+            MapAtlas::from_regions(vec![region]),
+        )
+    }
+
+    #[test]
+    fn a_character_enters_at_the_first_movable_point_or_its_empires_recall() {
+        use gamedata::server_attr::{ATTR_BLOCK, ATTR_OBJECT};
+        // Cell (64, 64) of the sectree holds (9625, 16025).
+        let saved = (9625, 16_025);
+        let (cells, atlas) = enclosed(ATTR_BLOCK, &[(64, 64)]);
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 5, 1, saved),
+            EnteringPosition::Movable { x: 9625, y: 16_025 }
+        );
+        let (cells, atlas) = enclosed(ATTR_OBJECT, &[(65, 64)]);
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 5, 1, saved),
+            EnteringPosition::Movable { x: 9675, y: 16_025 }
+        );
+        // Nothing movable: the empire's spawn, or the single spawn outside 1..=3.
+        let (cells, atlas) = enclosed(ATTR_BLOCK | ATTR_OBJECT, &[]);
+        let recalled: Vec<EnteringPosition> = (0..=4)
+            .map(|empire| entering_position(Some(&cells), &atlas, 5, empire, saved))
+            .collect();
+        let at = |x, y| EnteringPosition::Recalled { x, y };
+        assert_eq!(
+            recalled,
+            [
+                at(7000, 13_000),
+                at(7100, 13_100),
+                at(7200, 13_200),
+                at(7300, 13_300),
+                at(7000, 13_000)
+            ]
+        );
+        // A private map of map 5 recalls to map 5's spawn.
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 50_003, 2, saved),
+            at(7200, 13_200)
+        );
+        // No movable point and no region, or no sectree at all: legacy's `Show` fails and the
+        // saved position is kept.
+        assert_eq!(
+            entering_position(Some(&cells), &atlas, 6, 1, saved),
+            EnteringPosition::Kept
+        );
+        assert_eq!(
+            entering_position(None, &atlas, 5, 3, saved),
+            EnteringPosition::Kept
+        );
+        assert_eq!(
+            entering_position(None, &MapAtlas::default(), 5, 1, saved),
+            EnteringPosition::Kept
+        );
+    }
+
+    #[test]
+    fn a_recall_position_off_the_maps_sectrees_keeps_the_saved_one() {
+        use gamedata::server_attr::{ATTR_BLOCK, SECTREE_SIZE};
+        let saved = (9625, 16_025);
+        let (cells, _) = enclosed(ATTR_BLOCK, &[]);
+        // The sectree spans 6400..12800 x 12800..19200; each empire's spawn sits one unit past
+        // a different edge, and the single spawn on its last point.
+        let region = gamedata::map_atlas::MapRegion {
+            index: 5,
+            name: b"five".to_vec(),
+            sx: 6400,
+            sy: 12_800,
+            ex: 12_800,
+            ey: 19_200,
+            spawn: (2 * SECTREE_SIZE - 1, 3 * SECTREE_SIZE - 1),
+            empire_spawns: Some([
+                (SECTREE_SIZE - 1, 13_000),
+                (2 * SECTREE_SIZE, 13_000),
+                (7000, 3 * SECTREE_SIZE),
+            ]),
+        };
+        let atlas = MapAtlas::from_regions(vec![region]);
+        let placed: Vec<EnteringPosition> = (0..=3)
+            .map(|empire| entering_position(Some(&cells), &atlas, 5, empire, saved))
+            .collect();
+        assert_eq!(
+            placed,
+            [
+                EnteringPosition::Recalled {
+                    x: 12_799,
+                    y: 19_199
+                },
+                EnteringPosition::Kept,
+                EnteringPosition::Kept,
+                EnteringPosition::Kept
+            ]
+        );
+    }
+
+    #[test]
+    fn the_owners_map_1_moves_a_character_saved_on_a_blocked_cell() {
+        let map_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../legacy/gamedata/locale/europe/map");
+        let atlas = MapAtlas::load(&map_dir).expect("the legacy map directory parses");
+        let region = atlas.region(1).expect("map 1");
+        let attr = gamedata::server_attr::load_map(&map_dir, region).expect("map 1's cells");
+        let grid = gamedata::server_attr::SectreeGrid::of(region).expect("placed");
+        let cells = MapCells::new(grid, std::sync::Arc::new(attr));
+        let enter = |empire, saved| entering_position(Some(&cells), &atlas, 1, empire, saved);
+        // Answers of an independent model: liblzo2 decoding the file, walking the same 161
+        // points. (470000, 950000) is blocked, as is every point to (71, 71); (100, 0) is not.
+        assert_eq!(
+            enter(1, (470_000, 950_000)),
+            EnteringPosition::Movable {
+                x: 470_100,
+                y: 950_000
+            }
+        );
+        assert_eq!(
+            enter(1, (470_000, 950_050)),
+            EnteringPosition::Movable {
+                x: 470_100,
+                y: 950_050
+            }
+        );
+        // A water cell is movable.
+        assert_eq!(
+            enter(1, (450_100, 903_400)),
+            EnteringPosition::Movable {
+                x: 450_100,
+                y: 903_400
+            }
+        );
+        // Every point around (416025, 902425) is blocked: the empire's town spawn.
+        assert_eq!(
+            enter(1, (416_025, 902_425)),
+            EnteringPosition::Recalled {
+                x: 469_300,
+                y: 964_200
+            }
+        );
+        assert_eq!(
+            enter(2, (416_025, 902_425)),
+            EnteringPosition::Recalled {
+                x: 417_600,
+                y: 956_100
+            }
+        );
+    }
+
+    #[test]
+    fn the_owners_map_235_recalls_off_its_sectrees_so_the_saved_position_is_kept() {
+        let map_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../legacy/gamedata/locale/europe/map");
+        let atlas = MapAtlas::load(&map_dir).expect("the legacy map directory parses");
+        let region = atlas.region(235).expect("map 235");
+        assert_eq!(region.name, b"metin2_map_n_flame_dungeon_01");
+        let attr = gamedata::server_attr::load_map(&map_dir, region).expect("map 235's cells");
+        let grid = gamedata::server_attr::SectreeGrid::of(region).expect("placed");
+        let cells = MapCells::new(grid, std::sync::Arc::new(attr));
+        // Town.txt's empire lines put every recall at (614200, 706800), which is map 62's.
+        for empire in 1..=3 {
+            assert_eq!(
+                crate::warp::recall_position(&atlas, 235, empire),
+                Some((614_200, 706_800))
+            );
+        }
+        assert_eq!(atlas.index_at(614_200, 706_800), Some(62));
+        // A saved position with no movable point around it (here, off the map) is kept.
+        for empire in 1..=3 {
+            assert_eq!(
+                entering_position(Some(&cells), &atlas, 235, empire, (0, 0)),
+                EnteringPosition::Kept
+            );
+        }
+    }
+}

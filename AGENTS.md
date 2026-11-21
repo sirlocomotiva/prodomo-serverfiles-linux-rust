@@ -123,38 +123,38 @@ one is missing, say in the receipt that its gate did not run, and check formatti
 
 ## WORKSPACE
 
-The workspace has nine crates:
+The workspace has nine crates under `crates/`:
 
 | crate | contents |
 |---|---|
-| `protocol/` | Transport-free client wire codecs: CG and GC records, framing helpers, TEA, and the machine-readable CG and GC inventories. Nothing server-to-server. |
-| `common/` | Configuration, logging, legacy enums and constants, and the GM list rules. `src/tables.rs` uses `repr(C, packed)` structs; never size a wire record from them. |
-| `net/` | Tokio transport helpers for the fixed-size client framing. |
-| `db/` | The PostgreSQL store: pool, migrations, the item-ID range pool, and the queries each system needs. |
-| `gamedata/` | Readers for the legacy Game data formats, the importer for `legacy/sql/gamedata`, and the pure rule modules kept from the retired DB server. |
-| `world/` | Maps, sectors, characters, events, and the gameplay rules that act on them. |
-| `quest/` | The `qc` port and the Lua 5.1 quest runtime. |
-| `prodomo/` | The one binary: listeners, descriptors, the game thread, the in-process bus, and the Operator commands. |
-| `parity/` | The scripted client (test-only): `Server` runs the real `prodomo` binary, `Client` plays raw client bytes over TCP, and `inventory` checks the Parity inventory in `.scratch/parity/`. The scenarios are `prodomo/tests/parity.rs`. |
+| `crates/protocol/` | Transport-free client wire codecs: CG and GC records, framing helpers, TEA, and the machine-readable CG and GC inventories. Nothing server-to-server. |
+| `crates/common/` | Configuration, logging, legacy enums and constants, and the GM list rules. `src/tables.rs` uses `repr(C, packed)` structs; never size a wire record from them. |
+| `crates/net/` | Tokio transport helpers for the fixed-size client framing. |
+| `crates/db/` | The PostgreSQL store: pool, migrations, the item-ID range pool, and the queries each system needs. |
+| `crates/gamedata/` | Readers for the legacy Game data formats, the importer for `legacy/sql/gamedata`, and the pure rule modules kept from the retired DB server. |
+| `crates/world/` | Maps, sectors, characters, events, and the gameplay rules that act on them. |
+| `crates/quest/` | The `qc` port and the Lua 5.1 quest runtime. |
+| `crates/prodomo/` | The one binary: listeners, descriptors, the game thread, the in-process bus, and the Operator commands. |
+| `crates/parity/` | The scripted client (test-only): `Server` runs the real `prodomo` binary, `Client` plays raw client bytes over TCP, and `inventory` checks the Parity inventory in `docs/parity/`. The scenarios are `crates/prodomo/tests/parity.rs`. |
 
 `server/` is the frozen legacy source; it is not part of the workspace.
 
-The Parity inventory is `.scratch/parity/` (`spec.md` explains it). Its generated tables come from
-`python3 .scratch/parity/tools/gen.py`; edit only their `status`, `scenario`, and `note` cells. When a
+The Parity inventory is `docs/parity/` (`spec.md` explains it). Its generated tables come from
+`python3 docs/parity/tools/gen.py`; edit only their `status`, `scenario`, and `note` cells. When a
 change ports a row, set it to `ported`, name the scenario, and add the scenario in the same change.
 
 Outside the crates:
 
 | path | contents |
 |---|---|
-| `.scratch/migration/` | The agents' working files: the goal (`migration-goal.md`), where the work stands (`progress.md`), and the owner's questions and standing decisions (`owner-questions.md`). They are tracked and go into each section's commit. |
-| `.scratch/parity/` | The Parity inventory and its generator. |
-| `.scratch/probes/` | The width and enumeration probes that code comments cite, by ledger section; its `README.md` says how to build one. |
-| `.scratch/<feature>/issues/` | Open issues (see "Agent skills"). |
-| `.scratch/tmp/` | Ignored. A session's scratch output: gate receipts, logs, a copy of the tree for a mutation sweep. Never cite a file there from code or from a tracked document: it exists on one machine only. Delete what a session put there when its section lands. |
+| `docs/migration/` | The agents' working files: the goal (`migration-goal.md`), where the work stands (`progress.md`), and the owner's questions and standing decisions (`owner-questions.md`). They are tracked and go into each section's commit. |
+| `docs/parity/` | The Parity inventory and its generator. |
+| `tools/probes/` | The width and enumeration probes that code comments cite, by ledger section; its `README.md` says how to build one. |
+| `docs/issues/<feature>/issues/` | Open issues (see "Agent skills"). |
+| `.tmp/` | Ignored. A session's scratch output: gate receipts, logs, a copy of the tree for a mutation sweep. Never cite a file there from code or from a tracked document: it exists on one machine only. Delete what a session put there when its section lands. |
 | `tools/gates.sh` | Runs every gate below and writes the receipt: `tools/gates.sh <output-dir>`. |
 | `tools/mutate.py` | The mutation sweep driver; its header says how to run it on a copy of the tree. |
-| `compose.yaml`, `Dockerfile`, `config/prodomo.toml.example` | The play-test kit and the commented configuration. |
+| `docker-compose.yml`, `Dockerfile`, `config/prodomo.toml.example` | The play-test kit and the commented configuration. |
 | `legacy/`, `server/` | The owner's deployment snapshot and the frozen legacy source ("LEGACY REFERENCE"). |
 
 ## BUILD AND TEST
@@ -196,7 +196,7 @@ temporary folder, no core file. Ledger 683 found 32,472 scenario directories, 15
 server three days old on the test machine. A test process that is killed runs no `Drop`, so
 cleaning up in `Drop` alone is not enough.
 
-- **A scratch database is named by `db/tests/support/lease.rs`** (`lease::database_name`), never
+- **A scratch database is named by `crates/db/tests/support/lease.rs`** (`lease::database_name`), never
   by hand. The name carries its process's owner token, and the process holds an advisory lock on
   that token while it lives; the next test process drops every database whose lock is free.
 - **A scratch directory comes from `parity::scratch`** (`ScratchDir`, or `unique_path` for a
@@ -213,7 +213,7 @@ cleaning up in `Drop` alone is not enough.
   was killed anyway, any next test run cleans up after it.
 - `PRODOMO_KEEP_SCENARIO_ROOT=1` keeps each scenario server's directory (log and configuration)
   for a look; the next test process removes it.
-- A session's own scratch output goes to `.scratch/tmp/`, not to `/tmp`, and is deleted when its
+- A session's own scratch output goes to `.tmp/`, not to `/tmp`, and is deleted when its
   section lands. A copy of the tree (for a mutation sweep) is removed when the sweep ends; a Git
   worktree is removed with `git worktree remove`.
 
@@ -274,7 +274,7 @@ can be a second late and a Pulse can be stepped late; a scenario must pass anywa
 - **A loss keeps its output.** `tools/gates.sh` keeps `test-db.log`; read the panic, the
   client's `GAME` records and the server's `SERVER` lines (a failing scenario prints its
   server's last 400 console lines) before running the scenario again. To reproduce one, run
-  the built test binary many times at once (`seq 1 144 | xargs -P 24 ...` from `prodomo/`),
+  the built test binary many times at once (`seq 1 144 | xargs -P 24 ...` from `crates/prodomo/`),
   which is the load a full run gives it.
 
 ## PROTOCOL COVERAGE
@@ -287,15 +287,15 @@ Key every coverage metric on the **wire byte**, never on an identifier name.
 | game to client | 134 | 125 | 9 (5 fixed-size, 4 dynamic; `REFINE_INFORMATION` and `SYNC_POSITION` have codecs and stale flags, `docs/STATUS.md` C8) |
 
 - The game-to-client registration table was taken from the client's `PythonNetworkStream.cpp`
-  while the client source was in the repository. It is recorded in `protocol/src/gc_inventory.rs`.
+  while the client source was in the repository. It is recorded in `crates/protocol/src/gc_inventory.rs`.
   `server/server/game/packet_info.cpp` registers only inbound records and must never be used to
   measure game-to-client coverage. Bytes 100, 102 and 133 are outside the table by design:
-  the mark downloader decodes them on its own path (`protocol/src/gc_mark.rs`), so they are
+  the mark downloader decodes them on its own path (`crates/protocol/src/gc_mark.rs`), so they are
   implemented but never rows.
 - The Reference client source is no longer in the repository (ADR-0001). `server/server/game/packet.h`
   and the server's send sites are the reference for record widths; the owner calibrates them against
   the Reference client in the play test.
-- `protocol/src/cg_inventory.rs` and `gc_inventory.rs` are the machine-readable tables. Each row's
+- `crates/protocol/src/cg_inventory.rs` and `gc_inventory.rs` are the machine-readable tables. Each row's
   implemented flag is tested, so update the flag in the same change as the codec.
 - Nine GC bytes are decoded by the client but never sent by the checked-in server: 6, 15, 18, 72,
   73, 84, 112, 117, and 213. Treat them as reachability questions, not porting work. Byte 6 is the
@@ -312,7 +312,7 @@ These rules exist because each one was broken at least once in this repository. 
   without a control is not evidence. If the harness provides the `metin2-verify-absence-source-sweep`
   skill, use it before reporting an absence.
 - **A module's `//!` doc resolves intra-doc links in the crate root, not in its own module.**
-  On this toolchain a bare `EWindows` in the module doc of `common/src/item_slots.rs` fails
+  On this toolchain a bare `EWindows` in the module doc of `crates/common/src/item_slots.rs` fails
   `RUSTDOCFLAGS="-D warnings"` even though the enum is declared in the same file 200 lines below,
   while the same link inside an *item's* doc comment in that file resolves normally. Write
   `crate::item_slots::EWindows` in a module's `//!` block. The asymmetry is what makes this look
@@ -393,9 +393,9 @@ These rules exist because each one was broken at least once in this repository. 
 
 ## STORE AND OPERATOR COMMANDS
 
-- A schema change is a new file in `db/migrations/` (`NNNN_name.sql`); never edit a migration that
+- A schema change is a new file in `crates/db/migrations/` (`NNNN_name.sql`); never edit a migration that
   has been applied, because sqlx refuses a changed checksum. `db::store::MIGRATOR` embeds the
-  folder, `db/build.rs` rebuilds when it changes, and a test pins that versions start at 1 with no
+  folder, `crates/db/build.rs` rebuilds when it changes, and a test pins that versions start at 1 with no
   gap.
 - Keep a `CHECK` constraint behind every rule the Rust types enforce (login and Name shape, the
   argon2id prefix, currency ranges), so a row written by hand cannot break an invariant the game
@@ -484,11 +484,11 @@ final check.
 - Never run an unrestricted `git clean`, `git checkout .`, or `git stash -u`.
 - Keep the legacy C++ source until the play test demonstrates Parity.
 - Generated output is disposable: root `target/`, the root `log/` folder a locally run server
-  writes, and `.scratch/tmp/`.
+  writes, and `.tmp/`.
 - A research note, a survey, a finished issue or a one-off script is not kept in the tree. Its
   findings go into the ledger section, `docs/PROTOCOL_NOTES.md` or a code comment, and the file is
   deleted in the change that finishes the work; Git keeps the rest. A probe that code cites goes
-  to `.scratch/probes/`. Nothing new goes at the repository root.
+  to `tools/probes/`. Nothing new goes at the repository root.
 - `.gitignore` names no build-output directory (`debug/`, `log/`, `x86/`, `bin/`, `obj/`): nothing
   is built in `server/`, and `server/extern/include/` has tracked directories with such names.
   Do not add such a rule.
@@ -506,7 +506,7 @@ final check.
 
 ### Issue tracker
 
-Issues and specs are local markdown files under `.scratch/<feature>/`. See
+Issues and specs are local markdown files under `docs/issues/<feature>/`. See
 `docs/agents/issue-tracker.md`. An issue whose work has landed is deleted in that change; a
 `ready-for-agent` file is always work still to do.
 

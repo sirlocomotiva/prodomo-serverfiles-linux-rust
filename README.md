@@ -27,13 +27,13 @@ The reasons are in [`docs/adr/`](docs/adr/).
 
 | path | contents |
 |---|---|
-| `protocol/`, `common/`, `net/`, `db/`, `gamedata/`, `world/`, `quest/`, `prodomo/`, `parity/` | The Rust workspace. `prodomo/` is the one server binary and `parity/` the scripted client its scenarios use; see `AGENTS.md` for what each crate holds. |
+| `crates/` | The nine-crate Rust workspace (`protocol`, `common`, `net`, `db`, `gamedata`, `world`, `quest`, `prodomo`, `parity`). `crates/prodomo/` is the one server binary and `crates/parity/` the scripted client its scenarios use; see `AGENTS.md` for what each crate holds. |
 | `config/prodomo.toml.example` | The commented configuration, with the legacy ports. Channel 1 and the Shared Channel run; Channels 2-4 are commented out. |
+| `docker-compose.yml`, `Dockerfile` | PostgreSQL 18 and the server together, for Docker Compose or Podman Compose. |
+| `docs/` | Architecture decisions, status, play-test checklist, protocol notes, rewrite ledger, parity inventory (`docs/parity/`), and migration notes (`docs/migration/`). |
 | `legacy/` | The owner's legacy Game data (protos, maps, quests, locale strings, drop and shop tables), configuration, and SQL schema and table rows. See [`legacy/README.md`](legacy/README.md). |
 | `server/` | The frozen legacy C++ server source. It is the behavioural reference and is never modified or built. |
-| `compose.yaml`, `Dockerfile` | PostgreSQL 18 and the server together, for Podman or Docker. |
-| `tools/gates.sh` | Runs every gate below and writes a summary: `tools/gates.sh <output-dir>`. |
-| `.scratch/` | Working files that are tracked on purpose: the Parity inventory, the agents' goal and progress, the owner's questions, the width probes and open issues. |
+| `tools/` | Build/verification gate runner (`tools/gates.sh`), mutation sweep driver (`tools/mutate.py`), and i686 C++ width probes (`tools/probes/`). |
 
 ## Documentation
 
@@ -74,34 +74,33 @@ DATABASE_URL=postgres://prodomo:CHANGE-ME@127.0.0.1:55432/prodomo \
 
 ## Running it
 
-### With Compose
+### With Docker Compose (or Podman Compose)
 
-`compose.yaml` starts PostgreSQL 18 and the server together, with Podman or Docker:
+`docker-compose.yml` starts PostgreSQL 18 and the server together, with Docker or Podman:
 
 ```bash
 printf 'POSTGRES_PASSWORD=%s\n' 'CHANGE-ME' > .env      # pick your own password
 cp config/prodomo.toml.example prodomo.toml
 # in prodomo.toml set public_ip to this machine's address, and
 # [store].url to postgres://prodomo:CHANGE-ME@postgres:5432/prodomo
-podman compose up -d --build                            # or: docker compose up -d --build
-podman compose run --rm prodomo account create alice    # asks for the password twice
-podman compose run --rm prodomo gm grant alice Admin implementor
-podman compose logs -f prodomo
+docker compose up -d --build                            # or: podman compose up -d --build
+docker compose run --rm prodomo account create alice    # asks for the password twice
+docker compose run --rm prodomo gm grant alice Admin implementor
+docker compose logs -f prodomo
 ```
 
 The image build fetches the locked crates once. `legacy/` is mounted read-only, the store keeps
 its data in the `pgdata` volume, and the server's log files go to the `logs` volume. The
 published ports are the legacy ones the client's `serverinfo` names: 30001 (auth), 30003 and
-30005 (Channel 1) and 30019 (the Shared Channel). `podman compose stop` or `podman compose down`
-stops the server with SIGTERM, and it saves every character before it exits. Do not use
+30005 (Channel 1) and 30019 (the Shared Channel). `docker compose stop` or `docker compose down`
+stops the server with SIGTERM, and it saves every character before it exits. With Podman, avoid
 `podman compose restart`: in the test of ledger 680 it ended the server without the SIGTERM.
 
 ### Pointing the Reference client (`serverinfo.py`)
 
 Point the Prodomo 5.4 client's `serverinfo.py` at the `[network].public_ip` configured in
 `prodomo.toml` (for example `127.0.0.1` on the same machine, or the host/VM LAN IP) using the
-default ports from `config/prodomo.toml.example` and `compose.yaml`:
-
+default ports from `config/prodomo.toml.example` and `docker-compose.yml`:
 | `serverinfo.py` entry | address | port | notes |
 |---|---|---|---|
 | `AUTH` (`STATE_NONE` / auth server) | `<public_ip>` | `30001` | Login / authentication listener (`[auth].port`). |
@@ -119,8 +118,8 @@ disconnects.
 Start PostgreSQL 18 (pick your own password; this one is only an example):
 
 ```bash
-podman run -d --name prodomo-pg18 -e POSTGRES_USER=prodomo -e POSTGRES_PASSWORD=CHANGE-ME \
-  -e POSTGRES_DB=prodomo -p 127.0.0.1:55432:5432 postgres:18
+docker run -d --name prodomo-pg18 -e POSTGRES_USER=prodomo -e POSTGRES_PASSWORD=CHANGE-ME \
+  -e POSTGRES_DB=prodomo -p 127.0.0.1:55432:5432 postgres:18    # or: podman run ...
 cp config/prodomo.toml.example prodomo.toml
 # [store].url in the example already names this container; put your password in it
 cargo run -p prodomo -- --config prodomo.toml serve

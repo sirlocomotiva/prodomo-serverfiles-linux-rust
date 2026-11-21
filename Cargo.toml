@@ -1,15 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "protocol",
-    "common",
-    "net",
-    "db",
-    "gamedata",
-    "world",
-    "quest",
-    "prodomo",
-    "parity",
+    "crates/protocol",
+    "crates/common",
+    "crates/net",
+    "crates/db",
+    "crates/gamedata",
+    "crates/world",
+    "crates/quest",
+    "crates/prodomo",
+    "crates/parity",
 ]
 
 [workspace.package]

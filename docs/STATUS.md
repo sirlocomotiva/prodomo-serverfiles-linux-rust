@@ -13,12 +13,12 @@ Last reviewed: 2026-11-15, the direction review (ledger 679); numbers updated at
 Steps 1 to 4 are done (Packages A–D complete). Step 5 (Package E: the owner's play test with the
 Reference client) is ready to begin (`docs/PLAYTEST.md`).
 
-| measure | value at ledger 744 |
+| measure | value at ledger 745 |
 |---|---|
 | Parity inventory | 2,332 rows: 1,812 `ported`, 0 `partial`, 520 `unused`, 0 `missing`; **Package B complete — all 12 inventory files closed** |
-| Scenarios | 608 tests in `prodomo/tests/parity.rs`, each against the real binary and a scratch store |
-| Tests | 5,797 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 744 has the receipt) |
-| Client records | client to game: 91 of 92 registered headers; game to client: 126 of 134 (`protocol/src/*_inventory.rs`) |
+| Scenarios | 608 tests in `crates/prodomo/tests/parity.rs`, each against the real binary and a scratch store |
+| Tests | 5,797 pass in 46 targets; the scenarios run only with `DATABASE_URL` (ledger 745 has the receipt) |
+| Client records | client to game: 91 of 92 registered headers; game to client: 126 of 134 (`crates/protocol/src/*_inventory.rs`) |
 | Store | PostgreSQL 18, 48 migrations |
 | Size | about 483,000 lines of Rust, tests included |
 | Idle cost | release build, Channel 1 and the Shared Channel, 65,604 NPCs and monsters, no player: 0.05 ms of each 40 ms Pulse, 595 MB |
@@ -59,7 +59,7 @@ step.
 | The steering documents went stale. | This page was 269 KB, with 690 lines of per-section narrative above its summary; the agents' goal and progress files stopped at ledger 229k; `AGENTS.md` miscounted ADRs and records; 76 owner questions sat in a folder named for one feature (`.scratch/equip/`, now `.scratch/migration/`); 321 KB of finished research notes and two finished issues still read as open work. | Done in ledgers 679 and 682; rule A3 |
 | `unused` rows were closed without the owner. | 445 rows; the spec asks for the owner's confirmation. | Decided: accepted in bulk, provisionally (2026-11-15). |
 | The store drifted from ADR-0003 in two columns. | `guild_comment.content` and `guild_grade.name` are `text`. | C5 |
-| Rules live in the binary crate. | `prodomo/src/game_state/` has over 100 rule modules (`guild.rs` 13,232 lines); `main.rs` is 17,779 lines and holds every record handler; `parity.rs` is 63,051 lines. `AGENTS.md` put gameplay rules in `world`. | F |
+| Rules live in the binary crate. | `crates/prodomo/src/game_state/` has over 100 rule modules (`guild.rs` 13,232 lines); `main.rs` is 17,779 lines and holds every record handler; `parity.rs` is 63,051 lines. `AGENTS.md` put gameplay rules in `world`. | F |
 | Test runs leak. | 15 `prodomo_test_*` databases, a scenario server three days old and 32,472 scenario directories in `/tmp` were found on the test machine. | Done in ledger 683 (C6); `AGENTS.md`, "TEST HYGIENE". |
 | No width has an independent witness. | `i686-linux-gnu-g++-12` was not installed; every recent receipt says "No width was measured". | C8; the compiler is installed since ledger 680. |
 | The play-test kit does not exist. | The README promised a `compose.yaml`; the README and the example disagreed on the store's port and password. | D; `compose.yaml` and the agreement landed in ledger 680. |
@@ -72,7 +72,7 @@ In this order. A package is done when its exit line holds, not when its sections
 
 1. **One list for what is left.** Done in ledger 686. Every `partial` and `missing` note ends
    with `Left:` and the items still missing, each checkable against the legacy source. The large
-   switches are generated tables (`.scratch/parity/tools/gen.py`): `item-use.md` (the `case`
+   switches are generated tables (`docs/parity/tools/gen.py`): `item-use.md` (the `case`
    labels of `UseItemEx`, `G/char_item.cpp:2718-7164`, and its limit checks), `points.md` (the
    arms of `PointChange` and `ApplyPoint`) and `skill-arms.md` (the per-skill switches of
    `G/char_skill.cpp`). *Exit:* 612 items left at ledger 686; the number only goes down.
@@ -80,7 +80,7 @@ In this order. A package is done when its exit line holds, not when its sections
    fireworks, the detectors, the scrolls of one kind), with one scenario per behaviour and one
    gate run for the section. The receipt names the run with `DATABASE_URL` and the run without
    it, and lists by name every test that failed on the first run. A scenario that fails in the
-   full suite is fixed or gets an issue under `.scratch/`; "passes alone" does not close it.
+   full suite is fixed or gets an issue under `docs/issues/`; "passes alone" does not close it.
    Read its failure against the legacy rule before calling it load: every scenario lost in
    ledgers 679 to 685 had its cause in the scenario (a draw, a wall-clock second, a window, a
    log line its server had already printed, a monster that wandered, a read cut short by five
@@ -116,11 +116,11 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 
 ### C. Harden what the review found (alongside B; all of it before D)
 
-1. **The Pulse budget.** **Done in ledger 739.** `prodomo/src/game_loop.rs` times every Pulse
+1. **The Pulse budget.** **Done in ledger 739.** `crates/prodomo/src/game_loop.rs` times every Pulse
    against the 40 ms budget, logs overruns, and reports p99/max/overruns at shutdown;
    `channel_one_load_run_keeps_p99_pulse_under_twenty_milliseconds` confirms p99 < 20 ms under
    8-client Channel 1 load.
-2. **The quest host's limit.** **Done in ledger 739.** `quest/src/manager.rs` enforces a
+2. **The quest host's limit.** **Done in ledger 739.** `crates/quest/src/manager.rs` enforces a
    1,000,000-instruction Lua hook cap (`ADR-0006`) per resume and condition evaluation;
    `a_runaway_quest_script_stops_as_a_script_error_and_keeps_the_pulse_counting` proves it.
 3. **Slow and silent clients.** **Done in ledger 739.** `max_client_outbox` closes stalled slow
@@ -128,10 +128,10 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
    connections, and `LiveClientSession` caps pre-login frames per phase (13/66/257); all three
    have passing scenarios.
 4. **One meaning for the test-server mode** (ADR-0007). **Done in ledger 742.** `command::effective_gm_level`
-   and `GameState::gm_level` answer every GM-level check across `prodomo/src/main.rs` and `game_state/*.rs`;
+   and `GameState::gm_level` answer every GM-level check across `crates/prodomo/src/main.rs` and `game_state/*.rs`;
    `GameState::new` and `parity::Server` default to `test_server = false` (shipped mode), and all 607
    scenarios run in shipped mode (with explicit `test_server = true` only on the two tests that test the mode).
-5. **The two `text` columns** become `bytea` in a new migration (ADR-0003). **Done in ledger 738** (`db/migrations/0048_guild_free_text_bytea.sql`, `db/src/guilds.rs`, `prodomo`).
+5. **The two `text` columns** become `bytea` in a new migration (ADR-0003). **Done in ledger 738** (`crates/db/migrations/0048_guild_free_text_bytea.sql`, `crates/db/src/guilds.rs`, `prodomo`).
 6. **The harness leaves nothing behind.** Done in ledger 683. A killed test process runs no
    `Drop`; the next test process now drops its databases (an advisory lock per process says
    whose owner is gone) and removes its directories and servers (`parity::scratch`), and
@@ -143,15 +143,15 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
    survivors closed by 12 new targeted unit tests (78/78 non-equivalent mutants killed; 1
    equivalent mutant `melee_quarter_chance_ge10` proved equivalent at `percent == 10` and pinned
    on both sides). The 450 deferred per-section sweeps are not owed.
-8. **Widths.** **Done in ledger 738.** `.scratch/probes/738/gc_widths.cpp` compiles verbatim
+8. **Widths.** **Done in ledger 738.** `tools/probes/738/gc_widths.cpp` compiles verbatim
    `server/server/game/packet.h` with `i686-linux-gnu-g++-12 -static` and verifies all 145
    game-to-client headers and dynamic sub-structs against Rust codecs with zero differences
-   (`protocol/src/gc_inventory.rs::probed_i686_widths_match_every_rust_codec`). Reconciled
+   (`crates/protocol/src/gc_inventory.rs::probed_i686_widths_match_every_rust_codec`). Reconciled
    `gc_inventory.rs`: `HEADER_GC_SYNC_POSITION` (`0x05`) flipped to `true` (126 of 134);
    `0x5f` (`HEADER_GC_REFINE_INFORMATION_OLD`) has no send site and stays `false` (`0x77`
    `HEADER_GC_REFINE_INFORMATION_NEW` is `true`).
 9. **A quest step's send order.** **Done in ledger 741.** All 47 `WorldMoves` and `QuietOwned`
-   kinds (`prodomo/src/game_state/{quests,quest_quiet}.rs`) are audited against legacy call-site
+   kinds (`crates/prodomo/src/game_state/{quests,quest_quiet}.rs`) are audited against legacy call-site
    writes (ledger 741): 19 emit no immediate client record, and the 26 wire-emitting kinds flush
    after the descriptor sends the step's committed `GC_SCRIPT` / item / point records (recorded in
    the Divergence register below alongside V22 and ledger 413;
@@ -165,7 +165,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
     herb own-dead-horse guard, `guild_war_bet.lua:39` format args (ADR-0004), and B5 (`victim_level`
     in `CalcAttackRating`).
 11. **A Warp the game thread orders for several characters.** **Done in ledger 741.**
-    `GameState::order_predeparted_warp` and `sort_vids_by_pid` (`prodomo/src/game_state.rs`)
+    `GameState::order_predeparted_warp` and `sort_vids_by_pid` (`crates/prodomo/src/game_state.rs`)
     pre-depart each member on the game thread in legacy ascending player-ID order ahead of
     `ClientOrder::Warp` across dungeon jumps/exits (`dungeons.rs`), guild/Meley warps (`guild.rs`,
     `meley.rs`), arena duels (`arena.rs`), and `FExitDungeon` (`party.rs`), holding each `Kept`
@@ -173,9 +173,9 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
     (`read_ordered_jump_departure`, `read_own_removal`, `forest_drop_warps_yankee_home`) pin the
     ascending PID order.
 12. **An item step's records against the world's own.** **Done in ledger 741.**
-    `ClientOutbox::place_mark` (`prodomo/src/client_registry.rs`), `GameState::run_item_step`
-    (`prodomo/src/game_state.rs`), and `flush_outbox_to_mark` in `finish_item_step`
-    (`prodomo/src/main.rs`) flush every world record queued before the item step ahead of
+    `ClientOutbox::place_mark` (`crates/prodomo/src/client_registry.rs`), `GameState::run_item_step`
+    (`crates/prodomo/src/game_state.rs`), and `flush_outbox_to_mark` in `finish_item_step`
+    (`crates/prodomo/src/main.rs`) flush every world record queued before the item step ahead of
     `moved.records` for all 39 `finish_item_step` callers while leaving post-step records in the
     outbox. The late-heal workaround in
     `every_apply_type_with_its_own_arm_moves_its_points_as_legacy` is removed and three unit tests
@@ -184,7 +184,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
 ### D. The play-test kit (opens step 5; the play test itself is out of scope for now)
 
 **Done in ledgers 680 and 744.**
-- Ledger 680: `compose.yaml` and `Dockerfile` for PostgreSQL 18 and `prodomo`, the README's Compose
+- Ledger 680: `docker-compose.yml` (originally `compose.yaml`) and `Dockerfile` for PostgreSQL 18 and `prodomo`, the README's Compose
   section, and the README and the example agreeing on the store's address. The image builds
   (101 MB), the stack starts with Podman, the four ports answer with the handshake phase,
   `account create` and `gm grant` run through `compose run`, and `compose stop` ends the server
@@ -192,7 +192,7 @@ A row of the generated arm tables (B9) closes with the family it belongs to (A2)
   ended it without SIGTERM; the kit says to stop and start instead).
 - Ledger 744: client `serverinfo.py` table in `README.md`; structured `phase`, hex `header`, byte
   length, and redacted hex `bytes` logging on every unknown, malformed, or refused client frame
-  (`prodomo/src/client_live.rs`, `prodomo/src/main.rs`, proven by
+  (`crates/prodomo/src/client_live.rs`, `crates/prodomo/src/main.rs`, proven by
   `unknown_and_refused_client_frames_log_phase_header_and_bytes_without_leaking_passwords`); and
   the written first-session play-test script `docs/PLAYTEST.md` starting with owner questions 7
   and 27.
@@ -209,13 +209,13 @@ player reaches that was `unused` is reopened.
 - A rule that needs only a character, a map and the Game data lives in `world`; `prodomo`'s
   `game_state` keeps what needs the clients, the store queue or several systems at once. New
   rule code follows this; old code moves when its package is open.
-- `prodomo/src/main.rs` keeps the command line and the boot; the record handlers move to modules
-  by phase. `prodomo/tests/parity.rs` splits into one module per inventory table.
+- `crates/prodomo/src/main.rs` keeps the command line and the boot; the record handlers move to modules
+  by phase. `crates/prodomo/tests/parity.rs` splits into one module per inventory table.
 - The Divergence and Defect registers below get an id per row, and code comments cite the id.
 
 ## Waiting on the owner
 
-The questions are in `.scratch/migration/owner-questions.md`, with what each blocks. Decided on
+The questions are in `docs/migration/owner-questions.md`, with what each blocks. Decided on
 2026-11-15: the play test comes last and is out of scope until the owner opens it; the
 test-server mode ships off (ADR-0007); the save cycle is 10 seconds; the `unused` rows stand,
 provisionally; ADR-0006 is accepted; this machine is the one for the mutation sweeps; the cross
@@ -262,7 +262,7 @@ route the target to its own file. Porting the sites is `sys.log` (package B8).
 | step | scope | state |
 |---|---|---|
 | 1. Restructure | One `prodomo` binary, TOML configuration, the PostgreSQL store, the Operator commands. | Done (ledger 177-179). |
-| 2. Parity inventory | Every legacy system and handler in `.scratch/parity/`, and the scripted client. | Done (181). |
+| 2. Parity inventory | Every legacy system and handler in `docs/parity/`, and the scripted client. | Done (181). |
 | 3. Vertical slice | Handshake to logout with save, with a Warp between maps. | Done (228). |
 | 4. Game systems | Items, NPCs and Transfers, quests, monsters and combat, skills, party and guild, dungeons and events, the Prodomo custom systems, GM commands. | Done (Packages B1–B9 and C1–C12 closed, ledgers 686–743). |
 | 5. Game data and play test | The play-test kit, then the owner's play test with the Reference client. | Play-test kit done (Package D, ledgers 680 & 744); ready for owner's play test (Package E). |
@@ -273,7 +273,7 @@ A Parity inventory item is ported only when its scripted-client scenario passes.
 is the test-only `parity` crate (181): `parity::Server` starts the real `prodomo` binary on ports the
 operating system picks, and `parity::Client` plays raw client bytes over TCP, built with the
 `protocol` codecs (and, from step 3, `DescriptorCrypto` in the client-key role). The scenarios are
-the tests in `prodomo/tests/parity.rs`, because only a `prodomo` test is told where the binary is;
+the tests in `crates/prodomo/tests/parity.rs`, because only a `prodomo` test is told where the binary is;
 `inventory_rows_keep_the_rules` checks that every `ported` row names one of them. Each scenario asserts an expected server-to-client
 sequence taken from the legacy source. Transfers and cross-Channel features get scenarios with
 several clients.
@@ -1140,7 +1140,7 @@ owner should know about (178.5):
 - `i686-linux-gnu-g++-12` 12.4.0, used by the width probe, is installed on the current machine
   since ledger 680 (`apt install g++-12-i686-linux-gnu`, with the owner's yes).
 - `docker.io/library/rust:1.100.0-bookworm` (ledger 684) and `debian:bookworm-slim` (ledger 680)
-  were pulled for the `compose.yaml` image build, which fetches the locked crates inside its
+  were pulled for the `docker-compose.yml` image build, which fetches the locked crates inside its
   build stage.
 - The **database gate runs on the current machine** as of section 187: `postgres:18` (18.6) is
   already pulled, so a Podman container on `127.0.0.1:55432` and an exported `DATABASE_URL` are
@@ -1154,32 +1154,32 @@ Take these on when a step touches the code. The counts were measured again at le
 
 - **Duplication.** 172 `pub enum ...Error` types (62), 41 `check_exact` functions (42), and 18
   little-endian reader functions by name (37, by a pattern the ledger does not give). `TItemPos`
-  is defined twice (`protocol/src/lib.rs:608`, `common/src/tables.rs:393`) beside `ItemPos`
-  (`protocol/src/item_pos.rs:143`), and `TSimplePlayer`, `TQuickslot` and `TPlayerSkill` twice
+  is defined twice (`crates/protocol/src/lib.rs:608`, `crates/common/src/tables.rs:393`) beside `ItemPos`
+  (`crates/protocol/src/item_pos.rs:143`), and `TSimplePlayer`, `TQuickslot` and `TPlayerSkill` twice
   each. There are 4 phase enums, all in `prodomo`; the duplicate `ServerState` is gone. A shared
   `wire` reader and writer, one `CodecError`, a `FixedRecord` trait, and a `CgPacket` enum for
   dispatch would remove most of it.
-- **Stale slot constants in `common/src/constants.rs`** (found in ledger 210, still there).
+- **Stale slot constants in `crates/common/src/constants.rs`** (found in ledger 210, still there).
   `INVENTORY_MAX_NUM` is 90 there, `DRAGON_SOUL_EQUIP_SLOT_START` 154,
   `BELT_INVENTORY_SLOT_START` 184 and `INVENTORY_AND_EQUIP_SLOT_MAX` 200: the values without
   `ENABLE_EXTEND_INVEN_SYSTEM` and `ENABLE_CUSTOM_INVENTORY`. The measured values are in
   `common::item_slots` (180, 244, 274 and 1370), which is what every user imports; nothing reads
   the stale copies. Remove them.
-- **`common/src/tables.rs`** declares 72 `repr(C, packed)` structs. Do not size wire records from
+- **`crates/common/src/tables.rs`** declares 72 `repr(C, packed)` structs. Do not size wire records from
   them.
-- **Silent data loss:** `bytes_to_str` (`protocol/src/lib.rs:647`) returns `""` on invalid UTF-8.
+- **Silent data loss:** `bytes_to_str` (`crates/protocol/src/lib.rs:647`) returns `""` on invalid UTF-8.
   Legacy names are raw bytes, so this hides data rather than rejecting it.
-- **Panic points in non-test code.** `common/src/logging.rs:64` panics if the log directory cannot be
+- **Panic points in non-test code.** `crates/common/src/logging.rs:64` panics if the log directory cannot be
   created. The rest are invariant panics that cannot fire today: 8 `.expect` calls in
-  `protocol/src/cg_account.rs`, and one each at `protocol/src/cg_attack.rs:134` and
-  `prodomo/src/sync_position.rs:303`.
+  `crates/protocol/src/cg_account.rs`, and one each at `crates/protocol/src/cg_attack.rs:134` and
+  `crates/prodomo/src/sync_position.rs:303`.
 - **`#[allow]` is banned** (`AGENTS.md`: "Fix Clippy findings by refactoring, never by
   `#[allow]`"), and **132 of them are checked in** (133 until ledger 684 removed a doubled one);
   there were 59 at ledger 210, so 74 were added after the rule. By lint: 38
   `clippy::too_many_arguments`, 27 `clippy::cast_possible_truncation`, 14 `dead_code`, 12
-  `clippy::too_many_lines`. By file: 14 each in `protocol/src/gc_actors.rs` and
-  `gamedata/src/records.rs`, 12 in `gamedata/src/renewal_shop.rs`, 10 in
-  `prodomo/src/game_state/quests.rs`, 9 in `world/src/character/drop_item.rs`. Most of the
+  `clippy::too_many_lines`. By file: 14 each in `crates/protocol/src/gc_actors.rs` and
+  `crates/gamedata/src/records.rs`, 12 in `crates/gamedata/src/renewal_shop.rs`, 10 in
+  `crates/prodomo/src/game_state/quests.rs`, 9 in `crates/world/src/character/drop_item.rs`. Most of the
   argument counts take a wire struct field by field, so a builder that takes the struct would
   remove them and the field-by-field constructor duplication of the first bullet at once. A new
   one is a violation: the count in a section's receipt may not rise. Remove the old ones when a

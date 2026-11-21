@@ -31,8 +31,8 @@ game_tables = "legacy/sql/gamedata"
 
 [store]
 # PostgreSQL 18. The password in this URL is never logged. No connection is opened until the
-# first query. This address is the README's Podman container; under `compose.yaml` the host is
-# `postgres` and the port 5432: postgres://prodomo:CHANGE-ME@postgres:5432/prodomo
+# first query. This address is the README's local container; under `docker-compose.yml` the host
+# is `postgres` and the port 5432: postgres://prodomo:CHANGE-ME@postgres:5432/prodomo
 url = "postgres://prodomo:CHANGE-ME@127.0.0.1:55432/prodomo"
 max_connections = 8
 

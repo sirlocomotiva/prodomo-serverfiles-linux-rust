@@ -1,24 +1,16 @@
-# The `prodomo` server image for `compose.yaml`.
+# The `prodomo` server image for `docker-compose.yml`.
 #
 # The build stage compiles the one binary from the tracked lockfile. It fetches the locked crates
 # from crates.io, so the build needs the network once; nothing is fetched at run time.
 #
-# The legacy Game data is not in the image: `compose.yaml` mounts `legacy/` read-only, as the
+# The legacy Game data is not in the image: `docker-compose.yml` mounts `legacy/` read-only, as the
 # server reads it in place and never writes it.
 
 # The tag is the compiler `rust-toolchain.toml` pins; change both together.
 FROM docker.io/library/rust:1.100.0-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY protocol protocol
-COPY common common
-COPY net net
-COPY db db
-COPY gamedata gamedata
-COPY world world
-COPY quest quest
-COPY prodomo prodomo
-COPY parity parity
+COPY crates crates
 RUN cargo build --release --locked -p prodomo --bin prodomo
 
 FROM docker.io/library/debian:bookworm-slim

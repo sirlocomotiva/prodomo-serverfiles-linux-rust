@@ -12,7 +12,7 @@ file's test module, is replaced by `new`. Each mutant prints one line:
 A survivor is a wrong line no test notices: write the test, or show the mutant is equivalent
 and test the real defect it stands for (AGENTS.md, "VERIFICATION AND SEARCH RULES").
 
-ROOT must be a copy of the tree with `legacy/` and `.scratch/parity/` in it, never the tree
+ROOT must be a copy of the tree with `legacy/` and `docs/parity/` in it, never the tree
 you work in: the sweep rewrites source files in place, and although it restores each one by
 checksum, a sweep that is killed leaves a mutated file behind.
 
@@ -43,7 +43,7 @@ with open(sys.argv[1], encoding="utf-8") as source:
     exec(source.read(), scope)
 mutants = scope["mutants"]
 os.chdir(os.environ["ROOT"])
-assert os.path.isdir(".scratch/parity"), "ROOT has no .scratch/parity, so every scenario run fails"
+assert os.path.isdir("docs/parity"), "ROOT has no docs/parity, so every scenario run fails"
 assert os.path.isdir("legacy"), "ROOT has no legacy/, so no server starts"
 
 only = os.environ.get("ONLY")
@@ -63,8 +63,9 @@ DB = ["cargo", "test", "-p", "db"] + BASE
 PROTOCOL = ["cargo", "test", "-p", "protocol"] + BASE
 NET = ["cargo", "test", "-p", "net"] + BASE
 PARITY = ["cargo", "test", "-p", "parity"] + BASE
-BY_CRATE = (("world/", WORLD), ("common/", COMMON), ("gamedata/", GAMEDATA), ("quest/", QUEST),
-            ("db/", DB), ("protocol/", PROTOCOL), ("net/", NET), ("parity/", PARITY))
+BY_CRATE = (("crates/world/", WORLD), ("crates/common/", COMMON), ("crates/gamedata/", GAMEDATA),
+            ("crates/quest/", QUEST), ("crates/db/", DB), ("crates/protocol/", PROTOCOL),
+            ("crates/net/", NET), ("crates/parity/", PARITY))
 PRODOMO_LIB = ["cargo", "test", "-p", "prodomo", "--lib"] + BASE
 # The binary's own unit tests (`main.rs`'s test module), which `--lib` does not build.
 PRODOMO_BIN = ["cargo", "test", "-p", "prodomo", "--bin", "prodomo"] + BASE
@@ -94,7 +95,7 @@ def tests_start(text):
 def suites(path):
     """The cheapest suite that could notice a change in `path` first, the scenarios last."""
     runs = [suite for crate, suite in BY_CRATE if path.startswith(crate)]
-    if path == "prodomo/src/main.rs":
+    if path == "crates/prodomo/src/main.rs":
         runs.append(PRODOMO_BIN)
     return runs + [PRODOMO_LIB, SCENARIOS]
 

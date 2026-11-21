@@ -115,7 +115,13 @@ mapfile -t servers < <(pgrep -a -f -- "--config $tmp/")
 left servers "${#servers[@]}" "${servers[@]}"
 
 # The test server of AGENTS.md ("AGENT RUNTIME ENVIRONMENT"); `psql` is only in its container.
-if listed=$(podman exec prodomo-pg18 psql -U prodomo -d prodomo -Atc \
+container_cli=""
+if command -v podman >/dev/null 2>&1 && podman ps --format '{{.Names}}' 2>/dev/null | grep -qx prodomo-pg18; then
+    container_cli="podman"
+elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx prodomo-pg18; then
+    container_cli="docker"
+fi
+if [ -n "$container_cli" ] && listed=$("$container_cli" exec prodomo-pg18 psql -U prodomo -d prodomo -Atc \
     "SELECT datname FROM pg_database WHERE datname ~ '^prodomo_(test|proc|async)_' ORDER BY 1" \
     2> /dev/null); then
     dbs=()
@@ -127,14 +133,13 @@ else
     say "scratch-dbs: not checked (no prodomo-pg18 container answered)"
 fi
 
-mapfile -t cores < <(find . \( -path ./target -o -path ./.git -o -path ./.overlord -o -path ./.scratch/tmp \) \
+mapfile -t cores < <(find . \( -path ./target -o -path ./.git -o -path ./.overlord -o -path ./.tmp \) \
     -prune -o -name '*.core' -print)
 left cores "${#cores[@]}" "${cores[@]}"
 
 # `#[allow]` is banned (AGENTS.md, "BUILD AND TEST"); the ones checked in are debt
 # (docs/STATUS.md, "Code-quality backlog"), and this count may not rise.
-say "allows: $(command grep -a -r -E '#!?\[allow\(' --include='*.rs' \
-    protocol common net db gamedata world quest prodomo parity | wc -l)"
+say "allows: $(command grep -a -r -E '#!?\[allow\(' --include='*.rs' crates | wc -l)"
 
 if [ "$failed" -ne 0 ]; then
     say "result: FAILED"

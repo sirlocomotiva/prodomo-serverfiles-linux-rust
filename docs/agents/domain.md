@@ -18,8 +18,8 @@ Single-context: one glossary and one ADR directory cover the whole Cargo workspa
 ├── CONTEXT.md
 ├── docs/adr/
 │   └── 0001-<decision>.md
-├── protocol/  common/  net/  db/  gamedata/  world/  quest/
-└── prodomo/
+└── crates/
+    └── protocol/  common/  net/  db/  gamedata/  world/  quest/  prodomo/  parity/
 ```
 
 ## Existing project docs

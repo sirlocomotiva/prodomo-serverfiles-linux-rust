@@ -2,7 +2,7 @@
 
 This script is the owner's checklist for running the unmodified Prodomo 5.4 Reference client
 against the Rust `prodomo` server. Every Parity inventory row is closed under the scripted client
-(`prodomo/tests/parity.rs`), and Packages A–C are done; this script verifies the remaining
+(`crates/prodomo/tests/parity.rs`), and Packages A–C are done; this script verifies the remaining
 client-only behaviours and establishes baseline parity with the real client binary.
 
 ## 0. Start the server and prepare test accounts
@@ -10,8 +10,8 @@ client-only behaviours and establishes baseline parity with the real client bina
 Follow [`README.md`](../README.md) ("With Compose" or "From the source tree"):
 
 1. Set `[network].public_ip` in `prodomo.toml` to the IP the Reference client connects to.
-2. Start PostgreSQL 18 and `prodomo` (`podman compose up -d --build` or `cargo run --release -p prodomo -- --config prodomo.toml serve`).
-   - Note: `compose.yaml` was verified on Podman 5.4.2; a native Docker daemon run has not been executed on the development host. Never use `podman compose restart` (use `stop` then `up -d`).
+2. Start PostgreSQL 18 and `prodomo` (`docker compose up -d --build`, `podman compose up -d --build`, or `cargo run --release -p prodomo -- --config prodomo.toml serve`).
+   - Note: `docker-compose.yml` (formerly `compose.yaml`) was verified on Podman 5.4.2; a native Docker daemon run has not been executed on the development host. With Podman, never use `podman compose restart` (use `stop` then `up -d`).
 3. Create two accounts and grant one character GM authority (`test_server` ships `false`, ADR-0007):
    ```bash
    prodomo account create alice --delete-code 1234567
@@ -22,7 +22,7 @@ Follow [`README.md`](../README.md) ("With Compose" or "From the source tree"):
    - Auth: `30001`
    - Channel 1: `30003` (mark server `MARKADDR`: `30003`; `30005` also accepts Channel 1 clients)
    - Shared Channel (`30019`): do not add to `CHANNEL_DICT`; `GC_WARP` directs the client there.
-5. Tail the server log in a second terminal (`podman compose logs -f prodomo` or `tail -f log/*.log`).
+5. Tail the server log in a second terminal (`docker compose logs -f prodomo` or `tail -f log/*.log`).
 
 ---
 
